@@ -13,9 +13,9 @@ import urllib.error
 
 import numpy as np
 
-from . import params, tx as txmod, work
+from . import hd, params, tx as txmod, work
 from .chain import block_hash, make_genesis
-from .crypto import Key, WrongPassword, decrypt_secret, encrypt_secret, hhex, is_address
+from .crypto import Key, WrongPassword, canonical, decrypt_secret, encrypt_secret, hhex, is_address
 from .node import Node, http_get, http_post
 from .tx import make_tx
 
@@ -60,37 +60,74 @@ def ask_password(confirm: bool = False) -> str:
     return password
 
 
-def load_wallet(data: str) -> Key | None:
+def _read_wallet(data: str) -> dict | None:
     path = wallet_path(data)
     if not os.path.exists(path):
         return None
     with open(path) as f:
-        w = json.load(f)
-    if "secret" in w:
-        print("WARNING: this wallet is stored unencrypted. Create a new encrypted wallet and move your coins to it.",
-              file=sys.stderr)
-        return Key.from_hex(w["secret"])
+        return json.load(f)
+
+
+def _unencrypted_warning() -> None:
+    print("WARNING: this wallet is stored unencrypted. Create a new encrypted wallet and move your coins to it.",
+          file=sys.stderr)
+
+
+def wallet_phrase(w: dict) -> dict:
+    """{"phrase", "passphrase"} of a wallet made from a recovery phrase (asks for the password)."""
+    if "phrase" in w:
+        _unencrypted_warning()
+        return {"phrase": w["phrase"], "passphrase": w.get("passphrase", "")}
     try:
-        key = Key.from_hex(decrypt_secret(w["encrypted"], ask_password()))
+        return json.loads(bytes.fromhex(decrypt_secret(w["encrypted_phrase"], ask_password())))
     except WrongPassword:
         raise CliError("wrong wallet password") from None
+
+
+def load_wallet(data: str) -> Key | None:
+    w = _read_wallet(data)
+    if w is None:
+        return None
+    if "path" in w:                                   # made from a recovery phrase
+        secret = wallet_phrase(w)
+        key = hd.key_from_phrase(secret["phrase"], secret["passphrase"], w["path"])
+    elif "secret" in w:
+        _unencrypted_warning()
+        return Key.from_hex(w["secret"])
+    else:
+        try:
+            key = Key.from_hex(decrypt_secret(w["encrypted"], ask_password()))
+        except WrongPassword:
+            raise CliError("wrong wallet password") from None
     if key.address != w["address"]:
         raise CliError("wallet file is corrupt: the address does not match the key")
     return key
 
 
-def create_wallet(data: str, password: str | None) -> Key:
+def create_wallet(data: str, password: str | None, phrase: str | None = None, passphrase: str = "",
+                  account: int = 0) -> Key:
+    """A wallet whose key comes from a recovery phrase (a new one unless `phrase` is
+    given); the file keeps the phrase, encrypted with `password` unless it is None."""
     os.makedirs(data, exist_ok=True)
-    key = Key.generate()
-    record = {"address": key.address, "public_key": key.pub_hex}
+    phrase = hd.normalize_phrase(phrase) if phrase is not None else hd.new_phrase()
+    path = hd.account_path(account)
+    key = hd.key_from_phrase(phrase, passphrase, path)
+    record = {"address": key.address, "public_key": key.pub_hex, "path": path, "words": len(phrase.split())}
+    secret = {"phrase": phrase, "passphrase": passphrase}
     if password is None:
-        record["secret"] = key.secret_hex()
+        record.update(secret)
     else:
-        record["encrypted"] = encrypt_secret(key.secret_hex(), password)
+        record["encrypted_phrase"] = encrypt_secret(canonical(secret).hex(), password)
     fd = os.open(wallet_path(data), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as f:
         json.dump(record, f, indent=2)
     return key
+
+
+def print_phrase(phrase: str) -> None:
+    words = phrase.split()
+    for r in range(0, len(words), 4):              # in reading order: 1 2 3 4 / 5 6 7 8 ...
+        print("   " + "".join(f"{i + 1:>3}. {words[i]:<10}" for i in range(r, min(r + 4, len(words)))))
 
 
 def require_wallet(data: str) -> Key:
@@ -165,25 +202,68 @@ def load_int8(path: str) -> np.ndarray:
 
 # --- commands ------------------------------------------------------------------
 
+def _ask_passphrase(args) -> str:
+    if not args.passphrase:
+        return ""
+    if not sys.stdin.isatty():
+        raise CliError("--passphrase needs a terminal")
+    first = getpass.getpass("Passphrase (an extra word for the phrase; forget it and the coins are gone): ")
+    if args.action == "new" and getpass.getpass("Repeat the passphrase: ") != first:
+        raise CliError("passphrases do not match")
+    return first
+
+
+def _read_phrase() -> str:
+    if sys.stdin.isatty():
+        return getpass.getpass("Recovery phrase (the words, separated by spaces; input hidden): ")
+    return sys.stdin.readline()
+
+
 def cmd_wallet(args):
-    if args.action == "new":
+    if args.action in ("new", "restore"):
         if os.path.exists(wallet_path(args.data)):
             raise CliError(f"{wallet_path(args.data)} already exists; not overwriting it.")
-        password = None if args.no_password else ask_password(confirm=True)
-        key = create_wallet(args.data, password)
-        print(f"New wallet created: {wallet_path(args.data)}")
-        print(f"Address: {key.address}")
-        if password is None:
-            print("WARNING: the wallet is NOT encrypted. Anyone who gets the file gets your coins. Test use only.")
+        if args.action == "restore":
+            try:
+                phrase = hd.normalize_phrase(_read_phrase())
+            except hd.BadPhrase as e:
+                raise CliError(f"that phrase cannot be used: {e}") from None
         else:
-            print("The secret key is encrypted with your password (scrypt + AES-256-GCM).")
-        print("Back up this file and your password: lose both and your coins are gone forever.")
+            phrase = hd.new_phrase(args.words)
+        passphrase = _ask_passphrase(args)
+        password = None if args.no_password else ask_password(confirm=True)
+        key = create_wallet(args.data, password, phrase, passphrase, args.account)
+        print(f"{'Restored' if args.action == 'restore' else 'New'} wallet: {wallet_path(args.data)}")
+        print(f"Address: {key.address}   (account {args.account}, path {hd.account_path(args.account)})")
+        if args.action == "new":
+            print(f"\nRecovery phrase ({len(phrase.split())} words). Write it on paper, in order, and keep it "
+                  f"offline.\nWith it the wallet can be restored anywhere (grn wallet restore), even without this "
+                  f"file or its password.\nAnyone who sees it can take your coins; nobody, not even Green's "
+                  f"developers, can recover it for you.\n")
+            print_phrase(phrase)
+            print("\n(`grn wallet phrase` shows it again.)")
+        if password is None:
+            print("WARNING: the wallet file is NOT encrypted. Anyone who gets the file gets your coins. Test use only.")
+        else:
+            print("The wallet file is encrypted with your password (scrypt + AES-256-GCM).")
+    elif args.action == "phrase":
+        w = _read_wallet(args.data)
+        if w is None:
+            raise CliError(f"no wallet in '{args.data}'")
+        if "path" not in w:
+            raise CliError("this wallet was made before recovery phrases (v0.14). Create a new wallet in another "
+                           "folder and move the coins to it: then a phrase restores it.")
+        secret = wallet_phrase(w)
+        print(f"Recovery phrase for {w['address']} (path {w['path']}"
+              f"{', with a passphrase' if secret['passphrase'] else ''}). Keep it secret:\n")
+        print_phrase(secret["phrase"])
     else:
         print(f"Address    : {wallet_address(args.data)}")
-        with open(wallet_path(args.data)) as f:
-            pub = json.load(f).get("public_key")
-        if pub:
-            print(f"Public key : {pub}   (give this to co-signers of a multisig account)")
+        w = _read_wallet(args.data)
+        if w.get("public_key"):
+            print(f"Public key : {w['public_key']}   (give this to co-signers of a multisig account)")
+        print(f"Recovery   : {w['words']}-word phrase, path {w['path']} (grn wallet phrase)" if "path" in w else
+              "Recovery   : none (an older wallet: back up the file, or move the coins to a new wallet)")
 
 
 def cmd_multisig(args):
@@ -268,7 +348,8 @@ def cmd_node(args):
     node = Node(args.data, genesis, port=args.port, host=args.host, peers=args.peer, miner_key=key, log=log,
                 debug=logger.debug if logger.isEnabledFor(logging.DEBUG) else None,
                 use_gpu=args.gpu, p2p_port=args.p2p_port, listen=not args.no_listen, fast_sync=args.fast_sync,
-                p2p_host=args.p2p_host, no_signal=args.no_signal, prune=args.prune, prune_keep=args.prune_keep)
+                p2p_host=args.p2p_host, no_signal=args.no_signal, prune=args.prune, prune_keep=args.prune_keep,
+                dandelion=not args.no_dandelion)
     node.start(mine=args.mine)
     pool = None
     if args.pool_port is not None:
@@ -316,7 +397,7 @@ def setup_logging(level: str, path: str | None) -> logging.Logger:
 CONFIG_KEYS = {"port": int, "host": str, "p2p_port": int, "p2p_host": str, "peer": list, "genesis": str,
                "mine": bool, "gpu": bool, "fast_sync": bool, "no_listen": bool, "no_signal": list,
                "report": (int, float), "log_level": str, "log_file": str, "prune": bool, "prune_keep": int,
-               "pool_port": int, "pool_host": str, "pool_fee": int}
+               "pool_port": int, "pool_host": str, "pool_fee": int, "no_dandelion": bool}
 
 
 def load_config(data: str) -> dict:
@@ -375,7 +456,8 @@ def cmd_pool_mine(args):
     try:
         miner.run()
     except KeyboardInterrupt:
-        print(f"Stopped: {miner.shares} shares accepted, {miner.blocks} blocks found, {miner.rejected} refused")
+        print(f"Stopped: {miner.shares} shares accepted, {miner.blocks} blocks found, "
+              f"{miner.useful} job units computed and paid for, {miner.rejected} refused")
 
 
 def cmd_fee(args):
@@ -812,9 +894,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--node", default=DEFAULT_NODE, help=f"node to talk to (default: {DEFAULT_NODE})")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    s = sub.add_parser("wallet", help="create / show the wallet")
-    s.add_argument("action", choices=["new", "show"])
+    s = sub.add_parser("wallet", help="create, restore or show the wallet")
+    s.add_argument("action", choices=["new", "restore", "show", "phrase"],
+                   help="new: a wallet with a recovery phrase; restore: from a phrase (read from the terminal or "
+                        "stdin); show: address and public key; phrase: show the recovery phrase")
     s.add_argument("--no-password", action="store_true", help="unencrypted wallet (testing only)")
+    s.add_argument("--words", type=int, default=24, choices=hd.WORD_COUNTS, help="phrase length for new (default 24)")
+    s.add_argument("--account", type=int, default=0, help="account number on the phrase (default 0)")
+    s.add_argument("--passphrase", action="store_true", help="add a passphrase to the phrase (asked for)")
     s.set_defaults(fn=cmd_wallet)
 
     s = sub.add_parser("genesis", help="start a new network: mine the genesis block")
@@ -829,6 +916,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--p2p-host", help="address the P2P port listens on (default: same as --host); "
                                       "e.g. 0.0.0.0 to be reachable by other nodes while the API stays local")
     s.add_argument("--no-listen", action="store_true", help="do not accept connections from other nodes")
+    s.add_argument("--no-dandelion", action="store_true",
+                   help="announce this node's transactions at once instead of passing them along a stem first "
+                        "(faster, but shows the network where they came from)")
     s.add_argument("--no-signal", action="append", default=[], metavar="DEPLOYMENT",
                    help="do not signal readiness for this rule change when mining (see: deployments)")
     s.add_argument("--fast-sync", action="store_true",

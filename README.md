@@ -13,6 +13,13 @@ A blockchain prototype where miners do AI work (integer matrix multiplication) i
 
 Production status of every area, with evidence and blockers: [PRODUCTION.md](PRODUCTION.md). How rules change: [UPGRADES.md](UPGRADES.md). Design and known limitations: [DESIGN.md](DESIGN.md). Protocol specification: [SPEC.md](SPEC.md). HTTP API: [API.md](API.md). Security reviews and fixes: [SECURITY.md](SECURITY.md). Release notes: [CHANGELOG.md](CHANGELOG.md).
 
+## What's new in v0.14
+
+- **Recovery phrases:** a wallet is 24 words you can write down (`python -m green wallet new`); `wallet restore` brings it back anywhere (BIP-39 with SLIP-0010 Ed25519 keys, the scheme hardware wallets use).
+- **Private by default:** your node's transactions take a Dandelion++ stem before anyone announces them, so the network cannot tell which node sent them.
+- **Compact blocks:** new blocks cross the network as a few kilobytes of short ids, rebuilt from each node's mempool.
+- **Pools do useful work:** pool miners compute AI jobs, and each batch pays the miners who computed it, in consensus. Neither block rewards nor job payments ever pass through the pool.
+
 ## What's new in v0.13
 
 - **Pools that never hold your coins:** a block can pay up to 32 miners by weight, so a pool's blocks pay its miners directly (`python -m green pool-mine --pool <url>`). Bitcoin's large pools are custodial; a Green pool cannot run off with rewards.
@@ -90,7 +97,7 @@ python -m venv .venv
 
 ## Mining the first blocks
 
-**1. Create a wallet.** It is encrypted with a password; back up the file and the password:
+**1. Create a wallet.** It shows a 24-word recovery phrase: write it on paper and keep it offline. The phrase alone restores the wallet on any machine (`python -m green wallet restore`); the wallet file itself is encrypted with a password:
 
 ```bash
 python -m green wallet new
@@ -194,7 +201,7 @@ A pool operator adds `--pool-port 8547 --pool-host 0.0.0.0` to its node. Miners 
 python -m green pool-mine --pool http://<pool host>:8547 --address <your address>
 ```
 
-Every block the pool finds pays the miners of its recent shares by weight, in the block itself; the pool keeps its fee (1% by default) and never holds anyone's coins.
+Every block the pool finds pays the miners of its recent shares by weight, in the block itself; the pool keeps its fee (1% by default) and never holds anyone's coins. When buyers have posted jobs, the pool also hands its miners units to compute; each batch of results pays the miners who computed it when it settles (the pool posts the bond from its own balance).
 
 ## Accounts that need several signatures
 
@@ -279,7 +286,7 @@ To be reachable by other computers while keeping the API private, listen on all 
 python -m pytest -q tests
 ```
 
-192 tests: consensus, difficulty, guarded accounts, security regressions, addresses, the fee market, the state engine and storage (restarts, crashes, reorgs across base moves, a differential check against full copies), the state commitment, snapshots and fast sync, rule changes by version bits, signed releases, multisignature accounts, pruning, the transaction index and the light client, non-custodial pools, transaction atomicity, the P2P protocol (encryption on the wire, identity pinning, relay, headers-first sync, and what happens to peers that lie or flood), the network (watchtowers, dispute answers and reorgs included), the GPU (if present), the WASM sandbox, both compute markets, neural-network inference and the autonomous agent. Two fuzz tests check conservation of money, the exact escrow of every job, the dispute backlog and transaction atomicity at every block, and every block any test builds checks its incremental state root against a full recomputation; mutation testing confirmed they catch injected accounting bugs. CI runs the suite on Linux, Windows and macOS ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
+214 tests: consensus, difficulty, guarded accounts, security regressions, addresses, the fee market, the state engine and storage (restarts, crashes, reorgs across base moves, a differential check against full copies), the state commitment, snapshots and fast sync, rule changes by version bits, signed releases, multisignature accounts, pruning, the transaction index and the light client, non-custodial pools, recovery phrases, Dandelion++ and compact blocks, transaction atomicity, the P2P protocol (encryption on the wire, identity pinning, relay, headers-first sync, and what happens to peers that lie or flood), the network (watchtowers, dispute answers and reorgs included), the GPU (if present), the WASM sandbox, both compute markets, neural-network inference and the autonomous agent. Two fuzz tests check conservation of money, the exact escrow of every job, the dispute backlog and transaction atomicity at every block, and every block any test builds checks its incremental state root against a full recomputation; mutation testing confirmed they catch injected accounting bugs. CI runs the suite on Linux, Windows and macOS ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
 ## Project layout
 
@@ -301,7 +308,8 @@ python -m pytest -q tests
 | `green/release.py` | Signed releases: SHA256SUMS, maintainer signatures, verification |
 | `green/prune.py` | Pruned nodes: which data is still in use, two-phase collection of the rest |
 | `green/light.py` | Light client: verified headers and payment proofs without a full node |
-| `green/pool.py` | Non-custodial mining pool (server and miner) |
+| `green/pool.py` | Non-custodial mining pool (server and miner); pool miners compute jobs and are paid per unit |
+| `green/hd.py` | Recovery phrases (BIP-39) and key derivation (SLIP-0010 Ed25519) |
 | `UPGRADES.md` | How Green changes its rules and ships releases |
 | `OPERATIONS.md` | Running a node: settings, service, monitoring, backup, upgrades |
 | `contrib/` | systemd unit and Prometheus alert rules |

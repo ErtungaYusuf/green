@@ -19,9 +19,22 @@ on first contact (the session id can be compared out of band).
 Relay. Transactions and blocks are announced by hash (`inv`) and fetched only
 by peers that lack them (`getdata`), so each crosses each link at most once.
 Transaction announcements are batched per peer at random (exponential)
-intervals, which makes it hard to find the node a transaction came from;
-blocks are announced at once. Two of the outbound slots relay blocks only,
-which hides them from transaction-based topology probing.
+intervals. Two of the outbound slots relay blocks only, which hides them from
+transaction-based topology probing.
+
+Origin privacy (Dandelion++). A node's own transactions are not announced: they
+travel a "stem" of single hops (`dtx`) to one outbound peer after another, and
+only a node that is a diffuser for the current epoch (or has nowhere to pass
+it) announces it normally. An observer that sees the announcement learns where
+the stem ended, not where it began. Stem routes are fixed per epoch and per
+incoming link, stem transactions are kept apart from the mempool and never
+served to `getdata`, and every node on a stem diffuses the transaction itself
+if it has not seen it announced when its random embargo timer runs out.
+
+Compact blocks. A new block goes to peers as its header plus 6-byte ids of its
+transactions, salted per message (`cmpct`); a peer rebuilds it from its own
+mempool and asks only for what it lacks (`getblocktxn`/`blocktxn`). Block
+propagation then costs a few kilobytes and, usually, no round trip.
 
 Sync. Headers come first (`getheaders`/`headers`, block locators); each one is
 checked against every header rule except its work unit, and a random sample
@@ -38,6 +51,7 @@ message queue and send queue are bounded, and peers that send invalid blocks
 or headers are banned.
 """
 
+import hashlib
 import ipaddress
 import json
 import os
@@ -60,11 +74,11 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF, HKDFExpand
 
 from . import params, snapshot, tx as txmod
 from .chain import MAX_JOB_BLOB, InvalidBlock, MissingData, block_hash, target_of, work_for_target
-from .crypto import canonical, hhex, is_hex
+from .crypto import canonical, hhex, is_hex, merkle_root
 from .tx import InvalidTx
 
 PROTOCOL_VERSION = 1
-AGENT = "green/0.13.0"
+AGENT = "green/0.14.0"
 
 MAX_OUTBOUND = 8               # outbound connections the node keeps
 BLOCK_RELAY_ONLY = 2           # ...of which relay blocks only
@@ -105,9 +119,18 @@ ADDR_PER_SOURCE = 64           # new addresses kept from one source network grou
 RETRY_SECONDS = 60             # do not redial an address sooner than this
 BLOB_UPLOAD_PER_MINUTE = 256 * 1024 * 1024
 WORKERS = 8                    # message-processing threads
+DANDELION_EPOCH_SECONDS = 600  # stem routes are redrawn this often
+DANDELION_FLUFF_PROB = 0.1     # chance per epoch that a node diffuses the stem transactions it is passed
+DANDELION_DESTINATIONS = 2     # outbound peers that carry stem transactions
+EMBARGO_SECONDS = 15           # a stem transaction not seen announced by then (plus a random delay)...
+EMBARGO_MEAN_EXTRA = 5         # ...is announced by this node itself
+MAX_STEMPOOL = 1000
+SHORT_ID_BYTES = 6
+FEATURES = ["dtx", "cmpct"]    # optional messages this node understands (peers without them get inv/tx)
 
 CMDS = ["version", "ping", "pong", "getaddr", "addr", "inv", "getdata", "notfound", "tx", "block",
-        "getheaders", "headers", "getblob", "blob", "noblob", "getmempool", "getsnapinfo", "snapinfo"]
+        "getheaders", "headers", "getblob", "blob", "noblob", "getmempool", "getsnapinfo", "snapinfo",
+        "dtx", "cmpct", "getblocktxn", "blocktxn"]
 CODE = {name: i + 1 for i, name in enumerate(CMDS)}
 NAME = {i: name for name, i in CODE.items()}
 
@@ -406,6 +429,16 @@ def pub_hex(key: Ed25519PrivateKey) -> str:
     return key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
 
 
+def short_id(key: bytes, tid: str) -> str:
+    return hashlib.blake2b(bytes.fromhex(tid), key=key, digest_size=SHORT_ID_BYTES).hexdigest()
+
+
+def compact_key(bh: str, salt: str) -> bytes:
+    """Short ids are keyed by the block and a fresh salt per message, so nobody can
+    craft transactions whose ids collide in advance."""
+    return bytes.fromhex(bh) + bytes.fromhex(salt)
+
+
 def encode(cmd: str, payload) -> bytes:
     if cmd == "blob":
         return bytes([CODE[cmd]]) + payload
@@ -426,6 +459,7 @@ class Peer:
         self.session_id = b""
         self.agent = ""
         self.relay = True                            # they want transaction announcements
+        self.features: set = set()                   # optional messages they understand (FEATURES)
         self.best_height = 0
         self.best_work = 0
         self.first_block = 0                         # lowest height it has block bodies for
@@ -473,7 +507,8 @@ class Peer:
                 "block_only": self.block_only or not self.relay, "agent": self.agent,
                 "height": self.best_height, "ping_ms": self.ping_ms,
                 "session": self.session_id.hex()[:16], "connected": int(time.time() - self.connected_at),
-                "bytes_in": self.bytes_in, "bytes_out": self.bytes_out, "score": self.score}
+                "bytes_in": self.bytes_in, "bytes_out": self.bytes_out, "score": self.score,
+                "features": sorted(self.features)}
 
     # -- sending --
 
@@ -580,6 +615,14 @@ class P2P:
         self.tx_wait: dict[str, dict] = {}         # txid -> {"peers": [...], "asked": peer, "deadline"}
         self.rejected = BoundedSet(50_000)         # transactions found invalid since the last block
         self._rejected_tip = None
+        # Dandelion++ (stempool guarded by node.lock, routes by self.lock)
+        self.stempool: OrderedDict[str, dict] = OrderedDict()   # txid -> {"tx", "embargo", "local"}
+        self.stem_epoch = 0.0
+        self.stem_fluff = False
+        self.stem_dest: list[Peer] = []
+        self.stem_route: dict[str, Peer] = {}
+        # compact blocks waiting for missing transactions (guarded by node.lock)
+        self.partial: dict[str, dict] = {}         # hash -> {"header", "txs", "missing", "peer", "time"}
         # headers-first sync (guarded by node.lock)
         self.hindex: dict[str, dict] = {}          # hash -> {"header", "work"}: checked, block not connected
         self.best = self.chain.tip                 # most-work header known (chain or index)
@@ -593,7 +636,9 @@ class P2P:
         self.snap_state = "waiting" if fast_sync else None
         self.verify_pool = ThreadPoolExecutor(VERIFY_THREADS, thread_name_prefix="verify")
         self.stats = {"blocks_relayed": 0, "txs_relayed": 0, "headers_received": 0, "blocks_downloaded": 0,
-                      "work_samples": 0, "prechecked": 0, "banned": 0}
+                      "work_samples": 0, "prechecked": 0, "banned": 0, "stem_relayed": 0, "stem_fluffed": 0,
+                      "embargo_fired": 0, "cmpct_sent": 0, "cmpct_received": 0, "cmpct_rebuilt": 0,
+                      "cmpct_txs_requested": 0, "cmpct_fallbacks": 0}
         for text in peers:
             self.add_manual(text)
 
@@ -649,7 +694,7 @@ class P2P:
                 "inbound": sum(p.inbound for p in peers), "outbound": sum(not p.inbound for p in peers),
                 "known_addresses": len(self.addrman), "headers_ahead": len(self.hindex),
                 "best_header_height": self._height_of(self.best), "blocks_in_flight": len(self.requested),
-                "fast_sync": self.snap_state, "stats": dict(self.stats)}
+                "fast_sync": self.snap_state, "stempool": len(self.stempool), "stats": dict(self.stats)}
 
     # -- bans --
 
@@ -833,7 +878,7 @@ class P2P:
             mine = {"proto": PROTOCOL_VERSION, "agent": AGENT, "id": self.node_id, "sig": sig,
                     "port": self.port if self.listen else 0, "relay": not block_only,
                     "height": height, "tip": tip, "work": str(work), "you": host, "time": int(time.time()),
-                    "first": self.chain.first_block}
+                    "first": self.chain.first_block, "features": FEATURES}
             sock.sendall(peer.send_cipher.seal(encode("version", mine)))
             deadline = time.time() + HANDSHAKE_SECONDS
             length = peer.recv_cipher.open_length(_recv_exact(sock, 20, deadline))
@@ -885,6 +930,9 @@ class P2P:
         peer.listen_port = port if isinstance(port, int) and 0 <= port < 65536 else 0
         peer.agent = str(v.get("agent", ""))[:64]
         peer.relay = bool(v.get("relay", True))
+        features = v.get("features")
+        if isinstance(features, list) and len(features) <= 32:
+            peer.features = {f for f in features if isinstance(f, str) and f in FEATURES}
         peer.best_height = v["height"] if isinstance(v.get("height"), int) else 0
         peer.first_block = v["first"] if isinstance(v.get("first"), int) and v["first"] >= 0 else 0
         try:
@@ -941,6 +989,8 @@ class P2P:
             for bh in list(peer.inflight_blocks):
                 if self.requested.get(bh, (None,))[0] is peer:
                     del self.requested[bh]
+            for bh in [h for h, p in self.partial.items() if p["peer"] is peer]:
+                del self.partial[bh]
             for tid, w in list(self.tx_wait.items()):
                 if peer in w["peers"]:
                     w["peers"].remove(peer)
@@ -1064,11 +1114,214 @@ class P2P:
                 p.trickle.append(tid)
 
     def announce_block(self, bh: str, source: Peer | None = None) -> None:
+        """Peers that speak compact blocks get the block at once as its header and
+        short transaction ids; the others get an inv and fetch it."""
         self.stats["blocks_relayed"] += 1
+        block = None
         for p in self.all_peers():
-            if p is not source and bh not in p.known:
-                p.known.add(bh)
-                p.send("inv", {"items": [["block", bh]]})
+            if p is source or bh in p.known:
+                continue
+            p.known.add(bh)
+            if "cmpct" in p.features:
+                block = block or self.chain.block(bh)
+                if block is not None:
+                    p.send("cmpct", self._compact(block, p))
+                    self.stats["cmpct_sent"] += 1
+                    continue
+            p.send("inv", {"items": [["block", bh]]})
+
+    def _compact(self, block: dict, peer: Peer) -> dict:
+        """Transactions the peer has seen announced (either way) travel as short ids;
+        the rest, which it probably lacks, travel whole."""
+        salt = os.urandom(8).hex()
+        key = compact_key(block_hash(block), salt)
+        ids, fill = [], []
+        for i, t in enumerate(block["txs"]):
+            tid = txmod.txid(t)
+            if tid in peer.known:
+                ids.append(short_id(key, tid))
+            else:
+                fill.append([i, t])
+        return {"header": block["header"], "salt": salt, "ids": ids, "fill": fill}
+
+    def _on_cmpct(self, peer: Peer, m: dict) -> None:
+        hdr, salt, ids, fill = m["header"], m["salt"], m["ids"], m["fill"]
+        if not (isinstance(hdr, dict) and is_hex(salt, 16) and isinstance(ids, list) and isinstance(fill, list)
+                and len(ids) + len(fill) <= params.MAX_BLOCK_TXS
+                and all(is_hex(s, 2 * SHORT_ID_BYTES) for s in ids)):
+            raise Misbehaving(20, "malformed compact block")
+        try:
+            bh = block_hash({"header": hdr})
+        except (TypeError, ValueError):
+            raise Misbehaving(20, "unencodable compact block") from None
+        peer.known.add(bh)
+        peer.last_block = time.time()
+        n = len(ids) + len(fill)
+        txs: list = [None] * n
+        for item in fill:
+            if not (isinstance(item, list) and len(item) == 2 and type(item[0]) is int and 0 <= item[0] < n
+                    and txs[item[0]] is None and isinstance(item[1], dict)):
+                raise Misbehaving(20, "malformed compact block")
+            txs[item[0]] = item[1]
+        self.stats["cmpct_received"] += 1
+        with self.node.lock:
+            if self.chain.has_block(bh) or bh in self.chain.invalid or bh in self.partial or bh in self.downloaded:
+                return
+            orphan = hdr.get("prev") not in self.chain.blocks
+            if not orphan:
+                key = compact_key(bh, salt)
+                pool: dict[str, tuple] = {}
+                clash = set()
+                for tid, t in list(self.node.mempool.items()) + [(k, e["tx"]) for k, e in self.stempool.items()]:
+                    sid = short_id(key, tid)
+                    if sid in pool and pool[sid][0] != tid:
+                        clash.add(sid)
+                    pool[sid] = (tid, t)
+        if orphan:
+            self.on_orphan(peer)                     # fetch the headers that lead to it
+            return
+        missing = []
+        slots = iter(ids)
+        for i in range(n):
+            if txs[i] is None:
+                sid = next(slots)
+                if sid in pool and sid not in clash:
+                    txs[i] = pool[sid][1]
+                else:
+                    missing.append(i)
+        if missing:
+            with self.node.lock:
+                self.partial[bh] = {"header": hdr, "txs": txs, "missing": missing, "peer": peer,
+                                    "time": time.time()}
+            self.stats["cmpct_txs_requested"] += len(missing)
+            peer.send("getblocktxn", {"block": bh, "idx": missing})
+            return
+        self._complete(bh, hdr, txs, peer)
+
+    def _complete(self, bh: str, hdr: dict, txs: list, peer: Peer) -> None:
+        try:
+            ok = merkle_root([txmod.txid(t) for t in txs]) == hdr.get("tx_root")
+        except (TypeError, ValueError, KeyError):
+            ok = False
+        if not ok:
+            # A short-id collision picked the wrong transaction, or the message carried a
+            # bad one: neither proves the block wrong, so fetch the block itself.
+            self.stats["cmpct_fallbacks"] += 1
+            with self.node.lock:
+                self.requested[bh] = (peer, time.time())
+                peer.inflight_blocks[bh] = time.time()
+            peer.send("getdata", {"items": [["block", bh]]})
+            return
+        self.stats["cmpct_rebuilt"] += 1
+        self._submit({"header": hdr, "txs": txs}, peer)
+
+    def _on_getblocktxn(self, peer: Peer, m: dict) -> None:
+        bh, idx = m["block"], m["idx"]
+        block = self.chain.block(bh) if is_hex(bh, 64) else None
+        if block is None:
+            peer.send("notfound", {"items": [["block", bh]]})
+            return
+        count = len(block["txs"])
+        if not isinstance(idx, list) or len(idx) > count or not all(type(i) is int and 0 <= i < count for i in idx):
+            raise Misbehaving(20, "malformed getblocktxn")
+        peer.send("blocktxn", {"block": bh, "txs": [block["txs"][i] for i in idx]})
+
+    def _on_blocktxn(self, peer: Peer, m: dict) -> None:
+        bh, got = m["block"], m["txs"]
+        with self.node.lock:
+            p = self.partial.get(bh)
+            if p is None or p["peer"] is not peer:
+                return                               # late (we gave up on it) or never asked
+            del self.partial[bh]
+        if not isinstance(got, list) or len(got) != len(p["missing"]) or not all(isinstance(t, dict) for t in got):
+            raise Misbehaving(20, "malformed blocktxn")
+        txs = p["txs"]
+        for i, t in zip(p["missing"], got):
+            txs[i] = t
+        self._complete(bh, p["header"], txs, peer)
+
+    # -- Dandelion++: our transactions do not reveal where they came from --
+
+    def _stem_target(self, source: Peer | None) -> Peer | None:
+        """The outbound peer a stem transaction goes to next, or None to announce it here.
+
+        Each epoch the node draws DANDELION_DESTINATIONS outbound peers and, with
+        probability DANDELION_FLUFF_PROB, becomes a diffuser for the whole epoch.
+        Each incoming link (and the node's own transactions) maps to one
+        destination for the epoch, so the stem graph does not change from one
+        transaction to the next: Dandelion++'s defence against linking a user's
+        transactions by intersecting their paths."""
+        now = time.time()
+        with self.lock:
+            if now >= self.stem_epoch:
+                self.stem_epoch = now + DANDELION_EPOCH_SECONDS
+                self.stem_fluff = random.random() < DANDELION_FLUFF_PROB
+                self.stem_dest, self.stem_route = [], {}
+            if source is not None and self.stem_fluff:
+                return None
+            alive = [p for p in self.stem_dest if p.alive]
+            if len(alive) < DANDELION_DESTINATIONS:
+                eligible = [p for p in self.peers.values() if not p.inbound and not p.block_only and p.relay
+                            and p.alive and "dtx" in p.features and p not in alive]
+                alive += random.sample(eligible, min(DANDELION_DESTINATIONS - len(alive), len(eligible)))
+                self.stem_route = {k: v for k, v in self.stem_route.items() if v in alive}
+            self.stem_dest = alive
+            key = source.node_id if source is not None else ""
+            dest = self.stem_route.get(key)
+            if dest is None:
+                choices = [p for p in alive if p is not source]
+                if not choices:
+                    return None
+                dest = self.stem_route[key] = random.choice(choices)
+            return None if dest is source else dest
+
+    def stem_tx(self, t: dict, tid: str, source: Peer | None) -> bool:
+        """Pass a checked transaction one hop along the stem; False: announce it now."""
+        dest = self._stem_target(source)
+        if dest is None:
+            return False
+        with self.node.lock:
+            if tid not in self.stempool:
+                if len(self.stempool) >= MAX_STEMPOOL:
+                    return False
+                embargo = time.time() + EMBARGO_SECONDS + random.expovariate(1 / EMBARGO_MEAN_EXTRA)
+                self.stempool[tid] = {"tx": t, "embargo": embargo, "local": source is None}
+        self.stats["stem_relayed"] += 1
+        dest.send("dtx", {"tx": t})
+        return True
+
+    def _on_dtx(self, peer: Peer, m: dict) -> None:
+        t = m["tx"]
+        try:
+            tid = txmod.txid(t)
+        except (TypeError, ValueError, KeyError):
+            raise Misbehaving(20, "unencodable transaction") from None
+        if peer.block_only:
+            return
+        self._reset_rejected()
+        with self.node.lock:
+            if tid in self.node.mempool or tid in self.rejected:
+                return
+            looped = tid in self.stempool
+        if looped:                                   # the stem came back around: it ends here
+            self._fluff(tid)
+            return
+        try:
+            self.node.submit_tx(t, source=peer, stem=True)
+        except (InvalidTx, MissingData):
+            self.rejected.add(tid)                   # policy can differ between nodes: no penalty
+
+    def _fluff(self, tid: str, embargo: bool = False) -> None:
+        """End a stem here: announce the transaction like any other."""
+        with self.node.lock:
+            e = self.stempool.pop(tid, None)
+            if e is None or tid in self.node.mempool:
+                return
+        self.stats["embargo_fired" if embargo else "stem_fluffed"] += 1
+        try:
+            self.node.submit_tx(e["tx"], stem=False)
+        except (InvalidTx, MissingData):
+            pass                                     # mined meanwhile, or no longer valid
 
     def _trickle_loop(self) -> None:
         while self.running:
@@ -1149,6 +1402,8 @@ class P2P:
                     w = self.tx_wait[h]
                     w["peers"] = [p for p in w["peers"] if p is not peer]
                     w["asked"], w["deadline"] = None, 0.0
+                elif kind == "block" and self.partial.get(h, {}).get("peer") is peer:
+                    del self.partial[h]
                 elif kind == "block" and self.requested.get(h, (None,))[0] is peer:
                     del self.requested[h]
                     peer.inflight_blocks.pop(h, None)
@@ -1746,6 +2001,21 @@ class P2P:
                         stalled.add(p)
             self._prune_index()
             behind = [p for p in peers if p.alive and p.best_work > self._work_of(self.best) and not p.headers_asked]
+            # stems: announce what nobody announced before its embargo ran out
+            due = [tid for tid, e in self.stempool.items() if e["embargo"] <= now or tid in self.node.mempool]
+            # compact blocks whose missing transactions never came: fetch the whole block
+            refetch = []
+            for bh, p in list(self.partial.items()):
+                if now - p["time"] > BLOCK_REQUEST_SECONDS:
+                    del self.partial[bh]
+                    if p["peer"].alive and not self.chain.has_block(bh):
+                        self.requested[bh] = (p["peer"], now)
+                        p["peer"].inflight_blocks[bh] = now
+                        refetch.append((p["peer"], bh))
+        for tid in due:
+            self._fluff(tid, embargo=True)
+        for p, bh in refetch:
+            p.send("getdata", {"items": [["block", bh]]})
         for p, tids in retry_tx.values():
             p.send("getdata", {"items": [["tx", t] for t in tids]})
         for p in stalled:                            # the blocks go to other peers; repeat stalling is a ban

@@ -229,19 +229,12 @@ def valid_miner(miner) -> bool:
     entries sorted by address, addresses distinct, weights in 1..MAX_PAYEE_WEIGHT."""
     if isinstance(miner, str):
         return is_address(miner)
-    if not isinstance(miner, list) or not 2 <= len(miner) <= params.MAX_PAYEES:
-        return False
-    for entry in miner:
-        if not (isinstance(entry, list) and len(entry) == 2 and is_address(entry[0])
-                and _is_int(entry[1]) and 1 <= entry[1] <= params.MAX_PAYEE_WEIGHT):
-            return False
-    addrs = [a for a, _ in miner]
-    return addrs == sorted(set(addrs))
+    return txmod.is_payee_list(miner)
 
 
 def payouts(miner, total: int) -> list[tuple[str, int]]:
-    """How a block's reward and fees are split: by weight, rounded down, the
-    remainder to the first payee."""
+    """How a block's reward and fees (or a batch's payment) are split: by weight,
+    rounded down, the remainder to the first payee."""
     if isinstance(miner, str):
         return [(miner, total)]
     weight = sum(w for _, w in miner)
@@ -646,6 +639,8 @@ class Chain:
                                    "height": height, "expires": expires, "bond": bond,
                                    "status": "committed", "root": None, "manifest": None,
                                    "settle_at": None, "disputes": {}, "proven": set()}
+            if "payees" in tx:                       # the payment is shared; the bond stays the sender's
+                job["batches"][bid]["payees"] = tx["payees"]
             for u in units:
                 job["reserved"][txmod.unit_key(u)] = bid
             s.schedule(expires + 1, "expire", tx["job"], bid)
@@ -881,11 +876,15 @@ class Chain:
         batch = self._release(s, job, batch_id)
         pay = job["price"] * batch["count"]
         job["escrow"] -= pay
-        s.credit(batch["miner"], pay + batch["bond"])
+        for addr, amount in payouts(batch.get("payees", batch["miner"]), pay):
+            s.credit(addr, amount)
+        s.credit(batch["miner"], batch["bond"])
         for u in txmod.bitmap_units(batch["units"], job["dims"]):
             job["done"][txmod.unit_key(u)] = batch_id
         job["delivered"][batch_id] = {"miner": batch["miner"], "units": batch["units"], "count": batch["count"],
                                       "root": batch["root"], "manifest": batch["manifest"]}
+        if "payees" in batch:
+            job["delivered"][batch_id]["payees"] = batch["payees"]
 
     def _drop_batch(self, s: State, job: dict, batch_id: str) -> None:
         """A batch that will not be paid. Its units reopen, or if the job is

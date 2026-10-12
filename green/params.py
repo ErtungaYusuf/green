@@ -151,6 +151,11 @@ MAX_BLOCK_SIGS = 2000
 MAX_PAYEES = 32
 MAX_PAYEE_WEIGHT = 2**32
 
+# Wallets derive keys from a recovery phrase along m/44'/HD_COIN_TYPE'/account'
+# (green/hd.py). Provisional: a SLIP-0044 number is registered before a public
+# launch. Wallet files record their path, so changing it never moves a key.
+HD_COIN_TYPE = 7777
+
 DEFAULT_PORT = 8545               # HTTP API for wallets and tools
 DEFAULT_P2P_PORT = 8546           # encrypted node-to-node protocol (green/p2p.py)
 # Nodes to ask for addresses when the address book is empty. Filled in when a

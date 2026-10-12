@@ -1,4 +1,4 @@
-# Green node HTTP API (v0.13)
+# Green node HTTP API (v0.14)
 
 Every node serves this API on its port (default 8545, `127.0.0.1` unless started with `--host`). Requests and responses are JSON unless noted. Amounts are integers in yaprak (1 GRN = 10^8 yaprak). Errors come back as `{"error": "..."}` with status 400 (bad request or invalid transaction), 403 (admin endpoint called remotely), 404 (unknown), 409 (data the node does not have yet), 413 (too large) or 500.
 
@@ -13,7 +13,7 @@ This is the reference node's interface for wallets, tools and agents, not consen
 | `GET /block/<hash>` | the block `{"header": {...}, "txs": [...]}` (old blocks come from the store; 404 for blocks below the snapshot a fast-synced node started from) |
 | `GET /height/<n>` | the main-chain block at height n |
 | `GET /headers?from=<n>&count=<k>` | up to 2,000 main-chain headers from height n (light clients) |
-| `GET /tx/<txid>` | `status` (`pending` or `confirmed`), `tx`, and when confirmed `height`, `block`, `position`, `confirmations`, `pruned` (the body is gone on a pruned node) |
+| `GET /tx/<txid>` | `status` (`pending` or `confirmed`), `tx`, and when confirmed `height`, `block`, `position`, `confirmations`, `pruned` (the body is gone on a pruned node). A transaction this node is still passing along its Dandelion++ stem has `"relay": "stem"`; it reaches the mempool once announced (seconds) |
 | `GET /proof/tx/<txid>` | a Merkle proof that the transaction is in a main-chain block: `txid`, `block`, `height`, `index`, `count`, `proof`, `header`. Check it with `green.crypto.merkle_verify(txid, index, count, proof, header["tx_root"])`, or let `green.light.LightClient` do it against headers it verified itself |
 | `GET /address/<address>/history?limit=<n>&before=<height>` | what the address took part in, newest first: `items` (`height`, `position`, `role`: `sender`, `recipient`, `account`, `guardian` or `miner`; `type`; `txid`, or `block` for a block reward), `pending` (mempool), `next` (pass as `before` for the next page) |
 | `GET /fee?blocks=<n>` | fee estimate for inclusion within n blocks (default 2, at most 100): `fee_rate` (yaprak per byte, 0 when the minimum is enough), `transfer_fee` (for a typical transfer, at least `min_fee`), `min_fee`, `mempool` (transactions waiting), `basis` (`mempool`, `recent blocks` or `minimum`) |
@@ -26,9 +26,9 @@ This is the reference node's interface for wallets, tools and agents, not consen
 
 | Method and path | Returns |
 |---|---|
-| `GET /account/<address>` | `balance`, `nonce` (confirmed), `pending_balance`, `pending_nonce` (including the mempool; use `pending_nonce` for the next transaction), `guard` (null, or `guardian`, `limit`, `period`, `frozen`, `window`, `spent`, `spend_left`) |
+| `GET /account/<address>` | `balance`, `nonce` (confirmed), `pending_balance`, `pending_nonce` (including the mempool and this node's own transactions still on their stem; use `pending_nonce` for the next transaction), `guard` (null, or `guardian`, `limit`, `period`, `frozen`, `window`, `spent`, `spend_left`) |
 | `GET /mempool` | the pending transactions |
-| `POST /tx` | body: a signed transaction (SPEC.md §3). Returns `{"txid": ...}` or 400 with the reason. Data a transaction needs (job matrices, WASM programs, results) must have been uploaded or be fetchable from peers (409 otherwise) |
+| `POST /tx` | body: a signed transaction (SPEC.md §3). Returns `{"txid": ...}` or 400 with the reason. The node first passes it along a Dandelion++ stem (unless started with `--no-dandelion`), so for a few seconds it is not in the mempool of any node. Data a transaction needs (job matrices, WASM programs, results) must have been uploaded or be fetchable from peers (409 otherwise) |
 
 Transactions are built and signed client side: `green.tx.make_tx(key, chain_id, type, nonce, fee, **fields)`, with `chain_id` = `genesis` from `/status`. From a multisig account: `green.tx.make_multisig_tx(chain_id, k, keys, type, nonce, fee, **fields)`, then `green.tx.add_signature(tx, key, chain_id)` by k of the key holders; the account's address (`green.tx.multisig_address(k, keys)`) works with `/account` like any other. Minimum fees: `green.tx.min_fee(tx)`; `task_post` and `task_challenge` also pay for data and adjudication (`green.tx.task_post_fee`, `green.params.challenge_fee`).
 

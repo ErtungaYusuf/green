@@ -1,4 +1,4 @@
-# Green protocol specification (v0.13)
+# Green protocol specification (v0.14)
 
 This document defines the consensus rules of the Green network precisely enough to write an independent, compatible node. Where it and the reference implementation (`green/`) disagree, that is a bug in one of them. Constants are named as in `green/params.py`; their values are listed in §10.
 
@@ -18,7 +18,7 @@ Notation: `H(x)` is BLAKE2b with a 32-byte digest. `hex(x)` is lowercase hexadec
 
 ## 3. Transactions
 
-A transaction is a JSON object with exactly the common fields `type`, `pub`, `nonce`, `fee`, `sig` plus the fields of its type (§3.2); any other field set is invalid.
+A transaction is a JSON object with exactly the common fields `type`, `pub`, `nonce`, `fee`, `sig` plus the fields of its type (§3.2), and optionally the optional fields of its type; any other field set is invalid.
 
 - `txid = hex(H(C(tx)))`.
 - Signing: `sig = Ed25519(secret, C({"chain": chain_id, "tx": tx without "sig"}))`, 128 hex characters. `chain_id` is the genesis block hash, so a transaction is valid on one network only.
@@ -49,7 +49,7 @@ Units of a job with dimensions `(mu, ku, nu)` (in units) are triples `[i, l, j]`
 |---|---|---|
 | `transfer` | `to`, `amount` | `to` is an address, `amount >= 1`, balance ≥ amount + fee |
 | `job_post` | `job`, `dims`, `price` | `job` is a job blob hash that is not yet a job; `dims` 3 integers in `1..MAX_JOB_UNITS_PER_DIM` matching the blob; `price >= 1` per unit; locks `escrow = price · mu·ku·nu`; fee ≥ MIN_TX_FEE + DATA_FEE_PER_BYTE · blob size |
-| `job_commit` | `job`, `units`, `commitment` | job open and not cancelled; `units` a bitmap of units that are neither delivered nor reserved; `commitment` not already a batch id of this job (live or delivered); locks `bond = bond_for(price) · count`; creates batch `id = commitment`, status *committed*, `expires = height + RESERVE_BLOCKS`, and reserves its units |
+| `job_commit` | `job`, `units`, `commitment`; optional `payees` | job open and not cancelled; `units` a bitmap of units that are neither delivered nor reserved; `commitment` not already a batch id of this job (live or delivered); `payees`, if present, is `[[address, weight], ...]` in the form of a header's payee list (§5.1); locks `bond = bond_for(price) · count`; creates batch `id = commitment`, status *committed*, `expires = height + RESERVE_BLOCKS`, recording `payees` if present, and reserves its units |
 | `job_reveal` | `job`, `batch`, `root`, `manifest` | sender is the batch's miner; status *committed*; `batch.height < height <= expires`; `commitment == hex(H(C(["green-commit", sender, job, units, root])))`. Sets status *revealed*, `settle_at = height + JOB_CHALLENGE_BLOCKS`. `manifest` is an unverified hint |
 | `job_challenge` | `job`, `batch`, `units` | batch *revealed*; `height <= settle_at`; `units` a bitmap of the same length that is a subset of the batch's; none of them disputed or proven; fee ≥ MIN_TX_FEE + DATA_FEE_PER_BYTE · RESULT_BYTES · count. Opens a dispute per unit with `deadline = height + JOB_RESPONSE_BLOCKS + floor(open_disputes' / MAX_BLOCK_JOB_RESPONSES)`, where `open_disputes'` is the network-wide count after adding these |
 | `job_respond` | `job`, `batch`, `unit`, `result`, `proof` | the unit has an open dispute; `height <= deadline`; `merkle_verify(result, index of unit in the batch, count, proof, root)` (§4); fewer than MAX_BLOCK_JOB_RESPONSES responses earlier in this block; the result blob is available and passes Freivalds (§5.4). Closes the dispute and marks the unit proven; if no dispute is left and `height >= settle_at`, the batch is paid |
@@ -68,7 +68,7 @@ After a block's transactions, at height `h`, in this order:
 
 1. **Job events** scheduled for `h`, in scheduling order:
    - *expire* (scheduled at `expires + 1`): a batch still *committed* is dropped; its bond goes to the buyer.
-   - *settle* (scheduled at `settle_at`): a *revealed* batch with no open dispute is paid: the miner receives `price · count + bond`, the escrow decreases by `price · count`, its units become delivered.
+   - *settle* (scheduled at `settle_at`): a *revealed* batch with no open dispute is paid: the escrow decreases by `price · count`, which goes to the miner or, if the batch has payees, is split among them as in step 4; the miner gets its bond back; its units become delivered.
    - *deadline* (scheduled at `deadline + 1`): if a dispute of the batch with that deadline is still open, the batch is forfeit: its bond goes to the challenger of the earliest-opened such dispute and the batch is dropped.
    A dropped batch releases its units (they reopen) and its open disputes; if the job is closed, `price · count` of escrow is refunded to the buyer.
 2. **Job closings** scheduled for `h`: refund `escrow − price · (units in live batches)` to the buyer and mark the job closed. Live batches settle later as usual.
@@ -164,14 +164,14 @@ The state is a set of maps plus one counter. Their exact content is consensus, b
 |---|---|---|
 | `balances` | address | balance in yaprak, **non-zero only** (an entry whose balance becomes 0 is removed) |
 | `nonces` | address | number of transactions the address has sent (present once ≥ 1) |
-| `jobs` | job id | `{"buyer", "dims" [mu,ku,nu], "price", "escrow", "done": {unit key: batch id}, "delivered": {batch id: {"miner", "units", "count", "root", "manifest"}}, "reserved": {unit key: batch id}, "batches": {batch id: {"miner", "units" (bitmap), "count", "height", "expires", "bond", "status" ("committed"/"revealed"), "root", "manifest", "settle_at", "disputes": {unit key: {"by", "deadline"}}, "proven": set of unit keys}}, "closes_at" (height or null), "closed" (bool)}` |
+| `jobs` | job id | `{"buyer", "dims" [mu,ku,nu], "price", "escrow", "done": {unit key: batch id}, "delivered": {batch id: {"miner", "units", "count", "root", "manifest", "payees"*}}, "reserved": {unit key: batch id}, "batches": {batch id: {"miner", "units" (bitmap), "count", "height", "expires", "bond", "status" ("committed"/"revealed"), "root", "manifest", "settle_at", "disputes": {unit key: {"by", "deadline"}}, "proven": set of unit keys, "payees"*}}, "closes_at" (height or null), "closed" (bool)}` |
 | `tasks` | task id | `{"buyer", "prog", "input", "prog_size", "fuel", "price", "escrow", "status" ("open"/"revealed"/"confirmed"/"failed"/"done"), "worker", "output", "reserved" (null or {"worker", "commitment", "height", "expires", "bond"}), "settle_at"}` |
 | `closing` | height (integer) | job ids whose cancellation completes at that height, in the order the cancels were applied |
 | `job_events` | height (integer) | `[kind, job id, batch id, null]` entries (§3.3) in the order they were scheduled |
 | `task_settle` | height (integer) | task ids settling at that height, in scheduling order |
 | `guards` | address | `{"guardian", "limit", "period", "frozen", "window", "spent"}` (§3.4) |
 
-A unit key is `"i,l,j"` (decimal). Entries of `closing`, `job_events` and `task_settle` are created when the first item is scheduled for their height and removed when that height is processed; a removed job batch (paid or dropped) leaves `batches`. The counter `open_disputes` is the number of open job disputes network wide.
+A unit key is `"i,l,j"` (decimal). Fields marked * are present only when the batch's commit named payees. Entries of `closing`, `job_events` and `task_settle` are created when the first item is scheduled for their height and removed when that height is processed; a removed job batch (paid or dropped) leaves `batches`. The counter `open_disputes` is the number of open job disputes network wide.
 
 **Lattice hash** (LtHash with 1024 16-bit lanes, as in Lewi et al., "Securing Update Propagation with Homomorphic Hashing", 2019). For a map `M`, key `k` and value `v`, `entry(M, k, v)` is the 2,048-byte output of SHAKE-256(`"grn-state-v1:"` ‖ `C([M, k, plain(v)])`) read as 1,024 little-endian uint16 lanes, where `plain` turns sets into lists sorted by code point and dictionary keys into strings. The state's lattice is the lane-wise sum, modulo 2^16, of `entry(M, k, v)` for every entry of every map plus `entry("meta", "open_disputes", open_disputes)`. `state_root = hex(H(lattice as 1,024 uint16 little-endian))`.
 
@@ -203,7 +203,7 @@ Not consensus: it decides how nodes talk, not which chain is valid. Default port
 2. Both compute the X25519 shared secret (all zeros is refused) and `okm = HKDF-SHA256(ikm = secret, salt = "grn-p2p-v1" ‖ genesis hash (32 bytes), info = initiator key ‖ responder key, 160 bytes)`, split into five 32-byte values: initiator→responder length key, initiator→responder body key, the same two responder→initiator, and the session id.
 3. A frame is `ChaCha20-Poly1305(length key, n, uint32_LE(len(body)))` (20 bytes) followed by `ChaCha20-Poly1305(body key, n, body)`, where the nonce `n` is 4 zero bytes ‖ uint64_LE(frame counter). After REKEY_FRAMES frames in a direction both of its keys become `HKDF-Expand-SHA256(key, "grn-p2p-rekey", 32)` and the counter restarts at 0.
 4. A body is one byte of message type followed by the payload: canonical JSON for every message except `blob`, whose payload is the raw blob.
-5. The first frame each way is `version`: `{"proto": 1, "agent", "id": node public key, "sig", "port": listening port or 0, "relay": wants transaction announcements, "height", "tip", "work": chainwork as a decimal string, "you": the address the sender sees for the receiver, "time", "first": lowest height it has block bodies for}`. `sig = Ed25519(node key, "grn-p2p-auth-v1" ‖ session id ‖ ("I" if the sender initiated, else "R"))`. A connection is up once each side has checked the other's signature. Peers given as `<id>@host:port` must present that id.
+5. The first frame each way is `version`: `{"proto": 1, "agent", "id": node public key, "sig", "port": listening port or 0, "relay": wants transaction announcements, "height", "tip", "work": chainwork as a decimal string, "you": the address the sender sees for the receiver, "time", "first": lowest height it has block bodies for, "features": optional messages it understands}`. Features are `"dtx"` (messages 19) and `"cmpct"` (20 to 22); a node sends an optional message only to a peer that listed it, and ignores features it does not know. `sig = Ed25519(node key, "grn-p2p-auth-v1" ‖ session id ‖ ("I" if the sender initiated, else "R"))`. A connection is up once each side has checked the other's signature. Peers given as `<id>@host:port` must present that id.
 
 A node on another network derives different keys and fails at the first frame.
 
@@ -222,10 +222,15 @@ A node on another network derives different keys and fails at the first frame.
 | 13 `getblob`, 14 `blob`, 15 `noblob` | `{"hash", "max"}`, raw bytes, `{"hash"}` | fetch a public blob of at most `max` bytes |
 | 16 `getmempool` | `{}` | announce your mempool to me (once per connection) |
 | 17 `getsnapinfo`, 18 `snapinfo` | `{}`, `{"snapshots": [{"id", "height", "hash", "root"}]}` | snapshots on offer (§6.2) |
+| 19 `dtx` | `{"tx": ...}` | a transaction in its stem phase (Dandelion++, §9.3): pass it on or announce it, never serve it to `getdata` |
+| 20 `cmpct` | `{"header", "salt": 16 hex, "ids": [12 hex], "fill": [[index, tx]]}` | a new block: its header, the transactions given in `fill` at their indexes, and for the others, in order, `short_id = BLAKE2b-48(txid bytes, key = block hash bytes ‖ salt bytes)` |
+| 21 `getblocktxn`, 22 `blocktxn` | `{"block", "idx": [indexes]}`, `{"block", "txs": [...]}` | the transactions of a compact block the receiver could not find, in the order asked |
 
 ### 9.3 Behaviour of the reference node
 
-- **Relay**: new transactions are announced to each peer in batches at exponentially distributed intervals (mean 0.5 s), blocks immediately. A node requests an announced item from one peer and asks the next announcer after a timeout or `notfound`.
+- **Relay**: new transactions are announced to each peer in batches at exponentially distributed intervals (mean 0.5 s). A node requests an announced item from one peer and asks the next announcer after a timeout or `notfound`.
+- **Transaction origin (Dandelion++)**: transactions submitted to a node through its API are not announced. The node checks them against its mempool plus its stem pool and sends them as `dtx` to one of two outbound peers (that listed `dtx`) drawn per 10-minute epoch; each incoming link, and the node's own transactions, map to one of the two for the whole epoch. A node receiving `dtx` passes it on the same way, unless it is a diffuser this epoch (probability 0.1, drawn per epoch), has nowhere to pass it, or already holds it in its stem pool (a loop): then it adds it to its mempool and announces it to every peer. Every node on a stem sets an embargo of 15 s plus an exponential delay (mean 5 s) and announces the transaction itself if it has not seen it announced by then. The node's own protocol transactions (batch commits, reveals, answers, challenges) and replace-by-fee replacements are announced directly.
+- **Blocks (compact relay)**: a new block goes at once to peers that listed `cmpct` as a `cmpct` message (transactions the peer is known to have seen as short ids, the rest whole), to the others as an `inv`. The receiver rebuilds the block from its mempool and stem pool, asks with `getblocktxn` for what it lacks, and if the rebuilt transactions do not match `tx_root` (a short-id collision) fetches the whole block with `getdata`. A collision is not misbehaviour.
 - **Sync**: a node that sees a peer with more chainwork asks for headers, checks each one against every rule of §5 except the work unit, recomputes the work unit of a random sample plus the last header of every message, then downloads the blocks of the best header chain from several peers at once (a window of 256 blocks) and connects them in order, their work units recomputed in parallel beforehand.
 - **Fast sync** (opt in): a new node first gets the header chain, then the newest final snapshot on offer (§6.2), and from there fully validates every block; with no usable snapshot it syncs from genesis.
 - **Limits**: frames above 4 MiB are refused before they are read unless that peer owes a blob we asked for; handshakes must finish in 10 s; at most 1,000 messages wait per peer; at most 32 inbound connections, at most 4 per network group (/16 IPv4, /32 IPv6; local addresses exempt), the youngest peer of the most crowded group evicted for a newcomer while the fastest, most useful and longest-connected ones are protected; 8 outbound connections spread over network groups, 2 of them relaying blocks only; address gossip rate-limited to 0.1 per second per peer after a burst; one source network group can hold at most 64 new address-book entries.
@@ -243,6 +248,7 @@ A node on another network derives different keys and fails at the first frame.
 | SNAPSHOT_INTERVAL (not consensus) | 2,880 |
 | SIGNAL_PERIOD, SIGNAL_THRESHOLD | 20,160, 18,144 (90%) |
 | P2P: REKEY_FRAMES, MAX_FRAME, MAX_HEADERS, MAX_INV | 4,096, 4 MiB, 2,000, 1,000 |
+| P2P (not consensus): Dandelion++ epoch, fluff probability, destinations, embargo | 600 s, 0.1, 2, 15 s + Exp(mean 5 s) |
 | INITIAL_REWARD, HALVING_INTERVAL | 125,000,000 yaprak (1.25 GRN), 8,400,000 |
 | MAX_BLOCK_TXS, MAX_BLOCK_BYTES | 500, 1,000,000 |
 | MAX_JOB_UNITS_PER_DIM, MAX_BATCH_UNITS | 16, 4,096 |
@@ -258,4 +264,8 @@ A node on another network derives different keys and fails at the first frame.
 | COMPILE_COST_PER_BYTE, MAX_BLOCK_ADJUDICATION, ADJUDICATION_FEE_PER_MUNIT | 200, 1,500,000,000, 1,000 |
 | TASK_RESERVE_BLOCKS, TASK_CHALLENGE_BLOCKS, TASK_BOND_DIVISOR | 20, 40, 2 |
 | `task_bond(price)` | max(1, ceil(price / TASK_BOND_DIVISOR)) |
+
+## 11. Wallet keys (informative)
+
+Not consensus; defined so that wallets agree. A wallet's key comes from a BIP-39 recovery phrase (12 to 24 words of the standard English list, whose file's SHA-256 is `2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda`; 24 words by default) and an optional passphrase: `seed = PBKDF2-HMAC-SHA512(NFKD(words), "mnemonic" ‖ NFKD(passphrase), 2048, 64 bytes)`. The Ed25519 secret is derived from the seed with SLIP-0010 along `m/44'/HD_COIN_TYPE'/account'`, every step hardened (Ed25519 has no other kind). HD_COIN_TYPE is 7777, provisional until a SLIP-0044 number is registered before a public launch; a wallet file records its path.
 | `challenge_fee(fuel, bytes)` | MIN_TX_FEE + ceil(adjudication_cost · ADJUDICATION_FEE_PER_MUNIT / 10^6) |

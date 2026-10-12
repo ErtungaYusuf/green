@@ -229,7 +229,7 @@ class State:
             setattr(self, name, Layer(getattr(parent, name) if parent else None, copy_value))
         # job id -> {"buyer", "dims", "price", "escrow",
         #            "done": {unit_key: batch_id},             settled units and who delivered them
-        #            "delivered": {batch_id: {"miner", "units", "count", "root", "manifest"}},
+        #            "delivered": {batch_id: {"miner", "units", "count", "root", "manifest", ["payees"]}},
         #            "reserved": {unit_key: batch_id},         units held by a live batch
         #            "batches": {batch_id: {"miner", "units" (bitmap), "count", "height", "expires",
         #                                   "bond", "status": "committed" | "revealed",

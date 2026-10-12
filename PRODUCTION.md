@@ -2,7 +2,7 @@
 
 Where Green stands on every aspect a production cryptocurrency needs, what backs each claim, and what is still missing. "Done" means implemented, tested and measured in this repository; it does not mean audited, battle-tested or ready to carry real value. Nothing here is ready for real money until the items marked **blocker** are done.
 
-Status as of v0.13 (October 2026). 192 automated tests; eleven internal security reviews (SECURITY.md).
+Status as of v0.14 (October 2026). 214 automated tests; twelve internal security reviews (SECURITY.md).
 
 ## Summary
 
@@ -14,18 +14,18 @@ Status as of v0.13 (October 2026). 192 automated tests; eleven internal security
 | 4. Compute markets (matmul, WASM) | Done; optimistic, documented limits | data availability for manifests and WASM outputs |
 | 5. Accountability for autonomous agents | Done (guarded accounts) | — |
 | 6. State, storage, crash safety | Done (with a state commitment in every header) | — |
-| 7. Peer-to-peer networking | Done for a testnet (encrypted, authenticated, inv/getdata, eclipse limits) | NAT traversal, DNS seeds, Tor/I2P |
+| 7. Peer-to-peer networking | Done for a testnet (encrypted, authenticated, eclipse limits, Dandelion++, compact blocks) | NAT traversal, DNS seeds, Tor/I2P |
 | 8. Initial sync of new nodes | Done (headers-first, parallel verification, verified snapshots) | — |
-| 9. Mining software | Partial (CPU/GPU miners, non-custodial pools; GPU far below hardware peak) | native GPU miner |
-| 10. Wallets and keys | Partial (encrypted keys, checksummed addresses, multisig accounts) | **blocker**: seed phrases, hardware wallets |
+| 9. Mining software | Partial (CPU/GPU miners, non-custodial pools that sell compute; GPU far below hardware peak) | native GPU miner |
+| 10. Wallets and keys | Done for a testnet (recovery phrases, encrypted files, checksummed addresses, multisig) | hardware wallets, a registered coin type |
 | 11. APIs and developer tools | Done for a testnet (versioned API, fee estimates, long-poll, Python SDK) | SDKs in other languages, explorer API |
 | 12. Operations | Done for a testnet (config file, logs, systemd, metrics and alerts, runbook) | — |
-| 13. Testing and QA | Partial (192 tests, fuzz, mutation testing, 8-node simulation) | multi-node testnet, soak tests |
+| 13. Testing and QA | Partial (214 tests, fuzz, mutation testing, 8-node simulation) | multi-node testnet, soak tests |
 | 14. Security assurance | Partial (internal reviews only) | **blocker**: independent audit, bug bounty |
 | 15. Upgrades and governance | Done (version-bits activation, signed releases, published process) | reproducible builds |
-| 16. Privacy | **Missing** | — (documented as not provided) |
+| 16. Privacy | Partial (transaction origin: Dandelion++; data and amounts public) | — (documented) |
 | 17. Performance and implementation | Partial (Python reference) | native node for scale |
-| 18. Source control and releases | **Missing**: the code is not under version control | **blocker** |
+| 18. Source control and releases | Partial (git, tagged versions; not published, CI not yet run) | **blocker**: public repository, CI, signed tags |
 | 19. Economics and launch | Partial (supply set; no launch plan) | fair-launch plan, public testnet |
 | 20. Legal and compliance | **Missing** | **blocker** |
 | 21. Ecosystem | **Missing** (no explorer, exchanges, website) | — |
@@ -82,9 +82,11 @@ Pruned nodes (v0.11, green/prune.py): every header but only recent block bodies,
 
 **Done for a testnet (v0.7).** A dedicated protocol (SPEC.md §9, `green/p2p.py`) on its own port: X25519 per connection, keys salted with the genesis hash, ChaCha20-Poly1305 on every frame including its length, rekeying, Ed25519 node identities that can be pinned (`<id>@host:port`). Persistent connections with announce-then-fetch relay; transaction announcements trickled at random intervals; address gossip with per-source limits; outbound peers spread over network groups, two of them block-relay-only; inbound limits per group with eviction; frame sizes checked before reading; per-peer queues, deadlines and upload budgets; bans for invalid data that survive restarts. The HTTP API is for clients only.
 
+**Dandelion++ and compact blocks (v0.14):** a node's own transactions travel a stem before anyone announces them (routes fixed per epoch and incoming link, stem pool never served, loops end the stem, embargo timers on every stem node); new blocks cross a link as salted short ids and are rebuilt from the mempool, so a 20-transaction block costs under a quarter of its size and usually no round trip (`tests/test_relay.py`, 7 tests, each mutation-checked).
+
 **Evidence:** `tests/test_p2p.py` (27 tests: nothing readable on the wire, a corrupted byte drops the link and it recovers, pinning, other networks refused, each transaction crosses each link once, silent announcers skipped, nodes find each other through gossip, fake headers banned, oversized frames, unsolicited data, floods and silent handshakes cut off, unfinished handshakes capped, only authenticated newcomers can evict, stalling peers penalised, eviction and address-book rules); `bench/net_sim.py`; SECURITY.md P1–P5, P10.
 
-**Missing:** NAT traversal (UPnP/PCP) and DNS seeds (`SEED_NODES` is empty until launch); Tor/I2P; Elligator-encoded keys and traffic padding against protocol fingerprinting; compact block relay; Dandelion++ for stronger transaction-origin privacy; a content-routing layer (DHT) so a buyer can always find a miner's results.
+**Missing:** NAT traversal (UPnP/PCP) and DNS seeds (`SEED_NODES` is empty until launch); Tor/I2P; Elligator-encoded keys and traffic padding against protocol fingerprinting; a content-routing layer (DHT) so a buyer can always find a miner's results.
 
 ## 8. Initial sync
 
@@ -100,15 +102,19 @@ Pruned nodes (v0.11, green/prune.py): every header but only recent block bodies,
 
 **Non-custodial pools (v0.13):** a block can pay up to 32 payees by weight, so a pool's blocks pay its miners directly; `green/pool.py` has the pool server (PPLNS templates, every share's work recomputed, bad shares refused and their senders paused) and a pool miner (`tests/test_pool.py`).
 
-**Missing:** the GPU miner reaches ~700 units/s, a small fraction of a modern card's int8 throughput (noise is generated on the CPU, one nonce per call); a native miner with on-GPU noise and batched nonces. Pool miners do filler work (useful units are sold by solo miners); miners cannot yet choose a pool block's transactions (as Stratum V2 allows).
+**Pools sell compute (v0.14):** a pool assigns its miners units of open jobs, checks each result with Freivalds' test, commits them in batches and posts the bond; each commit names the miners who computed its units as payees, so consensus pays them when the batch settles (`test_pool_miners_compute_jobs_and_the_batches_pay_them`: the buyer gets correct products, the pool keeps exactly its fee).
 
-## 10. Wallets and keys — blocker
+**Missing:** the GPU miner reaches ~700 units/s, a small fraction of a modern card's int8 throughput (noise is generated on the CPU, one nonce per call); a native miner with on-GPU noise and batched nonces. Pool miners compute job units on the CPU even when they mine on a GPU; miners cannot yet choose a pool block's transactions (as Stratum V2 allows); results travel to the pool over plain HTTP (256 KiB per unit).
 
-**Today:** one Ed25519 key per wallet file, encrypted with scrypt + AES-256-GCM; bech32m addresses that reject typos; k-of-n multisignature accounts (v0.9) with a cosigning workflow (`grn multisig`), usable as an agent's guardian.
+## 10. Wallets and keys
+
+**Today:** wallets made from a 24-word recovery phrase (v0.14: BIP-39, SLIP-0010 Ed25519 derivation, optional passphrase, numbered accounts; the official word list is checked against its published hash when loaded); wallet files encrypted with scrypt + AES-256-GCM; bech32m addresses that reject typos; k-of-n multisignature accounts (v0.9) with a cosigning workflow (`grn multisig`), usable as an agent's guardian.
+
+**Evidence:** `tests/test_hd.py` (BIP-39 reference vectors, SLIP-0010 test vector 1, typos caught and never guessed, restore with and without a password, older wallets still open).
 
 Since v0.12 a wallet can track an address's history and verify its payments as a light client.
 
-**Missing:** seed phrases (BIP-39) with hierarchical derivation (SLIP-0010 for Ed25519) so one backup covers every address (the BIP-39 word list has to be added to the repository); hardware-wallet support; watch-only wallets in the command line.
+**Missing:** hardware-wallet support; a registered SLIP-0044 coin type (7777 is provisional); watch-only wallets in the command line.
 
 ## 11. APIs and developer tools
 
@@ -150,7 +156,9 @@ Since v0.12: a transaction and address index kept consistent through reorgs (`/v
 
 ## 16. Privacy
 
-**Not provided, and documented as such** (DESIGN.md §9): transactions are public, and a miner sees the matrices it computes. Future work: secret sharing, then attested secure hardware (TEE).
+**Transaction origin (v0.14):** Dandelion++ hides which node a transaction came from from observers of the network (§7).
+
+**Not provided, and documented as such** (DESIGN.md §9): transactions and amounts are public, and a miner sees the matrices it computes. Future work: secret sharing, then attested secure hardware (TEE).
 
 ## 17. Performance and implementation
 
@@ -160,7 +168,9 @@ Since v0.12: a transaction and address index kept consistent through reorgs (`/v
 
 ## 18. Source control and releases — blocker
 
-The repository is **not under version control**. Each version is copied into `.yedek/`. There is no history, no review trail, no signed tags, and the CI workflow cannot run. This is the first thing to fix: `git init`, an initial commit, a public repository, protected main branch, signed release tags.
+**Today (v0.14):** the repository is under git; v0.13.0 is the first commit and every version is tagged. The CI workflow (Linux, Windows and macOS, Python 3.12 and 3.13, plus a Docker smoke test) is in `.github/workflows/`.
+
+**Missing:** a public repository with a protected main branch, CI actually running on it, signed tags and reviewed merges.
 
 ## 19. Economics and launch
 
@@ -180,8 +190,9 @@ Not started. Before anything carries monetary value: legal advice in each jurisd
 
 Done in v0.7: ~~peer-to-peer transport with encryption and announce-then-fetch relay (§7)~~, ~~headers-first and snapshot sync with parallel work-unit verification (§8)~~. Done in v0.8: ~~an activation mechanism for upgrades and a signed release process (§15)~~.
 
-1. Put the code under version control and publish it; let CI run (§18).
-2. Seed-phrase HD wallets (§10).
-3. NAT traversal and seed nodes, then a public testnet with many independent nodes, run for months (§7, §13, §19).
-4. Independent audit and bug bounty (§14); legal review (§20).
-5. Native node and miner from SPEC.md (§9, §17).
+Done in v0.14: ~~version control (§18)~~, ~~seed-phrase HD wallets (§10)~~.
+
+1. Publish the repository and let CI run (§18).
+2. NAT traversal and seed nodes, then a public testnet with many independent nodes, run for months (§7, §13, §19).
+3. Independent audit and bug bounty (§14); legal review (§20).
+4. Native node and miner from SPEC.md (§9, §17).

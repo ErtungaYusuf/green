@@ -167,6 +167,7 @@ Goal: random miners should not learn who computes what.
 | Property | Status |
 |---|---|
 | Buyer identity | Partly hidden: only a pseudonym (key) is visible; transactions are public |
+| Which node a transaction came from | Hidden from network observers since v0.14: transactions take a Dandelion++ stem before anyone announces them |
 | Distribution of work | Yes: each unit lands with a random miner |
 | Confidentiality of the data (the "what") | **No:** a miner sees the matrices of the units it computes |
 
@@ -187,15 +188,15 @@ Real confidentiality needs secure hardware (the confidential-computing mode of d
 
 Done: ~~prime-field Freivalds and buyer-verified delivery (v0.3)~~, ~~whole-job Merkle batches and the dispute fixes (v0.4)~~, ~~checksummed addresses, fee market, replace-by-fee (v0.4)~~, ~~diff-layer state engine and atomic SQLite storage (v0.5)~~, ~~the quantized-model SDK~~ ([green/nn.py](green/nn.py)), ~~the autonomous agent~~ ([green/agent.py](green/agent.py)), ~~a written protocol specification~~ ([SPEC.md](SPEC.md)).
 
-The complete, area-by-area status is in [PRODUCTION.md](PRODUCTION.md). Done in v0.6: ~~per-block ASERT difficulty~~, ~~guarded accounts for agents~~, ~~supply audit and metrics~~, ~~Docker image~~. Done in v0.7: ~~encrypted P2P protocol with inv/getdata relay and eclipse limits~~, ~~headers-first sync with parallel verification~~, ~~a state commitment in every header~~, ~~fast sync from verified snapshots~~. Done in v0.8: ~~version-bits activation of rule changes~~, ~~signed releases and a written upgrade process~~ ([UPGRADES.md](UPGRADES.md)).
+The complete, area-by-area status is in [PRODUCTION.md](PRODUCTION.md). Done in v0.6: ~~per-block ASERT difficulty~~, ~~guarded accounts for agents~~, ~~supply audit and metrics~~, ~~Docker image~~. Done in v0.7: ~~encrypted P2P protocol with inv/getdata relay and eclipse limits~~, ~~headers-first sync with parallel verification~~, ~~a state commitment in every header~~, ~~fast sync from verified snapshots~~. Done in v0.8: ~~version-bits activation of rule changes~~, ~~signed releases and a written upgrade process~~ ([UPGRADES.md](UPGRADES.md)). Done since: ~~multisig (v0.9)~~, ~~pruning (v0.11)~~, ~~light client (v0.12)~~, ~~non-custodial pools (v0.13)~~, ~~recovery phrases, Dandelion++, compact blocks, pools that sell compute (v0.14)~~.
 
 Toward production, in order:
 
 1. **Storage, next steps:** a disk-backed base state loaded on demand, pruning of old blobs and block bodies, a Merkle or Verkle state commitment for light clients.
-2. **Network layer, next steps:** NAT traversal, DNS seeds, a Kademlia DHT for blobs so a buyer can always find a miner's data, compact blocks, Tor/I2P.
+2. **Network layer, next steps:** NAT traversal, DNS seeds, a Kademlia DHT for blobs so a buyer can always find a miner's data, Tor/I2P.
 3. **Native node and miner (Rust):** an implementation of SPEC.md, a GPU miner that generates the noise on the GPU and batches nonces, and conformance tests shared with the Python reference.
 4. **Data availability** for matmul and WASM outputs (erasure coding with sampling), removing the cost of manifest withholding.
-5. **Wallets:** HD wallets (BIP-32/39 style seed phrases), hardware-wallet support, a JSON-RPC API.
+5. **Wallets:** hardware-wallet support, a registered coin type, watch-only wallets.
 6. Privacy: secret sharing first, then TEE attestation.
 7. A public testnet, an independent security audit, and a bug bounty, before any value.
 8. Legal: advice before anything carries real monetary value (e.g. in Turkey, Law No. 7518 and the Capital Markets Board).

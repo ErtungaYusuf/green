@@ -35,6 +35,7 @@ from .crypto import Key, hhex, merkle_proof, merkle_root
 from . import prune as prunemod, snapshot
 from .chain import min_prune_keep
 from .p2p import P2P
+from .state import State
 from .store import Store
 from .tx import InvalidTx, make_tx
 
@@ -99,7 +100,7 @@ class Node:
                  host: str = "127.0.0.1", peers=(), miner_key: Key | None = None, log=print,
                  use_gpu: bool = False, p2p_port: int = 0, listen: bool = True, seeds=None,
                  fast_sync: bool = False, p2p_host: str | None = None, no_signal=(), debug=None,
-                 prune: bool = False, prune_keep: int = prunemod.PRUNE_KEEP_BLOCKS):
+                 prune: bool = False, prune_keep: int = prunemod.PRUNE_KEEP_BLOCKS, dandelion: bool = True):
         self.data_dir = data_dir
         self.port = port
         self.host = host
@@ -117,6 +118,9 @@ class Node:
         self.mempool: dict[str, dict] = {}
         self.miner_key = miner_key
         self.no_signal = set(no_signal)           # deployments this miner chooses not to signal
+        self.dandelion = dandelion                # our own transactions take a stem first (p2p.py)
+        self.pool = None                          # a green.pool.Pool selling its miners' units through us
+        self._sell_lock = threading.Lock()        # one thread at a time commits and reveals batches
         self.prune = prune                        # keep recent block bodies and data in use only (green/prune.py)
         self.prune_keep = prune_keep
         if prune and prune_keep < min_prune_keep():
@@ -229,15 +233,62 @@ class Node:
         self.mempool = keep
         self._pending = s
 
-    def submit_tx(self, t: dict, source=None) -> str:
-        """Validate and add a transaction to the mempool, then announce it to peers."""
+    def submit_tx(self, t: dict, source=None, stem: bool | None = None) -> str:
+        """Validate a transaction and relay it. Our own transactions (and stem
+        transactions from peers) first travel the Dandelion++ stem (p2p.py), so the
+        network cannot tell which node they came from; the others go into the
+        mempool and are announced."""
         try:
             tid = txmod.txid(t)
         except (TypeError, ValueError):
             raise InvalidTx("unencodable transaction") from None
+        if stem is None:
+            stem = source is None and self.dandelion
+        announce_skip = source
+        if stem:
+            try:
+                if self._stem(t, tid, source):
+                    return tid
+            except MissingData:
+                pass                                 # it needs data: the normal path fetches it
+            if source is not None:
+                # The stem ends here. The peer that passed it on holds it only in its stem
+                # pool, so it is announced to that peer as well.
+                self.p2p.stats["stem_fluffed"] += 1
+                announce_skip = None
         if self._with_blobs(lambda: self._add_tx(t, tid), source):
-            self.p2p.announce_tx(tid, source)
+            self.p2p.announce_tx(tid, announce_skip)
         return tid
+
+    def _stem_view(self, local_only: bool = False, skip: str | None = None) -> State:
+        """A scratch state: the mempool's plus the stem transactions (only ours if
+        `local_only`). Read it and drop it before releasing the lock."""
+        s = State(self._pending)
+        height = self.chain.height + 1
+        for tid, e in self.p2p.stempool.items():
+            if tid == skip or local_only and not e["local"]:
+                continue
+            s.adjudication_used = s.responses_used = 0
+            try:
+                self.chain.apply_tx(s, e["tx"], height)
+            except (InvalidTx, MissingData):
+                pass
+        return s
+
+    def _stem(self, t: dict, tid: str, source) -> bool:
+        """Check a transaction against the mempool and the stem pool, then pass it on;
+        False if it should be announced instead."""
+        with self.lock:
+            if tid in self.mempool:
+                return True
+            txmod.check_format(t, self.chain.chain_id)
+            who = txmod.sender(t)
+            if any(m["nonce"] == t["nonce"] and txmod.sender(m) == who for m in self.mempool.values()):
+                return False                         # a replacement: the mempool's fee rules decide
+            s = self._stem_view(skip=tid)
+            s.adjudication_used = s.responses_used = 0
+            self.chain.apply_tx(s, t, self.chain.height + 1)
+        return self.p2p.stem_tx(t, tid, source)
 
     def _add_tx(self, t: dict, tid: str) -> bool:
         with self.lock:
@@ -302,7 +353,7 @@ class Node:
 
     def pending_nonce(self, addr: str) -> int:
         with self.lock:
-            return self._pending.nonce(addr)
+            return self._stem_view(local_only=True).nonce(addr)
 
     # --- blocks ---
 
@@ -440,6 +491,8 @@ class Node:
                 for u in txmod.bitmap_units(t["units"], jobs[t["job"]]["dims"]) or []}
         for job_id, buf in self.batch_buf.items():
             busy.update((job_id, txmod.unit_key(u)) for u in buf["units"])
+        if self.pool is not None:
+            busy |= self.pool.assigned_keys()        # handed to pool miners
         return busy
 
     def _choose_work(self) -> dict:
@@ -527,25 +580,66 @@ class Node:
                      + sum(b["count"] for b in self.my_batches.values()))
         return in_flight < COMMIT_INFLIGHT_CAP
 
-    def _buffer_result(self, work_item: dict, useful) -> None:
-        buf = self.batch_buf.setdefault(work_item["job"], {"units": [], "results": [], "started": time.time()})
-        buf["units"].append(work_item["unit"])
-        buf["results"].append(self.blobs.put(txmod.encode_result(useful)))
+    def _buffer_result(self, work_item: dict, useful, by: str | None = None) -> None:
+        """Keep a computed unit for the next batch; `by` is the pool miner that computed
+        it (None: this node), who the batch will pay for it."""
+        blob = self.blobs.put(txmod.encode_result(useful))
+        with self.lock:
+            buf = self.batch_buf.setdefault(work_item["job"], {"units": [], "results": [], "by": [],
+                                                               "started": time.time()})
+            buf["units"].append(work_item["unit"])
+            buf["results"].append(blob)
+            buf["by"].append(by)
+
+    def _batch_payees(self, by: list) -> list | None:
+        """Who a batch's payment goes to: each pool miner by the units it computed, the
+        rest (this node's own units, the pool's fee) to this node. None: all to us."""
+        if all(b is None for b in by):
+            return None
+        own = self.miner_key.address
+        fee = self.pool.fee_percent if self.pool is not None else 0
+        weights: dict[str, int] = {}
+        for b in by:                                 # weights in hundredths: the fee is an exact percentage
+            weights[b or own] = weights.get(b or own, 0) + (100 - fee)
+        if fee:
+            weights[self.pool.fee_address] = weights.get(self.pool.fee_address, 0) + fee * len(by)
+        entries = sorted([a, w] for a, w in weights.items())
+        return entries if len(entries) > 1 else None
+
+    def sell_step(self) -> None:
+        """Reveal what is due and commit full batches (the miner loop does this as it
+        goes; a pool node that does not mine itself calls it on a timer)."""
+        self._process_batches()
+        self._flush_batches()
 
     def _flush_batches(self) -> None:
         """Commit a buffered batch once it is full, old enough, or its job has no open units left."""
         now = time.time()
+        with self._sell_lock:
+            with self.lock:
+                state = self.chain.state
+                busy = self._busy_units()
+                ready = []
+                for job_id, buf in list(self.batch_buf.items()):
+                    more = job_id in state.jobs and any(
+                        (job_id, txmod.unit_key(u)) not in busy for u in state.open_units(job_id))
+                    if len(buf["units"]) >= params.MAX_BATCH_UNITS or not more or now - buf["started"] >= BATCH_SECONDS:
+                        ready.append((job_id, self.batch_buf.pop(job_id)))
+            for job_id, buf in ready:
+                self._commit_batch(job_id, buf)
+
+    def _rebuffer(self, job_id: str, items: list) -> None:
+        """Units pool miners computed that did not fit this batch wait for the next one
+        (they are owed); this node's own leftovers are just dropped, as before."""
+        theirs = [x for x in items if x[2] is not None]
+        if not theirs:
+            return
         with self.lock:
-            state = self.chain.state
-            busy = self._busy_units()
-            ready = []
-            for job_id, buf in self.batch_buf.items():
-                more = job_id in state.jobs and any(
-                    (job_id, txmod.unit_key(u)) not in busy for u in state.open_units(job_id))
-                if len(buf["units"]) >= params.MAX_BATCH_UNITS or not more or now - buf["started"] >= BATCH_SECONDS:
-                    ready.append(job_id)
-        for job_id in ready:
-            self._commit_batch(job_id, self.batch_buf.pop(job_id))
+            buf = self.batch_buf.setdefault(job_id, {"units": [], "results": [], "by": [], "started": time.time()})
+            for unit, result, by in theirs:
+                buf["units"].append(unit)
+                buf["results"].append(result)
+                buf["by"].append(by)
 
     def _commit_batch(self, job_id: str, buf: dict) -> None:
         """Step 1 of selling: commit to the batch. The results stay private until the reveal."""
@@ -556,31 +650,50 @@ class Node:
             nonce = self._pending.nonce(addr)
         if job is None:
             return
+        items = list(zip(buf["units"], buf["results"], buf.get("by") or [None] * len(buf["units"])))
         # Units we cannot bond stay lottery tickets; selling them waits for funds.
-        n = min(len(buf["units"]), params.MAX_BATCH_UNITS,
+        n = min(len(items), params.MAX_BATCH_UNITS,
                 max(0, (bal - params.MIN_TX_FEE) // params.bond_for(job["price"])))
         if n == 0:
             if not self._warned_bond:
                 self._warned_bond = True
                 self.log("[info] not enough balance for a bond; selling compute starts after the first block reward")
+            self._rebuffer(job_id, items)
             return
+        # A batch pays at most MAX_PAYEES - 1 contributors besides the pool's fee.
+        chosen, later, people = [], [], set()
+        for item in items:
+            if len(chosen) < n and (item[2] in people or len(people) < params.MAX_PAYEES - 1):
+                chosen.append(item)
+                people.add(item[2])
+            else:
+                later.append(item)
+        self._rebuffer(job_id, later)
         dims = job["dims"]
-        pairs = sorted(zip(buf["units"][:n], buf["results"][:n]), key=lambda p: txmod.unit_index(p[0], dims))
-        units, leaves = [u for u, _ in pairs], [r for _, r in pairs]
+        chosen.sort(key=lambda x: txmod.unit_index(x[0], dims))
+        units, leaves = [u for u, _, _ in chosen], [r for _, r, _ in chosen]
+        payees = self._batch_payees([b for _, _, b in chosen])
         bitmap = txmod.units_bitmap(units, dims)
         root = merkle_root(leaves)
         manifest = self.blobs.put(txmod.encode_manifest(leaves))
         c = txmod.commitment(addr, job_id, bitmap, root)
-        t = make_tx(self.miner_key, self.chain.chain_id, "job_commit", nonce, job=job_id, units=bitmap, commitment=c)
+        extra = {"payees": payees} if payees else {}
+        t = make_tx(self.miner_key, self.chain.chain_id, "job_commit", nonce, job=job_id, units=bitmap,
+                    commitment=c, **extra)
         try:
-            self.submit_tx(t)
+            self.submit_tx(t, stem=False)
         except (InvalidTx, MissingData) as e:
             self.log(f"[warning] could not commit the batch: {e}")
+            self._rebuffer(job_id, chosen)
             return
-        self.my_batches[c] = {"job": job_id, "count": n, "root": root, "manifest": manifest}
+        self.my_batches[c] = {"job": job_id, "count": len(chosen), "root": root, "manifest": manifest, **extra}
         self.stats["batches_committed"] += 1
 
     def _process_batches(self) -> None:
+        with self._sell_lock:
+            self._process_batches_locked()
+
+    def _process_batches_locked(self) -> None:
         """Step 2: reveal our batches once their commit is buried; answer disputes against them."""
         addr = self.miner_key.address
         with self.lock:
@@ -815,10 +928,13 @@ class Node:
         return bad, missing
 
     def _try_tx(self, kind: str, fee: int = params.MIN_TX_FEE, **fields) -> bool:
+        """The node's own protocol transactions (commits, reveals, answers, challenges)
+        skip the stem: they have deadlines, their sender is the miner address blocks
+        already show, and the loops that send them look for them in the mempool."""
         t = make_tx(self.miner_key, self.chain.chain_id, kind, self.pending_nonce(self.miner_key.address),
                     fee, **fields)
         try:
-            self.submit_tx(t)
+            self.submit_tx(t, stem=False)
             return True
         except (InvalidTx, MissingData) as e:
             self.log(f"[tx] {kind} rejected: {e}")
@@ -944,6 +1060,9 @@ class Node:
             t = self.mempool.get(txid)
             if t is not None:
                 return {"txid": txid, "status": "pending", "tx": t}
+            e = self.p2p.stempool.get(txid)
+            if e is not None and e["local"]:         # ours, still on its stem
+                return {"txid": txid, "status": "pending", "relay": "stem", "tx": e["tx"]}
             loc = self.store.tx_location(txid)
             if loc is None:
                 return None
@@ -958,8 +1077,9 @@ class Node:
         limit = max(1, min(int(limit), 500))
         with self.lock:
             rows = self.store.address_history(addr, limit, before)
+            mine = [(tid, e["tx"]) for tid, e in self.p2p.stempool.items() if e["local"]]    # still on a stem
             pending = [{"txid": tid, "type": t["type"], "role": "sender" if txmod.sender(t) == addr else "named"}
-                       for tid, t in self.mempool.items()
+                       for tid, t in list(self.mempool.items()) + mine
                        if txmod.sender(t) == addr or addr in (t.get("to"), t.get("account"), t.get("guardian"))]
         items = [{"height": h, "position": pos, "role": role, "type": kind,
                   ("block" if role == "miner" else "txid"): ref} for h, pos, ref, role, kind in rows]
@@ -991,9 +1111,10 @@ class Node:
 
     def account(self, addr: str) -> dict:
         with self.lock:
+            pending = self._stem_view(local_only=True)
             view = {"address": addr,
                     "balance": self.chain.state.balance(addr), "nonce": self.chain.state.nonce(addr),
-                    "pending_balance": self._pending.balance(addr), "pending_nonce": self._pending.nonce(addr),
+                    "pending_balance": pending.balance(addr), "pending_nonce": pending.nonce(addr),
                     "guard": None}
             g = self.chain.state.guards.get(addr)
             if g is not None:
@@ -1042,6 +1163,15 @@ class Node:
              st["p2p"]["headers_ahead"]),
             ("green_blocks_in_flight", "gauge", "Blocks requested from peers", st["p2p"]["blocks_in_flight"]),
             ("green_peers_banned_total", "counter", "Peers banned for misbehaving", st["p2p"]["stats"]["banned"]),
+            ("green_stempool_transactions", "gauge", "Transactions on their Dandelion++ stem through this node",
+             st["p2p"]["stempool"]),
+            ("green_stem_embargo_fired_total", "counter",
+             "Stem transactions this node had to announce itself (a rising rate: stem peers drop them)",
+             st["p2p"]["stats"]["embargo_fired"]),
+            ("green_compact_blocks_rebuilt_total", "counter", "Compact blocks rebuilt from the mempool",
+             st["p2p"]["stats"]["cmpct_rebuilt"]),
+            ("green_compact_block_fallbacks_total", "counter", "Compact blocks that had to be fetched whole",
+             st["p2p"]["stats"]["cmpct_fallbacks"]),
             ("green_bytes_received_total", "counter", "P2P bytes received",
              sum(p.bytes_in for p in self.p2p.all_peers())),
             ("green_bytes_sent_total", "counter", "P2P bytes sent", sum(p.bytes_out for p in self.p2p.all_peers())),

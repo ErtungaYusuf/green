@@ -5,7 +5,7 @@ Measures how fast blocks and transactions reach every node, checks that all
 nodes end on one chain with identical ledgers (same state root), and that a
 split heals by a reorg to the heavier side.
 
-    python bench/net_sim.py [nodes] [seconds per phase]
+    python bench/net_sim.py [nodes] [seconds per phase] [--no-dandelion]
 """
 
 import os
@@ -68,8 +68,10 @@ class Watch:
 
 
 def main():
-    count = int(sys.argv[1]) if len(sys.argv) > 1 else 8
-    phase = float(sys.argv[2]) if len(sys.argv) > 2 else 40
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    dandelion = "--no-dandelion" not in sys.argv     # compare the latency of stems with direct announcement
+    count = int(args[0]) if len(args) > 0 else 8
+    phase = float(args[1]) if len(args) > 1 else 40
     params.TARGET_BLOCK_SECONDS = 3
     params.INITIAL_TARGET = params.MAX_TARGET // 60
     params.ASERT_HALFLIFE = 60
@@ -83,7 +85,7 @@ def main():
         for i in range(count):
             seeds = [nodes[j].p2p.address for j in random.Random(i).sample(range(i), min(2, i))] if i else []
             n = Node(os.path.join(tmp, f"n{i}"), genesis, port=free_port(), miner_key=keys[i],
-                     peers=seeds, log=lambda m: None)
+                     peers=seeds, log=lambda m: None, dandelion=dandelion)
             n.start(mine=False)
             n.work_tasks = False
             nodes.append(n)

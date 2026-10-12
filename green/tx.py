@@ -70,6 +70,9 @@ FIELDS = {
     "guard_release": {"account"},
 }
 COMMON = {"type", "pub", "nonce", "fee", "sig"}
+# Fields a transaction may carry or leave out. A job_commit's payees share the
+# batch's payment (a pool paying the miners who computed its units).
+OPTIONAL = {"job_commit": {"payees"}}
 
 
 class InvalidTx(Exception):
@@ -177,13 +180,29 @@ def _is_unit(u) -> bool:
     return isinstance(u, list) and len(u) == 3 and all(is_uint(x) and x < params.MAX_JOB_UNITS_PER_DIM for x in u)
 
 
+def is_payee_list(x) -> bool:
+    """[[address, weight], ...]: 2 to MAX_PAYEES entries sorted by address, addresses
+    distinct, weights in 1..MAX_PAYEE_WEIGHT. Splits a block's reward (the header's
+    `miner`) or a batch's payment (a job_commit's `payees`)."""
+    if not isinstance(x, list) or not 2 <= len(x) <= params.MAX_PAYEES:
+        return False
+    for entry in x:
+        if not (isinstance(entry, list) and len(entry) == 2 and is_address(entry[0])
+                and is_uint(entry[1]) and 1 <= entry[1] <= params.MAX_PAYEE_WEIGHT):
+            return False
+    addrs = [a for a, _ in x]
+    return addrs == sorted(set(addrs))
+
+
 def check_format(tx: dict, chain_id: str) -> None:
     """Stateless checks: shape of the fields and the signature."""
     if not isinstance(tx, dict) or tx.get("type") not in FIELDS:
         raise InvalidTx("unknown transaction type")
     expected = FIELDS[tx["type"]] | COMMON
-    if set(tx) != expected:
-        raise InvalidTx(f"fields must be exactly {sorted(expected)}")
+    optional = OPTIONAL.get(tx["type"], set())
+    if not expected <= set(tx) <= expected | optional:
+        raise InvalidTx(f"fields must be exactly {sorted(expected)}"
+                        + (f", optionally with {sorted(optional)}" if optional else ""))
     if not is_uint(tx["nonce"]) or not is_uint(tx["fee"]):
         raise InvalidTx("nonce and fee must be non-negative integers")
     kind = tx["type"]
@@ -205,6 +224,8 @@ def check_format(tx: dict, chain_id: str) -> None:
         raise InvalidTx("units must be a non-empty bitmap (lowercase hex)")
     if kind == "job_commit" and not is_hex(tx["commitment"], 64):
         raise InvalidTx("bad commitment")
+    if kind == "job_commit" and "payees" in tx and not is_payee_list(tx["payees"]):
+        raise InvalidTx("payees must be 2 to MAX_PAYEES [address, weight] pairs sorted by address")
     if kind in ("job_reveal", "job_challenge", "job_respond") and not is_hex(tx["batch"], 64):
         raise InvalidTx("bad batch id")
     if kind == "job_reveal" and not (is_hex(tx["root"], 64) and is_hex(tx["manifest"], 64)):

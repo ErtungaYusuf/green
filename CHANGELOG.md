@@ -2,6 +2,25 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## 0.14.0
+
+**Recovery phrases**
+- `grn wallet new` makes a wallet from a 24-word BIP-39 phrase; `grn wallet restore` brings it back on any machine, without the file or its password; `grn wallet phrase` shows it again. Keys are derived with SLIP-0010 for Ed25519 along `m/44'/7777'/account'` (`--account`), with an optional passphrase. `green/hd.py`; the official word list ships in the package and is checked against its published SHA-256 when loaded. Passes the BIP-39 reference vectors and SLIP-0010 test vector 1. Words can be given by their first four letters; a wrong or swapped word is caught by the checksum and refused, never guessed. Wallet files from earlier versions still open.
+
+**Transaction origin privacy (Dandelion++)**
+- A node's own transactions pass along a stem of single hops (`dtx`) before anyone announces them, so the announcement does not point at the node they came from. Stem routes are fixed per epoch and per incoming link, stem transactions are never served to `getdata`, loops end the stem, and every stem node announces the transaction itself when its random embargo runs out (SPEC.md §9.3). `--no-dandelion` turns it off. The node's own commits, reveals and challenges, and fee bumps, are announced directly.
+
+**Compact block relay**
+- New blocks travel as a header plus 6-byte salted transaction ids (`cmpct`); the receiver rebuilds them from its mempool and asks only for what it lacks (`getblocktxn`/`blocktxn`); a short-id collision falls back to the whole block. A 20-transaction block crosses a link in under a quarter of its size, usually with no round trip. Peers that do not list the feature get an `inv` as before.
+
+**Useful work through pools**
+- A `job_commit` can name payees (SPEC.md §3.2): the batch's payment is split among them when it settles, and the bond stays the committer's. Pools now sell compute: with each template a miner gets units of open jobs (as far as the pool can bond them), computes them, and sends the results, which the pool checks with Freivalds' test before batching them. Each batch pays the miners who computed its units, plus the pool's fee, in consensus. Pool miners now do useful AI work instead of filler, and the pool still never holds what they earn.
+- Pool fixes found on the way: stale shares (work on a template a new block replaced) counted as invalid, so an honest miner could be paused for ten minutes; miners now refresh templates every second and stale shares are answered as such. A batch flush popped entries while iterating, losing accepted results.
+
+**Git and CI**
+- The repository is under git (v0.13.0 is the first commit, tagged); the CI workflow runs once it is pushed.
+- Twelfth security review (SECURITY.md, H1–H2, D1–D4, C1–C2, J1–J3). 214 tests. Consensus change (optional `payees` on `job_commit`): v0.13 nodes reject such commits.
+
 ## 0.13.0
 
 **Non-custodial pooled mining**

@@ -62,7 +62,8 @@ def nodes(tmp_path):
 class RawPeer:
     """A hand-driven peer: does the real handshake, then sends whatever a test wants."""
 
-    def __init__(self, node: Node, work: int = 0, genesis_hash: str | None = None, port: int = 0):
+    def __init__(self, node: Node, work: int = 0, genesis_hash: str | None = None, port: int = 0,
+                 features: list | None = None):
         self.sock = socket.create_connection(("127.0.0.1", node.p2p.port), timeout=10)
         self.send_c, self.recv_c, self.sid = p2p.key_exchange(self.sock, True, genesis_hash or node.chain.genesis_hash)
         self.key = Ed25519PrivateKey.generate()
@@ -70,7 +71,8 @@ class RawPeer:
         self.send("version", {"proto": p2p.PROTOCOL_VERSION, "agent": "raw", "id": self.node_id,
                               "sig": self.key.sign(p2p.auth_message(self.sid, True)).hex(), "port": port,
                               "relay": True, "height": 0, "tip": node.chain.genesis_hash, "work": str(work),
-                              "you": "127.0.0.1", "time": int(time.time())})
+                              "you": "127.0.0.1", "time": int(time.time()),
+                              **({"features": features} if features is not None else {})})
         cmd, self.version = self.recv()
         assert cmd == "version"
 
