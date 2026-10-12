@@ -1,0 +1,40 @@
+# systemd unit for a Green node (see OPERATIONS.md).
+#   sudo useradd --system --create-home --home-dir /var/lib/green green
+#   sudo install -d -m 700 /etc/green && sudo install -m 600 /dev/null /etc/green/password
+#   (put the wallet password in /etc/green/password; systemd hands it to the node privately)
+#   sudo cp contrib/green.service /etc/systemd/system/ && sudo systemctl enable --now green
+# Settings go in /var/lib/green/green.toml; logs: journalctl -u green
+
+[Unit]
+Description=Green (GRN) node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=green
+Group=green
+# The password reaches the node as a file only it can read ($CREDENTIALS_DIRECTORY),
+# never as an environment variable other processes could inspect.
+LoadCredential=password:/etc/green/password
+Environment=GREEN_WALLET_PASSWORD_FILE=%d/password
+ExecStart=/usr/local/bin/grn --data /var/lib/green node
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=60
+
+# Hardening: the node needs its data folder and the network, nothing else.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/green
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

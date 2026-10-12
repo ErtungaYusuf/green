@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "green-grn"
+version = "0.13.0"
+description = "Green (GRN): a blockchain secured by proof of useful work (AI matrix multiplication)"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.0",
+    "cryptography>=42",
+    # consensus-critical: task adjudication depends on wasmtime's fuel accounting
+    "wasmtime==49.0.0",
+]
+
+[project.optional-dependencies]
+gpu = ["wgpu>=0.19"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+grn = "green.cli:main"
+
+[tool.setuptools]
+packages = ["green"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

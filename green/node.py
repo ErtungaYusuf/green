@@ -1,0 +1,1341 @@
+"""A full node: HTTP API for clients, the peer-to-peer network (green/p2p.py),
+mempool and miner.
+
+Everything runs on this machine. By default the node only listens on
+127.0.0.1, so nothing is reachable from outside unless you pass --host.
+
+Security notes (details in SECURITY.md):
+  * Nodes talk to each other only over the encrypted, authenticated P2P
+    protocol; the HTTP API is for wallets and tools and cannot add peers or
+    inject blocks from outside this machine.
+  * Every network read has a size limit and a timeout; the server caps
+    concurrent connections and rejects malformed Content-Length headers.
+  * Admin endpoints (mining switch, adding peers, uploading job data) only
+    answer requests from this machine.
+  * Result data is only served once it has been revealed on chain, so a
+    committed-but-unrevealed result cannot leak before it is paid.
+  * Matmul delivery is optimistic: validators only see a batch's Merkle root,
+    so a node checks every result delivered to its own wallet's jobs and
+    disputes the wrong or withheld ones (the buyer-side watchtower).
+"""
+
+import json
+import os
+import random
+import threading
+import time
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+
+from . import params, tx as txmod, work
+from .chain import (BlobStore, Chain, InvalidBlock, MissingData, block_hash, fee_rate, seed_of, solve, target_of,
+                    work_inputs)
+from .crypto import Key, hhex, merkle_proof, merkle_root
+from . import prune as prunemod, snapshot
+from .chain import min_prune_keep
+from .p2p import P2P
+from .store import Store
+from .tx import InvalidTx, make_tx
+
+MAX_BLOB_BYTES = txmod.job_blob_size([params.MAX_JOB_UNITS_PER_DIM] * 3)
+MAX_JSON_BYTES = 2 * 1024 * 1024
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+MAX_CONCURRENT_REQUESTS = 64
+REQUEST_TIMEOUT = 15
+MAX_MEMPOOL = 5000
+MAX_MEMPOOL_PER_SENDER = 100   # one key cannot fill the mempool on its own
+RBF_MIN_BUMP_PERCENT = 10     # a replacement must pay this much more than the transaction it replaces
+REVEAL_CONFIRMATIONS = 2      # wait until the commit has this many confirmations
+COMMIT_INFLIGHT_CAP = 2 * params.MAX_BATCH_UNITS   # units a miner sells at once; the rest are lottery-only
+BATCH_SECONDS = 2.0           # commit a partly filled batch after this long
+MAX_MANIFEST_BYTES = txmod.HASH_BYTES * params.MAX_BATCH_UNITS
+RESPONSES_PER_ROUND = 32      # disputes answered per loop; the rest wait for mempool room
+MAX_WAITERS = 16              # API clients long-polling for the next block at once
+MAX_WAIT_SECONDS = 60
+FEE_RECENT_BLOCKS = 6         # blocks the fee estimate looks back at
+MAINTENANCE_SECONDS = 30      # how often a pruned node prunes and collects unused blobs
+LOOPBACK = {"127.0.0.1", "::1"}
+
+
+class TooLarge(ValueError):
+    pass
+
+
+def _read_limited(resp, limit: int) -> bytes:
+    data = resp.read(limit + 1)
+    if len(data) > limit:
+        raise TooLarge(f"response larger than {limit} bytes")
+    return data
+
+
+def http_get(url: str, timeout: float = 5.0, raw: bool = False, limit: int = MAX_RESPONSE_BYTES):
+    with urllib.request.urlopen(url, timeout=timeout) as r:
+        data = _read_limited(r, limit)
+    return data if raw else json.loads(data)
+
+
+def wait_for_block(base_url: str, tip: str | None, timeout: float) -> str | None:
+    """Wait until the node at `base_url` has a tip other than `tip`, at most `timeout`
+    seconds (long-poll on GET /v1/wait); returns the tip. On a node without that
+    endpoint it just sleeps, so clients work with older nodes too."""
+    try:
+        return http_get(f"{base_url}/v1/wait?tip={tip or ''}&timeout={timeout}", timeout=timeout + 10)["tip"]
+    except (OSError, ValueError, KeyError):
+        time.sleep(timeout)
+        return tip
+
+
+def http_post(url: str, body, timeout: float = 5.0, raw: bool = False):
+    data = body if raw else json.dumps(body).encode()
+    headers = {"Content-Type": "application/octet-stream" if raw else "application/json"}
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(_read_limited(r, MAX_RESPONSE_BYTES))
+
+
+class Node:
+    def __init__(self, data_dir: str, genesis: dict, port: int = params.DEFAULT_PORT,
+                 host: str = "127.0.0.1", peers=(), miner_key: Key | None = None, log=print,
+                 use_gpu: bool = False, p2p_port: int = 0, listen: bool = True, seeds=None,
+                 fast_sync: bool = False, p2p_host: str | None = None, no_signal=(), debug=None,
+                 prune: bool = False, prune_keep: int = prunemod.PRUNE_KEEP_BLOCKS):
+        self.data_dir = data_dir
+        self.port = port
+        self.host = host
+        self.url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '::') else host}:{port}"
+        self.log = log
+        self.debug = debug                        # optional: detailed P2P messages (log level "debug")
+        # A full node must run the exact wasmtime the network is pinned to; on any
+        # other version it could judge a task challenge differently and fork.
+        from . import wasm
+        wasm.check_engine()
+        self.gpu = self._init_gpu() if use_gpu else None
+        self.lock = threading.RLock()
+        self.tip_changed = threading.Condition(self.lock)   # wakes API clients waiting for a block
+        self._waiters = 0
+        self.mempool: dict[str, dict] = {}
+        self.miner_key = miner_key
+        self.no_signal = set(no_signal)           # deployments this miner chooses not to signal
+        self.prune = prune                        # keep recent block bodies and data in use only (green/prune.py)
+        self.prune_keep = prune_keep
+        if prune and prune_keep < min_prune_keep():
+            raise ValueError(f"--prune-keep must be at least {min_prune_keep()} blocks")
+        self.mining = False
+        self.work_tasks = True                    # take paid WASM tasks while mining
+        self.watch = True                         # check revealed task results, challenge frauds
+        self._checked: dict[tuple, bool] = {}     # (task, output) -> our local verdict
+        self.batch_buf: dict[str, dict] = {}      # job -> {"units", "results", "started"}: computed, not committed
+        self.my_batches: dict[str, dict] = {}     # batch id -> {"job", "count", "root", "manifest"}: committed by us
+        self._unit_ok: set[tuple] = set()         # (batch, unit_key) results we verified for our own jobs
+        self._leaf_cache: dict[str, tuple] = {}   # manifest hash -> (root, leaves, set(leaves)), root-checked
+        self._warned_bond = False
+        self.stats = {"units": 0, "useful_units": 0, "blocks_found": 0, "batches_committed": 0,
+                      "results_revealed": 0, "tasks_done": 0, "frauds_caught": 0, "started": time.time()}
+        self._recent_unit_times: list[float] = []
+        self._task_inflight: dict[str, dict] = {}
+        self._task_unrunnable: set[str] = set()
+        self.running = True
+
+        os.makedirs(data_dir, exist_ok=True)
+        self.blobs = BlobStore(os.path.join(data_dir, "blobs"))
+        self.store = Store(os.path.join(data_dir, "chain.db"))
+        self.chain = Chain(genesis, self.blobs, store=self.store)
+        if self.chain.height:
+            self.log(f"Opened the chain at height {self.chain.height} (base state at {self.chain.base_height})")
+        self._pending = self.chain.state.copy()
+        self.snapshots: list[dict] = self.store.get_meta("snapshots", [])
+        self.chain.on_snapshot = self._write_snapshot
+        self.p2p = P2P(self, host=host if p2p_host is None else p2p_host, port=p2p_port, peers=peers, data_dir=data_dir, listen=listen, seeds=seeds,
+                       fast_sync=fast_sync and self.chain.height == 0)
+
+    # --- persistence ---
+
+    def _init_gpu(self):
+        """Load the GPU miner, but only trust it if it matches the CPU bit for bit.
+
+        A GPU that produced a different digest would waste work on blocks every
+        other node rejects, so a mismatch disables it rather than risking that.
+        """
+        from . import gpu
+        miner = gpu.get_miner()
+        if miner is None:
+            self.log("[gpu] no suitable GPU/driver found; mining on the CPU")
+            return None
+        for s in (b"gpu-selftest-1", b"gpu-selftest-2"):
+            a, b = work.filler_inputs(s)
+            tr_c, c_c = work.compute_unit(a, b, s)
+            tr_g, _, c_g = miner.unit(a, b, s)
+            import numpy as np
+            if tr_c != tr_g or not np.array_equal(c_c, c_g):
+                self.log("[gpu] self-test does not match the CPU; GPU disabled for safety, mining on the CPU")
+                return None
+        self.log(f"[gpu] {miner.name} verified, mining on the GPU")
+        return miner
+
+    def _write_snapshot(self, height: int, bh: str, state) -> None:
+        """Called by the chain (inside the block's store transaction) when its base
+        passes a snapshot height: write the ledger there as chunks, keep two."""
+        manifest = snapshot.make_snapshot(state, height, bh, self.blobs.put)
+        keep = [m for m in self.snapshots if m["height"] != height][-1:] + [manifest]
+        live = {c for m in keep for c in m["chunks"]} | {m["id"] for m in keep}
+        for m in self.snapshots:
+            for blob in m["chunks"] + [m["id"]]:
+                if blob not in live:
+                    self.blobs.delete(blob)
+        self.snapshots = keep
+        self.store.set_meta("snapshots", keep)
+        self.log(f"Snapshot of the ledger at height {height} written ({len(manifest['chunks'])} chunks)")
+
+    def adopt_snapshot(self, headers: list[dict], state) -> None:
+        """Install a verified snapshot (from the P2P fast sync) and restart the mempool on it."""
+        with self.lock:
+            self.chain.install_snapshot(headers, state)
+            self.mempool = {}
+            self._pending = self.chain.state.copy()
+        self.log(f"Started from a verified snapshot at height {self.chain.height}; validating every block from here")
+
+    def close(self) -> None:
+        """Release the database (for a node that was never started, or after stop())."""
+        self.store.close()
+
+    # --- mempool ---
+
+    def _rebuild_pending(self, must_keep: str | None = None) -> None:
+        """Recompute the state after all mempool transactions; drop the stale ones.
+
+        Arrival order, not nonce order: every transaction was accepted on top of
+        the ones before it, so this keeps a payment and a spend of that payment
+        (by another sender) in a valid order. If `must_keep` fails, its error is
+        raised and nothing changes.
+        """
+        height = self.chain.height + 1
+        s = self.chain.state.copy()
+        keep = {}
+        for tid, t in self.mempool.items():
+            # The mempool is not a block: challenges beyond one block's adjudication
+            # budget must wait for a later block, not be dropped.
+            s.adjudication_used = 0
+            s.responses_used = 0
+            if tid == must_keep:
+                self.chain.apply_tx(s, t, height)
+                keep[tid] = t
+                continue
+            try:
+                self.chain.apply_tx(s, t, height)
+                keep[tid] = t
+            except (InvalidTx, MissingData):
+                pass
+        self.mempool = keep
+        self._pending = s
+
+    def submit_tx(self, t: dict, source=None) -> str:
+        """Validate and add a transaction to the mempool, then announce it to peers."""
+        try:
+            tid = txmod.txid(t)
+        except (TypeError, ValueError):
+            raise InvalidTx("unencodable transaction") from None
+        if self._with_blobs(lambda: self._add_tx(t, tid), source):
+            self.p2p.announce_tx(tid, source)
+        return tid
+
+    def _add_tx(self, t: dict, tid: str) -> bool:
+        with self.lock:
+            if tid in self.mempool:
+                return False
+            txmod.check_format(t, self.chain.chain_id)
+            who = txmod.sender(t)
+            same = [k for k, m in self.mempool.items() if txmod.sender(m) == who]
+            old = next((k for k in same if self.mempool[k]["nonce"] == t["nonce"]), None)
+            if old is not None:
+                return self._replace(old, t, tid)
+            if len(same) >= MAX_MEMPOOL_PER_SENDER:
+                raise InvalidTx("too many pending transactions from this sender")
+            if len(self.mempool) < MAX_MEMPOOL:
+                # Straight onto the pending state: a rejected transaction changes nothing
+                # (tests/test_atomicity.py), and no layer is added per transaction.
+                self._pending.adjudication_used = 0
+                self._pending.responses_used = 0
+                self.chain.apply_tx(self._pending, t, self.chain.height + 1)
+                self.mempool[tid] = t
+                return True
+            # Full: the new transaction must outbid the cheapest one it pushes out.
+            victim = self._eviction_candidate(exclude=who)
+            if victim is None or fee_rate(self.mempool[victim]) >= fee_rate(t):
+                raise InvalidTx("mempool is full and the fee rate is too low")
+            saved = dict(self.mempool), self._pending
+            del self.mempool[victim]
+            self.mempool[tid] = t
+            try:
+                self._rebuild_pending(must_keep=tid)
+            except (InvalidTx, MissingData):
+                self.mempool, self._pending = saved
+                raise
+            return True
+
+    def _eviction_candidate(self, exclude: str) -> str | None:
+        """The lowest fee-rate transaction that is the last of its sender's queue
+        (evicting an earlier one would strand the sender's later transactions)."""
+        last: dict[str, tuple] = {}
+        for tid, m in self.mempool.items():
+            who = txmod.sender(m)
+            if who != exclude and (who not in last or m["nonce"] > last[who][0]):
+                last[who] = (m["nonce"], tid)
+        if not last:
+            return None
+        return min((tid for _, tid in last.values()), key=lambda k: fee_rate(self.mempool[k]))
+
+    def _replace(self, old: str, t: dict, tid: str) -> bool:
+        """Replace-by-fee: the same sender and nonce, paying clearly more."""
+        prev = self.mempool[old]
+        need = prev["fee"] + max(params.MIN_TX_FEE, prev["fee"] * RBF_MIN_BUMP_PERCENT // 100)
+        if t["fee"] < need:
+            raise InvalidTx(f"replacement fee too low: must be at least {need}")
+        saved = dict(self.mempool), self._pending
+        self.mempool = {(tid if k == old else k): (t if k == old else v) for k, v in self.mempool.items()}
+        try:
+            self._rebuild_pending(must_keep=tid)
+        except (InvalidTx, MissingData):
+            self.mempool, self._pending = saved
+            raise
+        return True
+
+    def pending_nonce(self, addr: str) -> int:
+        with self.lock:
+            return self._pending.nonce(addr)
+
+    # --- blocks ---
+
+    def submit_block(self, block: dict, source=None, relay: bool = True) -> str:
+        status = self._with_blobs(lambda: self._add_block(block), source)
+        if status == "orphan":
+            self.p2p.on_orphan(source)            # fetch the headers that lead to it
+        if status == "added" and relay:
+            self.p2p.announce_block(block_hash(block), source)
+        return status
+
+    def _add_block(self, block: dict) -> str:
+        with self.lock:
+            old_tip = self.chain.tip
+            abandoned = []
+            status = self.chain.add_block(block)
+            if self.chain.tip != old_tip:
+                hdr = self.chain.tip_header()
+                if hdr["prev"] != old_tip:
+                    abandoned = self.chain.branch(old_tip)       # old tip is no longer on the main chain
+                    self._restore_disconnected(abandoned)
+                    self.log(f"[reorg] new heaviest chain, height {hdr['height']}")
+                self._rebuild_pending()
+                self.p2p.on_new_tip()
+                self.tip_changed.notify_all()
+            return status
+
+    def _restore_disconnected(self, abandoned: list[str]) -> None:
+        """After a reorg, put the transactions of abandoned blocks back in the mempool.
+
+        Without this a payment confirmed on the losing branch would silently
+        vanish. _rebuild_pending then drops the ones the new branch already has
+        (their nonce is used) or that no longer apply.
+        """
+        back = {}
+        for bh in reversed(abandoned):                  # oldest first
+            for t in self.chain.blocks[bh]["txs"]:
+                tid = txmod.txid(t)
+                if tid not in self.mempool:
+                    back[tid] = t
+        # They are older than anything still waiting, which may build on them.
+        rest = list(self.mempool.items())[:max(0, MAX_MEMPOOL - len(back))]
+        self.mempool = {**back, **dict(rest)}
+        if back:
+            self.log(f"[reorg] {len(back)} transactions from {len(abandoned)} abandoned blocks returned to the mempool")
+
+    def _with_blobs(self, fn, source=None):
+        """Run fn; if it needs a data blob we lack, fetch it from peers and retry.
+
+        Only ever fetches over the P2P network (preferring the peer that sent the
+        transaction or block), never from an address named by a request, and
+        never more than the size the protocol allows for that blob.
+        """
+        tried = set()
+        while True:
+            try:
+                return fn()
+            except MissingData as e:
+                if e.blob_hash in tried or not self._fetch_blob(e.blob_hash, e.max_size, prefer=source):
+                    raise
+                tried.add(e.blob_hash)
+
+    def _fetch_blob(self, blob_hash: str, max_size: int, prefer=None) -> bool:
+        data = self.p2p.fetch_blob(blob_hash, max_size, prefer=prefer)
+        if data is None or hhex(data) != blob_hash:
+            return False
+        self.blobs.put(data)
+        return True
+
+    def leaves(self, entry: dict, fetch: bool = False) -> list[str] | None:
+        """A revealed batch's result hashes (in unit order), from its manifest.
+
+        Only returned if they hash to the batch's revealed Merkle root, so a
+        miner cannot hand out a list that differs from what it committed to.
+        """
+        m = entry.get("manifest")
+        if not m:
+            return None
+        cached = self._leaf_cache.get(m)
+        if cached is not None and cached[0] == entry["root"]:
+            return cached[1]
+        blob = self.blobs.get(m)
+        if blob is None and fetch and self._fetch_blob(m, MAX_MANIFEST_BYTES):
+            blob = self.blobs.get(m)
+        found = txmod.manifest_leaves(blob, entry["count"], entry["root"])
+        if found is not None:
+            if len(self._leaf_cache) > 10_000:
+                self._leaf_cache.clear()
+            self._leaf_cache[m] = (entry["root"], found, set(found))
+        return found
+
+    def _revealed(self, state):
+        """Every batch whose results are public: revealed live ones and settled ones."""
+        for job in state.jobs.values():
+            for b in job["batches"].values():
+                if b["status"] == "revealed":
+                    yield b
+            yield from job["delivered"].values()
+
+    def is_public_blob(self, blob_hash: str) -> bool:
+        """Job data and revealed results are public; committed results are not (yet)."""
+        with self.lock:
+            state = self.chain.state
+            if blob_hash in state.jobs:
+                return True
+            for m in self.snapshots:
+                if blob_hash == m["id"] or blob_hash in m["chunks"]:
+                    return True
+            for b in self._revealed(state):
+                if b["manifest"] == blob_hash:
+                    return True
+                if self.leaves(b) is not None and blob_hash in self._leaf_cache[b["manifest"]][2]:
+                    return True
+            for task in state.tasks.values():
+                if blob_hash in (task["prog"], task["input"]) or task["output"] == blob_hash:
+                    return True
+            for t in self.mempool.values():
+                if (t["type"] == "job_post" and t["job"] == blob_hash) or \
+                        (t["type"] == "job_reveal" and t["manifest"] == blob_hash) or \
+                        (t["type"] == "task_post" and blob_hash in (t["prog"], t["input"])):
+                    return True
+        return False
+
+    # --- mining ---
+
+    def _my_bond_ok(self, job: dict) -> bool:
+        need = params.bond_for(job["price"]) + params.MIN_TX_FEE
+        return self._pending.balance(self.miner_key.address) >= need
+
+    def _busy_units(self) -> set:
+        """(job, unit_key) pairs not to pick: in a mempool commit, or computed and waiting in our buffer."""
+        jobs = self.chain.state.jobs
+        busy = {(t["job"], txmod.unit_key(u)) for t in self.mempool.values()
+                if t["type"] == "job_commit" and t["job"] in jobs
+                for u in txmod.bitmap_units(t["units"], jobs[t["job"]]["dims"]) or []}
+        for job_id, buf in self.batch_buf.items():
+            busy.update((job_id, txmod.unit_key(u)) for u in buf["units"])
+        return busy
+
+    def _choose_work(self) -> dict:
+        """Prefer the best-paying unit we can commit to; fall back to filler work."""
+        state = self.chain.state
+        busy = self._busy_units()
+        best_price, options = 0, []
+        for job_id, job in state.jobs.items():
+            if job["price"] < best_price or not self._my_bond_ok(job):
+                continue
+            units = [u for u in state.open_units(job_id) if (job_id, txmod.unit_key(u)) not in busy]
+            if not units:
+                continue
+            if job["price"] > best_price:
+                best_price, options = job["price"], []
+            options += [(job_id, u) for u in units]
+        if not options:
+            return {"job": None, "unit": None}
+        job_id, unit = random.choice(options)
+        return {"job": job_id, "unit": unit}
+
+    def _mine_loop(self) -> None:
+        addr = self.miner_key.address
+        self.log(f"Mining started. Reward address: {addr}")
+        while self.running:
+            if not self.mining:
+                time.sleep(0.2)
+                continue
+            self._process_batches()
+            with self.lock:
+                header, txs, _ = self.chain.build_template(addr, list(self.mempool.values()),
+                                                           signal_skip=self.no_signal)
+                header["work"] = self._choose_work()
+                header["nonce"] = random.getrandbits(48)
+                tip = self.chain.tip
+            work_item = header["work"]
+            seed = seed_of(header)
+            try:
+                a, b = work_inputs(header, seed, self.blobs, self._job_size(work_item))
+            except (MissingData, InvalidBlock, InvalidTx) as e:
+                self.log(f"[warning] could not do the work unit: {e}")
+                time.sleep(1)
+                continue
+            if self.gpu is not None:
+                transcript, ticket = self.gpu.ticket(a, b, seed)
+            else:
+                transcript, ticket, _ = solve(header, self.blobs)
+            is_useful = work_item["job"] is not None
+            self._count_unit(is_useful)
+
+            # Delivery is separate from the lottery: results are collected into
+            # batches (one commit + one reveal for up to MAX_BATCH_UNITS units),
+            # and only a bounded number are in flight; the rest are just tickets.
+            if is_useful and self._should_commit():
+                self._buffer_result(work_item, work.recover_useful(a, b, seed))
+            self._flush_batches()
+
+            if ticket <= target_of(header):
+                header["transcript"] = transcript
+                block = {"header": header, "txs": txs}
+                with self.lock:
+                    stale = self.chain.tip != tip
+                if stale:
+                    continue
+                try:
+                    status = self.submit_block(block)
+                except (InvalidBlock, MissingData) as e:
+                    self.log(f"[error] our own block was rejected: {e}")
+                    continue
+                if status == "added":
+                    self.stats["blocks_found"] += 1
+                    kind = "useful work" if header["work"]["job"] else "filler work"
+                    self.log(f"*** BLOCK FOUND #{header['height']}  {block_hash(block)[:16]}...  "
+                             f"({kind}, {len(txs)} txs, reward {params.fmt_amount(params.block_reward(header['height']))})")
+
+    def _job_size(self, work_item: dict) -> int:
+        if work_item["job"] is None:
+            return 0
+        job = self.chain.state.jobs.get(work_item["job"])
+        return txmod.job_blob_size(job["dims"]) if job else 0
+
+    def _should_commit(self) -> bool:
+        """Sell only a bounded number of units at a time (bonds are locked until payment)."""
+        in_flight = (sum(len(b["units"]) for b in self.batch_buf.values())
+                     + sum(b["count"] for b in self.my_batches.values()))
+        return in_flight < COMMIT_INFLIGHT_CAP
+
+    def _buffer_result(self, work_item: dict, useful) -> None:
+        buf = self.batch_buf.setdefault(work_item["job"], {"units": [], "results": [], "started": time.time()})
+        buf["units"].append(work_item["unit"])
+        buf["results"].append(self.blobs.put(txmod.encode_result(useful)))
+
+    def _flush_batches(self) -> None:
+        """Commit a buffered batch once it is full, old enough, or its job has no open units left."""
+        now = time.time()
+        with self.lock:
+            state = self.chain.state
+            busy = self._busy_units()
+            ready = []
+            for job_id, buf in self.batch_buf.items():
+                more = job_id in state.jobs and any(
+                    (job_id, txmod.unit_key(u)) not in busy for u in state.open_units(job_id))
+                if len(buf["units"]) >= params.MAX_BATCH_UNITS or not more or now - buf["started"] >= BATCH_SECONDS:
+                    ready.append(job_id)
+        for job_id in ready:
+            self._commit_batch(job_id, self.batch_buf.pop(job_id))
+
+    def _commit_batch(self, job_id: str, buf: dict) -> None:
+        """Step 1 of selling: commit to the batch. The results stay private until the reveal."""
+        addr = self.miner_key.address
+        with self.lock:
+            job = self.chain.state.jobs.get(job_id)
+            bal = self._pending.balance(addr)
+            nonce = self._pending.nonce(addr)
+        if job is None:
+            return
+        # Units we cannot bond stay lottery tickets; selling them waits for funds.
+        n = min(len(buf["units"]), params.MAX_BATCH_UNITS,
+                max(0, (bal - params.MIN_TX_FEE) // params.bond_for(job["price"])))
+        if n == 0:
+            if not self._warned_bond:
+                self._warned_bond = True
+                self.log("[info] not enough balance for a bond; selling compute starts after the first block reward")
+            return
+        dims = job["dims"]
+        pairs = sorted(zip(buf["units"][:n], buf["results"][:n]), key=lambda p: txmod.unit_index(p[0], dims))
+        units, leaves = [u for u, _ in pairs], [r for _, r in pairs]
+        bitmap = txmod.units_bitmap(units, dims)
+        root = merkle_root(leaves)
+        manifest = self.blobs.put(txmod.encode_manifest(leaves))
+        c = txmod.commitment(addr, job_id, bitmap, root)
+        t = make_tx(self.miner_key, self.chain.chain_id, "job_commit", nonce, job=job_id, units=bitmap, commitment=c)
+        try:
+            self.submit_tx(t)
+        except (InvalidTx, MissingData) as e:
+            self.log(f"[warning] could not commit the batch: {e}")
+            return
+        self.my_batches[c] = {"job": job_id, "count": n, "root": root, "manifest": manifest}
+        self.stats["batches_committed"] += 1
+
+    def _process_batches(self) -> None:
+        """Step 2: reveal our batches once their commit is buried; answer disputes against them."""
+        addr = self.miner_key.address
+        with self.lock:
+            state = self.chain.state
+            height = self.chain.height
+            queued = {(t["type"], t.get("batch") or t.get("commitment")) for t in self.mempool.values()
+                      if t["type"] in ("job_commit", "job_reveal")}
+            answering = {(t["batch"], txmod.unit_key(t["unit"])) for t in self.mempool.values()
+                         if t["type"] == "job_respond"}
+            reveals, responds = [], []
+            for bid, info in list(self.my_batches.items()):
+                job = state.jobs.get(info["job"])
+                batch = job["batches"].get(bid) if job else None
+                if batch is None or batch["miner"] != addr:
+                    if ("job_commit", bid) not in queued:
+                        del self.my_batches[bid]       # paid, forfeit, expired or lost the race
+                    continue
+                if (batch["status"] == "committed" and height - batch["height"] + 1 >= REVEAL_CONFIRMATIONS
+                        and height + 1 <= batch["expires"] and ("job_reveal", bid) not in queued):
+                    reveals.append((info["job"], bid, info))
+            # Disputes are answered from chain state and the manifest on disk, not
+            # from memory, so this keeps working after a restart.
+            for job_id, job in state.jobs.items():
+                for bid, batch in job["batches"].items():
+                    if batch["miner"] != addr or not batch["disputes"]:
+                        continue
+                    for key, d in batch["disputes"].items():
+                        if height + 1 <= d["deadline"] and (bid, key) not in answering:
+                            responds.append((job_id, job["dims"], bid, dict(batch), key))
+        for job_id, bid, info in reveals:
+            if self._try_tx("job_reveal", job=job_id, batch=bid, root=info["root"], manifest=info["manifest"]):
+                self.stats["results_revealed"] += info["count"]
+                self.log(f"Useful work delivered: job {job_id[:12]}... {info['count']} units (batch {bid[:12]}...)")
+        for job_id, dims, bid, batch, key in responds[:RESPONSES_PER_ROUND]:
+            leaves = self.leaves(batch)
+            if leaves is None:
+                self.log(f"[dispute] batch {bid[:12]}... is disputed but its manifest is not on this node")
+                continue
+            unit = [int(x) for x in key.split(",")]
+            index = txmod.bitmap_units(batch["units"], dims).index(unit)
+            if self._try_tx("job_respond", job=job_id, batch=bid, unit=unit, result=leaves[index],
+                            proof=merkle_proof(leaves, index)):
+                self.log(f"[dispute] batch {bid[:12]}... unit {unit} was disputed, proving it on chain")
+
+    # --- general compute worker ---
+
+    def _task_worker_loop(self) -> None:
+        """Two jobs: earn by running posted WASM tasks, and guard the market.
+
+        Worker: commit to a task's output, then reveal it to get paid.
+        Watchtower: re-run every revealed result locally and challenge the wrong
+        ones. An optimistic market is only as safe as its watchers -- without
+        this, nobody would ever challenge and a lying worker would always be
+        paid. A watchtower only challenges what it has already proven wrong
+        itself, so honest results are never dragged into on-chain adjudication,
+        and it earns the cheater's bond for the trouble.
+        """
+        from . import wasm
+        addr = self.miner_key.address
+        # Kept on the node, not in this function, so a restart of the loop after an
+        # error still reveals what was committed (forgetting it would lose the bond).
+        inflight = self._task_inflight       # task_id -> {"commitment","output","output_blob","height"}
+        unrunnable = self._task_unrunnable
+        while self.running:
+            time.sleep(1.0)
+            with self.lock:
+                height = self.chain.height
+                tasks = {tid: dict(t) for tid, t in self.chain.state.tasks.items()}
+                busy = {t["task"] for t in self.mempool.values()
+                        if t.get("type") in ("task_commit", "task_reveal", "task_challenge")}
+                pending_commits = {t["task"]: t["commitment"] for t in self.mempool.values()
+                                   if t.get("type") == "task_commit"}
+                bal = self._pending.balance(addr)
+            if self.watch:
+                self._watch_tasks(tasks, busy, height, bal)
+                self._watch_jobs(height, bal)
+            if not (self.mining and self.work_tasks):
+                continue
+            # Reveal anything we committed that is now buried enough.
+            for tid, info in list(inflight.items()):
+                t = tasks.get(tid)
+                r = t["reserved"] if t else None
+                if not t or r is None or r.get("worker") != addr or r["commitment"] != info["commitment"]:
+                    # Not on chain yet is not the same as lost: while our commit waits in
+                    # the mempool, keep it -- dropping it here would leave the commit
+                    # unrevealed, forfeit the bond and make us commit the task twice.
+                    if pending_commits.get(tid) != info["commitment"]:
+                        inflight.pop(tid, None)
+                    continue
+                if t["status"] != "open" or height > r["expires"]:
+                    inflight.pop(tid, None)
+                    continue
+                if height - r["height"] >= REVEAL_CONFIRMATIONS and tid not in busy:
+                    self.blobs.put(info["output_blob"])
+                    self._try_tx("task_reveal", task=tid, output=info["output"])
+                    inflight.pop(tid, None)
+            # Pick one open, unreserved task we can afford and run it.
+            if len(inflight) < COMMIT_INFLIGHT_CAP:
+                for tid, t in tasks.items():
+                    if t["status"] != "open" or tid in inflight or tid in busy or tid in unrunnable:
+                        continue
+                    if t["reserved"] is not None and height <= t["reserved"]["expires"]:
+                        continue
+                    if bal < params.task_bond(t["price"]) + params.MIN_TX_FEE:
+                        continue
+                    io = self._task_io(t)
+                    if io is None:
+                        continue
+                    try:
+                        output, _ = wasm.run(io[0], io[1], t["fuel"])
+                    except wasm.ComputeError as e:
+                        # Deterministic: it will fail the same way next time too.
+                        unrunnable.add(tid)
+                        self.log(f"[task] {tid[:12]} cannot be run, skipping: {e}")
+                        continue
+                    out_hash = wasm.result_hash(output)
+                    c = txmod.task_commitment(addr, tid, out_hash)
+                    if self._try_tx("task_commit", task=tid, commitment=c):
+                        inflight[tid] = {"commitment": c, "output": out_hash,
+                                         "output_blob": output, "height": height}
+                        self.stats["tasks_done"] += 1
+                        self.log(f"[task] {tid[:12]} computed, commitment sent")
+                    break
+
+    def _task_io(self, t: dict):
+        """(program, input) bytes for a task, fetching them from peers if needed."""
+        prog = self.blobs.get(t["prog"])
+        inp = self.blobs.get(t["input"])
+        if prog is None:
+            self._fetch_blob(t["prog"], params.MAX_TASK_PROGRAM_BYTES)
+        if inp is None:
+            self._fetch_blob(t["input"], params.MAX_TASK_INPUT_BYTES)
+        prog = prog or self.blobs.get(t["prog"])
+        inp = inp if inp is not None else self.blobs.get(t["input"])
+        return None if prog is None or inp is None else (prog, inp)
+
+    def _watch_tasks(self, tasks: dict, busy: set, height: int, bal: int) -> None:
+        from . import wasm
+        addr = self.miner_key.address
+        for tid, t in tasks.items():
+            if t["status"] != "revealed" or t["worker"] == addr or tid in busy:
+                continue
+            if t["settle_at"] is None or height + 1 > t["settle_at"]:
+                continue
+            key = (tid, t["output"])
+            if key not in self._checked:
+                io = self._task_io(t)
+                if io is None:
+                    continue
+                if len(self._checked) > 10_000:
+                    self._checked.clear()
+                self._checked[key] = wasm.verify(io[0], io[1], t["output"], t["fuel"])
+            if self._checked[key]:
+                continue
+            fee = params.challenge_fee(t["fuel"], t["prog_size"])
+            if bal < params.task_bond(t["price"]) + fee:
+                self.log(f"[watchtower] {tid[:12]} has a false result, but the balance cannot cover the challenge bond")
+                continue
+            if self._try_tx("task_challenge", fee, task=tid):
+                self.stats["frauds_caught"] += 1
+                self.log(f"[watchtower] {tid[:12]} false result detected, challenge sent "
+                         f"(worker {t['worker'][:12]}... will lose its bond)")
+
+    def _watch_jobs(self, height: int, bal: int) -> None:
+        """Check every result delivered to our own jobs; dispute wrong or withheld ones.
+
+        Validators only see a Merkle root, so the buyer is the one who has to
+        look. Freivalds makes that cheap (well under a millisecond per unit).
+        Every bad unit can be disputed at once, and a single unanswered one
+        costs the miner the bond of its whole batch.
+        """
+        addr = self.miner_key.address
+        with self.lock:
+            busy = {t["batch"] for t in self.mempool.values() if t["type"] in ("job_challenge", "job_respond")}
+            todo = [(job_id, job["dims"], bid, {**b, "disputes": dict(b["disputes"]), "proven": set(b["proven"])})
+                    for job_id, job in self.chain.state.jobs.items() if job["buyer"] == addr
+                    for bid, b in job["batches"].items()
+                    if b["status"] == "revealed" and b["miner"] != addr
+                    and bid not in busy and height + 1 <= b["settle_at"]]
+        for job_id, dims, bid, batch in todo:
+            bad, missing = self._check_batch(job_id, dims, bid, batch)
+            late = height + 1 >= batch["settle_at"] - params.JOB_CHALLENGE_BLOCKS // 2
+            # Not fetched yet may just be slow; call data withheld only late in the window.
+            units = [u for u in bad + (missing if late else [])
+                     if txmod.unit_key(u) not in batch["disputes"] and txmod.unit_key(u) not in batch["proven"]]
+            if not units:
+                continue
+            fee = txmod.job_challenge_fee(len(units))
+            if bal < fee:
+                self.log(f"[watchtower] batch {bid[:12]} is bad, but the balance cannot cover the dispute fee")
+                continue
+            if self._try_tx("job_challenge", fee, job=job_id, batch=bid, units=txmod.units_bitmap(units, dims)):
+                self.stats["frauds_caught"] += 1
+                bal -= fee
+                self.log(f"[watchtower] job {job_id[:12]}: {len(bad)} wrong and {len(units) - len(bad)} withheld "
+                         f"units disputed (miner {batch['miner'][:12]}... loses the batch bond unless it answers all)")
+
+    def _check_batch(self, job_id: str, dims, bid: str, batch: dict):
+        """(wrong units, unavailable units) of a revealed batch."""
+        try:
+            a, b = self.blobs.job(job_id, txmod.job_blob_size(dims))
+        except (MissingData, InvalidTx):
+            return [], []
+        units = txmod.bitmap_units(batch["units"], dims)
+        leaves = self.leaves(batch, fetch=True)
+        if leaves is None:                       # no manifest that matches the root
+            return [], units
+        bad, missing = [], []
+        for u, rh in zip(units, leaves):
+            key = (bid, txmod.unit_key(u))
+            if key in self._unit_ok:
+                continue
+            data = self.blobs.get(rh)
+            if data is None and self._fetch_blob(rh, txmod.RESULT_BYTES):
+                data = self.blobs.get(rh)
+            if data is None:
+                missing.append(u)
+                continue
+            try:
+                c = txmod.decode_result(data)
+            except ValueError:
+                bad.append(u)
+                continue
+            ua, ub = txmod.unit_inputs(a, b, u)
+            # Private randomness: the miner cannot know which checks we run.
+            if not work.freivalds_check(ua, ub, c, os.urandom(32)):
+                bad.append(u)
+                continue
+            if len(self._unit_ok) > 100_000:
+                self._unit_ok.clear()
+            self._unit_ok.add(key)
+        return bad, missing
+
+    def _try_tx(self, kind: str, fee: int = params.MIN_TX_FEE, **fields) -> bool:
+        t = make_tx(self.miner_key, self.chain.chain_id, kind, self.pending_nonce(self.miner_key.address),
+                    fee, **fields)
+        try:
+            self.submit_tx(t)
+            return True
+        except (InvalidTx, MissingData) as e:
+            self.log(f"[tx] {kind} rejected: {e}")
+            return False
+
+    def _count_unit(self, useful: bool) -> None:
+        now = time.time()
+        with self.lock:
+            self.stats["units"] += 1
+            if useful:
+                self.stats["useful_units"] += 1
+            self._recent_unit_times.append(now)
+            self._recent_unit_times = [t for t in self._recent_unit_times if now - t < 30]
+
+    def units_per_second(self) -> float:
+        times = self._recent_unit_times
+        if len(times) < 2:
+            return 0.0
+        return (len(times) - 1) / max(1e-9, times[-1] - times[0])
+
+    # --- API views ---
+
+    def status(self) -> dict:
+        with self.lock:
+            hdr = self.chain.tip_header()
+            target = target_of(hdr)
+            return {
+                "coin": params.COIN_NAME, "genesis": self.chain.genesis_hash,
+                "height": self.chain.height, "tip": self.chain.tip, "time": hdr["time"],
+                "chainwork": str(self.chain.meta[self.chain.tip]["chainwork"]),
+                "target": hdr["target"], "units_per_block": round(params.MAX_TARGET / (target + 1), 2),
+                "peers": sorted(p.listen_addr or p.name for p in self.p2p.all_peers()),
+                "p2p": self.p2p.status(),
+                "mempool": len(self.mempool),
+                "mining": self.mining, "miner": self.miner_key.address if self.miner_key else None,
+                "units_per_second": round(self.units_per_second(), 2), "stats": dict(self.stats),
+                "warnings": self.warnings(),
+                "pruned": self.prune, "first_block": self.chain.first_block,
+            }
+
+    def maintain(self) -> dict:
+        """Prune old block bodies and collect unused blobs (pruned nodes)."""
+        with self.lock:
+            dropped = self.chain.prune(self.prune_keep)
+            height = self.chain.height
+        result = prunemod.collect(self, height, keep=self.prune_keep)
+        if dropped or result["deleted"]:
+            self.log(f"[prune] dropped {dropped} old block bodies, deleted {result['deleted']} unused blobs")
+        return {"bodies_dropped": dropped, **result}
+
+    def _supervised(self, name: str, loop) -> None:
+        """Run a long-lived loop; an unexpected error is logged and the loop restarts,
+        instead of the thread dying silently. During shutdown it just ends."""
+        while self.running:
+            try:
+                loop()
+                return
+            except Exception as e:
+                if not self.running:
+                    return                        # e.g. the database closed under it at shutdown
+                self.log(f"[error] the {name} hit {type(e).__name__}: {e}; restarting it")
+                time.sleep(1)
+
+    def _maintenance_loop(self) -> None:
+        while self.running:
+            time.sleep(MAINTENANCE_SECONDS)
+            try:
+                self.maintain()
+            except Exception as e:                # never stop maintaining because of one failure
+                self.log(f"[prune] error: {type(e).__name__}: {e}")
+
+    def wait_for_block(self, tip: str, timeout: float) -> dict:
+        """Long-poll: return as soon as the tip is no longer `tip` (or after `timeout`).
+        Lets wallets and agents react to new blocks without polling."""
+        timeout = max(0.0, min(float(timeout), MAX_WAIT_SECONDS))
+        with self.lock:
+            if self._waiters >= MAX_WAITERS:
+                raise OverflowError("too many clients waiting for a block")
+            self._waiters += 1
+            try:
+                if self.chain.tip == tip:
+                    self.tip_changed.wait_for(lambda: self.chain.tip != tip or not self.running, timeout)
+                return {"tip": self.chain.tip, "height": self.chain.height, "changed": self.chain.tip != tip,
+                        "mempool": len(self.mempool)}
+            finally:
+                self._waiters -= 1
+
+    def fee_estimate(self, blocks: int = 2) -> dict:
+        """A fee rate (yaprak per byte) that should get a transaction into one of the
+        next `blocks` blocks: where it would land in the mempool's fee order, and
+        what recent full blocks needed. Never below the minimum fee."""
+        blocks = max(1, min(int(blocks), 100))
+        with self.lock:
+            pool = sorted(self.mempool.values(), key=fee_rate, reverse=True)
+            recent = [self.chain.block(h) for h in self.chain.main[-FEE_RECENT_BLOCKS:]]
+        room_bytes, room_txs = blocks * params.MAX_BLOCK_BYTES * 9 // 10, blocks * params.MAX_BLOCK_TXS * 9 // 10
+        queue_rate, used = 0.0, 0
+        for i, t in enumerate(pool):
+            used += txmod.tx_size(t)
+            if used > room_bytes or i + 1 > room_txs:
+                queue_rate = fee_rate(t)              # to get in, outbid what sits at the cut
+                break
+        full_rates = []
+        for b in recent:
+            txs = b["txs"] if b else []
+            if txs and (len(txs) >= params.MAX_BLOCK_TXS * 9 // 10
+                        or sum(txmod.tx_size(t) for t in txs) >= params.MAX_BLOCK_BYTES * 9 // 10):
+                full_rates.append(min(fee_rate(t) for t in txs))
+        recent_rate = sorted(full_rates)[len(full_rates) // 2] if full_rates else 0.0
+        rate = max(queue_rate, recent_rate) * 1.1 if max(queue_rate, recent_rate) else 0.0
+        transfer_size = 330                           # a typical signed transfer, in bytes
+        return {"blocks": blocks, "fee_rate": round(rate, 4),
+                "transfer_fee": max(params.MIN_TX_FEE, int(rate * transfer_size) + 1 if rate else 0),
+                "min_fee": params.MIN_TX_FEE, "mempool": len(pool),
+                "basis": "mempool" if queue_rate >= recent_rate and queue_rate else
+                         ("recent blocks" if recent_rate else "minimum")}
+
+    # --- explorer and light-client views ---
+
+    def tx_view(self, txid: str) -> dict | None:
+        """A transaction: pending, or where it is on the main chain."""
+        with self.lock:
+            t = self.mempool.get(txid)
+            if t is not None:
+                return {"txid": txid, "status": "pending", "tx": t}
+            loc = self.store.tx_location(txid)
+            if loc is None:
+                return None
+            height, bh, pos = loc
+            block = self.chain.block(bh)
+            return {"txid": txid, "status": "confirmed", "height": height, "block": bh, "position": pos,
+                    "confirmations": self.chain.height - height + 1,
+                    "tx": block["txs"][pos] if block else None, "pruned": block is None}
+
+    def address_history(self, addr: str, limit: int = 50, before: int | None = None) -> dict:
+        """What an address took part in, newest first, plus what is pending for it."""
+        limit = max(1, min(int(limit), 500))
+        with self.lock:
+            rows = self.store.address_history(addr, limit, before)
+            pending = [{"txid": tid, "type": t["type"], "role": "sender" if txmod.sender(t) == addr else "named"}
+                       for tid, t in self.mempool.items()
+                       if txmod.sender(t) == addr or addr in (t.get("to"), t.get("account"), t.get("guardian"))]
+        items = [{"height": h, "position": pos, "role": role, "type": kind,
+                  ("block" if role == "miner" else "txid"): ref} for h, pos, ref, role, kind in rows]
+        return {"address": addr, "pending": pending, "items": items,
+                "next": rows[-1][0] if len(rows) == limit else None}
+
+    def tx_proof(self, txid: str) -> dict | None:
+        """A Merkle proof that `txid` is in a main-chain block (green/light.py checks it)."""
+        with self.lock:
+            loc = self.store.tx_location(txid)
+            block = self.chain.block(loc[1]) if loc else None
+        if block is None:
+            return None
+        ids = [txmod.txid(t) for t in block["txs"]]
+        return {"txid": txid, "block": loc[1], "height": loc[0], "index": loc[2], "count": len(ids),
+                "proof": merkle_proof(ids, loc[2]), "header": block["header"]}
+
+    def headers(self, start: int, count: int) -> list[dict]:
+        count = max(1, min(int(count), 2000))
+        with self.lock:
+            hashes = self.chain.main[max(0, start):max(0, start) + count]
+        return [self.chain.header(h) for h in hashes]
+
+    def warnings(self) -> list[str]:
+        """Things the operator must act on: e.g. a rule change this software does not know."""
+        bits = self.chain.deployments.unknown_signals(self.chain.tip)
+        return [f"most recent blocks signal an unknown rule change (version bit {b}): "
+                f"upgrade this node before it activates" for b in bits]
+
+    def account(self, addr: str) -> dict:
+        with self.lock:
+            view = {"address": addr,
+                    "balance": self.chain.state.balance(addr), "nonce": self.chain.state.nonce(addr),
+                    "pending_balance": self._pending.balance(addr), "pending_nonce": self._pending.nonce(addr),
+                    "guard": None}
+            g = self.chain.state.guards.get(addr)
+            if g is not None:
+                # What the account may still spend in the next block's period.
+                window = (self.chain.height + 1) // g["period"]
+                spent = g["spent"] if g["window"] == window else 0
+                view["guard"] = {**g, "spend_left": max(0, g["limit"] - spent)}
+            return view
+
+    def supply(self) -> dict:
+        """Audit: every coin that exists must sit in a balance, an escrow or a bond,
+        and their sum must equal what the block rewards have minted, exactly."""
+        with self.lock:
+            state, height = self.chain.state, self.chain.height
+            balances = sum(state.balances.values())
+            locked = state.locked_total()
+        minted = sum(params.block_reward(h) for h in range(height + 1)) if height < 10**6 else \
+            _minted_fast(height)
+        return {"height": height, "balances": balances, "locked": locked, "total": balances + locked,
+                "minted": minted, "ok": balances + locked == minted}
+
+    def metrics(self) -> str:
+        """Prometheus text format, for dashboards and alerts."""
+        st = self.status()
+        with self.lock:
+            open_disputes = self.chain.state.open_disputes
+            base = self.chain.base_height
+        rows = [
+            ("green_height", "gauge", "Height of the main chain", st["height"]),
+            ("green_base_height", "gauge", "Height of the flat base state", base),
+            ("green_peers", "gauge", "Verified peers", len(st["peers"])),
+            ("green_mempool_transactions", "gauge", "Transactions waiting in the mempool", st["mempool"]),
+            ("green_mining", "gauge", "1 if this node is mining", int(st["mining"])),
+            ("green_units_per_second", "gauge", "Work units hashed per second", st["units_per_second"]),
+            ("green_open_disputes", "gauge", "Matmul disputes waiting for an answer", open_disputes),
+            ("green_blocks_found_total", "counter", "Blocks this node found", st["stats"]["blocks_found"]),
+            ("green_work_units_total", "counter", "Work units this node hashed", st["stats"]["units"]),
+            ("green_useful_units_total", "counter", "Hashed units that were buyers' work", st["stats"]["useful_units"]),
+            ("green_results_delivered_total", "counter", "Matmul results this node delivered",
+             st["stats"]["results_revealed"]),
+            ("green_frauds_caught_total", "counter", "Frauds this node's watchtowers disputed",
+             st["stats"]["frauds_caught"]),
+            ("green_peers_inbound", "gauge", "Inbound P2P connections", st["p2p"]["inbound"]),
+            ("green_peers_outbound", "gauge", "Outbound P2P connections", st["p2p"]["outbound"]),
+            ("green_headers_ahead", "gauge", "Checked headers whose blocks are not connected yet",
+             st["p2p"]["headers_ahead"]),
+            ("green_blocks_in_flight", "gauge", "Blocks requested from peers", st["p2p"]["blocks_in_flight"]),
+            ("green_peers_banned_total", "counter", "Peers banned for misbehaving", st["p2p"]["stats"]["banned"]),
+            ("green_bytes_received_total", "counter", "P2P bytes received",
+             sum(p.bytes_in for p in self.p2p.all_peers())),
+            ("green_bytes_sent_total", "counter", "P2P bytes sent", sum(p.bytes_out for p in self.p2p.all_peers())),
+            ("green_supply_ok", "gauge", "1 if every coin is accounted for (supply audit)", int(self.supply()["ok"])),
+            ("green_warnings", "gauge", "Warnings the operator should act on", len(st["warnings"])),
+        ]
+        out = []
+        for name, kind, help_, value in rows:
+            out += [f"# HELP {name} {help_}", f"# TYPE {name} {kind}", f"{name} {value}"]
+        return "\n".join(out) + "\n"
+
+    def manifest_hints(self, job_id: str) -> list[str]:
+        job = self.chain.state.jobs.get(job_id)
+        if job is None:
+            return []
+        entries = [b for b in job["batches"].values() if b["status"] == "revealed"] + list(job["delivered"].values())
+        return [b["manifest"] for b in entries if b["manifest"] and self.leaves(b) is None]
+
+    def job_view(self, job_id: str, job: dict) -> dict:
+        """`results` maps units to result hashes for every revealed batch whose manifest
+        this node has (checked against the root); `pending` maps units still in a
+        challenge window to their batch, which is what a buyer needs to dispute them."""
+        dims = job["dims"]
+        total = len(txmod.all_units(dims))
+        results, pending, batches = {}, {}, []
+        for bid, b in list(job["batches"].items()) + list(job["delivered"].items()):
+            settled = bid in job["delivered"]
+            keys = [txmod.unit_key(u) for u in txmod.bitmap_units(b["units"], dims)]
+            status = "settled" if settled else b["status"]
+            if status in ("revealed", "settled"):
+                leaves = self.leaves(b)
+                if leaves is not None:
+                    results.update(zip(keys, leaves))
+            if status == "revealed":
+                pending.update((k, bid) for k in keys)
+            if not settled:
+                batches.append({"id": bid, "miner": b["miner"], "status": status, "units": keys,
+                                "root": b["root"], "manifest": b["manifest"], "expires": b["expires"],
+                                "settle_at": b["settle_at"], "disputes": sorted(b["disputes"]),
+                                "proven": sorted(b["proven"])})
+        return {"id": job_id, "buyer": job["buyer"], "dims": dims, "price": job["price"],
+                "escrow": job["escrow"], "units_total": total, "units_done": len(job["done"]),
+                "units_pending": len(pending), "units_reserved": len(job["reserved"]) - len(pending),
+                "closes_at": job["closes_at"], "closed": job["closed"], "results": results,
+                "pending": pending, "batches": batches, "height": self.chain.height}
+
+    @staticmethod
+    def task_view(task_id: str, task: dict) -> dict:
+        return {"id": task_id, "buyer": task["buyer"], "prog": task["prog"], "input": task["input"],
+                "prog_size": task["prog_size"], "fuel": task["fuel"], "price": task["price"],
+                "status": task["status"], "worker": task["worker"], "output": task["output"],
+                "settle_at": task["settle_at"],
+                "challenge_fee": params.challenge_fee(task["fuel"], task["prog_size"])}
+
+    # --- lifecycle ---
+
+    def start(self, mine: bool = False) -> None:
+        self.server = BoundedServer((self.host, self.port), make_handler(self))
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.p2p.start()
+        if self.prune:
+            threading.Thread(target=self._maintenance_loop, daemon=True, name="maintenance").start()
+        if self.miner_key:
+            self.mining = mine
+            threading.Thread(target=self._supervised, args=("miner", self._mine_loop), daemon=True).start()
+            threading.Thread(target=self._supervised, args=("task worker", self._task_worker_loop),
+                             daemon=True).start()
+
+    def stop(self) -> None:
+        self.running = False
+        with self.lock:
+            self.tip_changed.notify_all()        # release API clients waiting for a block
+        self.server.shutdown()
+        self.server.server_close()
+        self.p2p.stop()
+        with self.lock:                 # no block is being written while the database closes
+            self.store.close()
+
+
+def _minted_fast(height: int) -> int:
+    """Sum of block rewards for heights 0..height without a loop per block."""
+    total, h = 0, 0
+    while h <= height:
+        era_end = min(height, (h // params.HALVING_INTERVAL + 1) * params.HALVING_INTERVAL - 1)
+        total += params.block_reward(h) * (era_end - h + 1)
+        h = era_end + 1
+    return total
+
+
+class BoundedServer(ThreadingHTTPServer):
+    """Threaded HTTP server that refuses connections beyond a fixed limit."""
+
+    daemon_threads = True
+
+    def __init__(self, addr, handler):
+        super().__init__(addr, handler)
+        self._slots = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+    def handle_error(self, request, client_address):
+        pass  # a broken client connection is not our problem; never print tracebacks for it
+
+
+def _route(path: str) -> list[str]:
+    """Path segments, with the stable version prefix removed: /v1/status and /status
+    are the same endpoint (the unprefixed form is kept for old clients)."""
+    parts = [p for p in path.split("/") if p]
+    return parts[1:] if parts[:1] == ["v1"] else parts
+
+
+def make_handler(node: Node):
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.0"        # one request per connection
+        timeout = REQUEST_TIMEOUT            # applies to every socket read
+
+        def log_message(self, *args):
+            pass
+
+        def _send(self, code: int, body, raw: bool = False):
+            data = body if raw else json.dumps(body).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/octet-stream" if raw else "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _body(self, limit: int) -> bytes:
+            self._consumed = True
+            raw = self.headers.get("Content-Length", "0").strip()
+            if not raw.isdigit():
+                raise ValueError("bad Content-Length")
+            length = int(raw)
+            if length > limit:
+                raise TooLarge("request too large")
+            return self.rfile.read(length)
+
+        def _local(self) -> bool:
+            return self.client_address[0] in LOOPBACK
+
+        def do_GET(self):
+            try:
+                self._get()
+            except (ValueError, KeyError, TypeError) as e:
+                self._send(400, {"error": str(e)})
+            except Exception:
+                self._send(500, {"error": "internal error"})
+
+        def _get(self):
+            u = urlparse(self.path)
+            parts = _route(u.path)
+            q = parse_qs(u.query)
+            if parts == ["status"]:
+                return self._send(200, node.status())
+            if parts == ["supply"]:
+                return self._send(200, node.supply())
+            if parts == ["metrics"]:
+                data = node.metrics().encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; version=0.0.4")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                return self.wfile.write(data)
+            if parts == ["peers"]:
+                return self._send(200, [p.info() for p in node.p2p.all_peers()])
+            if parts == ["headers"]:
+                return self._send(200, node.headers(int(q.get("from", ["0"])[0]), int(q.get("count", ["2000"])[0])))
+            if len(parts) == 2 and parts[0] == "tx":
+                view = node.tx_view(parts[1])
+                return self._send(200, view) if view else self._send(404, {"error": "unknown transaction"})
+            if len(parts) == 3 and parts[0] == "proof" and parts[1] == "tx":
+                proof = node.tx_proof(parts[2])
+                return self._send(200, proof) if proof else self._send(404, {"error": "no proof: unknown or pruned"})
+            if len(parts) == 3 and parts[0] == "address" and parts[2] == "history":
+                before = q.get("before", [None])[0]
+                return self._send(200, node.address_history(parts[1], int(q.get("limit", ["50"])[0]),
+                                                            int(before) if before is not None else None))
+            if parts == ["fee"]:
+                return self._send(200, node.fee_estimate(int(q.get("blocks", ["2"])[0])))
+            if parts == ["wait"]:
+                try:
+                    return self._send(200, node.wait_for_block(q.get("tip", [""])[0],
+                                                               float(q.get("timeout", ["30"])[0])))
+                except OverflowError as e:
+                    return self._send(503, {"error": str(e)})
+            if parts == ["deployments"]:
+                with node.lock:
+                    return self._send(200, node.chain.deployments.info(node.chain.tip))
+            if parts == ["chain"]:
+                start = max(0, int(q.get("from", ["0"])[0]))
+                with node.lock:
+                    return self._send(200, {"hashes": node.chain.main[start:start + 5000]})
+            if len(parts) == 2 and parts[0] == "block":
+                block = node.chain.block(parts[1])
+                return self._send(200, block) if block else self._send(404, {"error": "unknown block"})
+            if len(parts) == 2 and parts[0] == "height":
+                block = node.chain.block_at(int(parts[1]))
+                return self._send(200, block) if block else self._send(404, {"error": "no such height"})
+            if len(parts) == 2 and parts[0] == "account":
+                return self._send(200, node.account(parts[1]))
+            if parts == ["mempool"]:
+                with node.lock:
+                    return self._send(200, list(node.mempool.values()))
+            if parts == ["jobs"]:
+                with node.lock:
+                    jobs = [node.job_view(k, v) for k, v in node.chain.state.jobs.items()]
+                return self._send(200, jobs)
+            if len(parts) == 2 and parts[0] == "job":
+                if self._local():
+                    # A buyer asking its own node: fetch the manifests it lacks from peers
+                    # first, so `results` covers everything that has been delivered.
+                    with node.lock:
+                        hints = node.manifest_hints(parts[1])
+                    for m in hints:
+                        node._fetch_blob(m, MAX_MANIFEST_BYTES)
+                with node.lock:
+                    job = node.chain.state.jobs.get(parts[1])
+                    view = node.job_view(parts[1], job) if job else None
+                return self._send(200, view) if view else self._send(404, {"error": "unknown job"})
+            if parts == ["tasks"]:
+                with node.lock:
+                    return self._send(200, [node.task_view(k, v) for k, v in node.chain.state.tasks.items()])
+            if len(parts) == 2 and parts[0] == "task":
+                with node.lock:
+                    task = node.chain.state.tasks.get(parts[1])
+                    view = node.task_view(parts[1], task) if task else None
+                return self._send(200, view) if view else self._send(404, {"error": "unknown task"})
+            if len(parts) == 2 and parts[0] == "blob":
+                data = None
+                if node.is_public_blob(parts[1]):
+                    data = node.blobs.get(parts[1])
+                    # Results travel from the miner to the buyer on demand; validators never
+                    # fetch them. Only local clients may make us fetch, so no amplification.
+                    if data is None and self._local() and node._fetch_blob(parts[1], MAX_BLOB_BYTES):
+                        data = node.blobs.get(parts[1])
+                return self._send(200, data, raw=True) if data is not None else self._send(404, {"error": "unknown blob"})
+            return self._send(404, {"error": "not found"})
+
+        def do_POST(self):
+            try:
+                self._post()
+            except TooLarge as e:
+                self._send(413, {"error": str(e)})
+            except MissingData as e:
+                self._send(409, {"error": str(e)})
+            except (InvalidTx, InvalidBlock) as e:
+                self._send(400, {"error": str(e)})
+            except PermissionError as e:
+                self._send(403, {"error": str(e)})
+            except (ValueError, KeyError, TypeError, RecursionError) as e:
+                self._send(400, {"error": f"bad request: {e}"})
+            except Exception:
+                self._send(500, {"error": "internal error"})
+
+        def _admin(self):
+            if not self._local():
+                # Read a small unread body first: closing a socket with unread data sends
+                # a TCP reset, and the client would see that instead of the 403.
+                raw = self.headers.get("Content-Length", "0").strip()
+                if not getattr(self, "_consumed", False) and raw.isdigit() and int(raw) <= 64 * 1024:
+                    self.rfile.read(int(raw))
+                raise PermissionError("admin endpoint: only available from this machine")
+
+        def _post(self):
+            parts = _route(urlparse(self.path).path)
+            if parts == ["blob"]:
+                self._admin()
+                return self._send(200, {"hash": node.blobs.put(self._body(MAX_BLOB_BYTES))})
+            body = json.loads(self._body(MAX_JSON_BYTES) or b"null")
+            if parts == ["tx"]:
+                return self._send(200, {"txid": node.submit_tx(body)})
+            if parts == ["peers"]:
+                self._admin()
+                return self._send(200, {"added": node.p2p.add_manual(body["addr"])})
+            if parts == ["mining"]:
+                self._admin()
+                if not node.miner_key:
+                    return self._send(400, {"error": "node has no wallet"})
+                node.mining = bool(body["on"])
+                return self._send(200, {"mining": node.mining})
+            return self._send(404, {"error": "not found"})
+
+    return Handler

@@ -1,0 +1,5 @@
+# The repository uses LF everywhere, on every platform.
+* text=auto eol=lf
+*.npy binary
+*.npz binary
+*.wasm binary

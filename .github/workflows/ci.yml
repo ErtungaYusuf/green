@@ -1,0 +1,45 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Test (GPU tests skip themselves on runners without a GPU)
+        run: python -m pytest -q
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t green .
+      - name: "Smoke test - wallet, genesis, a node that mines and answers"
+        run: |
+          mkdir -p ci-data && chmod 777 ci-data
+          docker run --rm -v "$PWD/ci-data:/data" green wallet new --no-password
+          docker run --rm -v "$PWD/ci-data:/data" green genesis --msg "ci"
+          docker run -d --name node -p 8545:8545 -v "$PWD/ci-data:/data" green
+          for i in $(seq 1 60); do
+            if curl -fs http://127.0.0.1:8545/status | grep -q '"height"'; then break; fi; sleep 1
+          done
+          curl -fs http://127.0.0.1:8545/status
+          curl -fs http://127.0.0.1:8545/supply | grep -q '"ok": true'
+          docker logs node | tail -5
+          docker rm -f node

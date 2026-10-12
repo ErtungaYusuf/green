@@ -1,0 +1,261 @@
+# Green protocol specification (v0.13)
+
+This document defines the consensus rules of the Green network precisely enough to write an independent, compatible node. Where it and the reference implementation (`green/`) disagree, that is a bug in one of them. Constants are named as in `green/params.py`; their values are listed in §10.
+
+Notation: `H(x)` is BLAKE2b with a 32-byte digest. `hex(x)` is lowercase hexadecimal. `‖` is byte concatenation. Integers in hashes are big-endian unless stated otherwise. "yaprak" is the base unit: 1 GRN = 10^8 yaprak.
+
+## 1. Encodings
+
+- **Canonical JSON** `C(obj)`: JSON with keys sorted, separators `,` and `:` (no spaces), ASCII only (`\uXXXX` escapes). Every hash over a structured object is `H(C(obj))`.
+- **Hashes** in objects are 64-character lowercase hex strings.
+- **Integers** in objects are JSON integers in `[0, 2^63)`; booleans are not integers.
+
+## 2. Keys and addresses
+
+- Signatures are Ed25519. A public key is 32 raw bytes, written as 64 hex characters.
+- An address is `bech32m("grn", H(pubkey)[0:20])` (BIP-350): `grn1` followed by 38 characters. Only the lowercase form is a valid address, so every account has exactly one spelling.
+- A **multisig account** is `{"k": k, "keys": [pubkey, ...]}` with 2 ≤ n ≤ MAX_MULTISIG_KEYS distinct keys sorted ascending and 1 ≤ k ≤ n. Its address is `bech32m("grn", H(C(["grn-multisig", k, keys]))[0:20])`; it looks like any other address.
+
+## 3. Transactions
+
+A transaction is a JSON object with exactly the common fields `type`, `pub`, `nonce`, `fee`, `sig` plus the fields of its type (§3.2); any other field set is invalid.
+
+- `txid = hex(H(C(tx)))`.
+- Signing: `sig = Ed25519(secret, C({"chain": chain_id, "tx": tx without "sig"}))`, 128 hex characters. `chain_id` is the genesis block hash, so a transaction is valid on one network only.
+- For a multisig sender, `pub` is the account object (§2) and `sig` a list with one entry per key, in the same order: exactly `k` entries are signatures, each by the key in its position over the bytes above, and the others are `null`.
+- The sender is `address(pub)` (a single key's or a multisig account's address). `nonce` must equal the sender's account nonce; applying the transaction increments it.
+- `fee >= MIN_TX_FEE`, plus the data fees listed per type. The fee is paid to the block's miner.
+- A transaction is applied atomically: if any rule fails, the state is unchanged and the transaction, and therefore the block containing it, is invalid.
+- **Guarded accounts.** If the sender has a guard (§3.4), before any other effect: a frozen sender's transaction is invalid; otherwise, with `w = floor(height / period)`, `spent' = (spent if window == w else 0) + outflow(tx)` must be `<= limit`, and on success the guard's `window := w`, `spent := spent'` (a `guard_set` instead writes its own new guard). `outflow(tx)` = fee + `amount` (transfer) + `price · mu·ku·nu` (job_post) + `price` (task_post); bonds are not counted.
+
+### 3.1 Blobs
+
+Large data travels between nodes as content-addressed blobs (`hash = hex(H(bytes))`), never inside blocks.
+
+| Blob | Format |
+|---|---|
+| Job | `"GJOB"` ‖ M ‖ K ‖ N (uint32 BE each, multiples of UNIT) ‖ A (int8, M×K row-major) ‖ B (int8, K×N row-major) |
+| Result | one unit's partial product `A_il · B_lj`: int32 little-endian, UNIT×UNIT row-major |
+| Manifest | the 32-byte result hashes of a batch, concatenated in ascending unit index order |
+| WASM program / input | raw bytes |
+
+A transaction that needs a blob for validation (§3.2) is only valid if the validator can obtain that blob; validators fetch it from peers.
+
+### 3.2 Transaction types
+
+Units of a job with dimensions `(mu, ku, nu)` (in units) are triples `[i, l, j]`. Unit index `k = (i·ku + l)·nu + j`. A **unit bitmap** is the hex encoding of exactly `ceil(mu·ku·nu / 8)` bytes in which unit k is bit `7 − k mod 8` of byte `k div 8`, with no bits set past the last unit and at least one bit set.
+
+| Type | Fields | Rules (in addition to §3) |
+|---|---|---|
+| `transfer` | `to`, `amount` | `to` is an address, `amount >= 1`, balance ≥ amount + fee |
+| `job_post` | `job`, `dims`, `price` | `job` is a job blob hash that is not yet a job; `dims` 3 integers in `1..MAX_JOB_UNITS_PER_DIM` matching the blob; `price >= 1` per unit; locks `escrow = price · mu·ku·nu`; fee ≥ MIN_TX_FEE + DATA_FEE_PER_BYTE · blob size |
+| `job_commit` | `job`, `units`, `commitment` | job open and not cancelled; `units` a bitmap of units that are neither delivered nor reserved; `commitment` not already a batch id of this job (live or delivered); locks `bond = bond_for(price) · count`; creates batch `id = commitment`, status *committed*, `expires = height + RESERVE_BLOCKS`, and reserves its units |
+| `job_reveal` | `job`, `batch`, `root`, `manifest` | sender is the batch's miner; status *committed*; `batch.height < height <= expires`; `commitment == hex(H(C(["green-commit", sender, job, units, root])))`. Sets status *revealed*, `settle_at = height + JOB_CHALLENGE_BLOCKS`. `manifest` is an unverified hint |
+| `job_challenge` | `job`, `batch`, `units` | batch *revealed*; `height <= settle_at`; `units` a bitmap of the same length that is a subset of the batch's; none of them disputed or proven; fee ≥ MIN_TX_FEE + DATA_FEE_PER_BYTE · RESULT_BYTES · count. Opens a dispute per unit with `deadline = height + JOB_RESPONSE_BLOCKS + floor(open_disputes' / MAX_BLOCK_JOB_RESPONSES)`, where `open_disputes'` is the network-wide count after adding these |
+| `job_respond` | `job`, `batch`, `unit`, `result`, `proof` | the unit has an open dispute; `height <= deadline`; `merkle_verify(result, index of unit in the batch, count, proof, root)` (§4); fewer than MAX_BLOCK_JOB_RESPONSES responses earlier in this block; the result blob is available and passes Freivalds (§5.4). Closes the dispute and marks the unit proven; if no dispute is left and `height >= settle_at`, the batch is paid |
+| `job_cancel` | `job` | sender is the buyer; not already cancelled; the job closes at `height + CANCEL_DELAY` |
+| `task_post` | `prog`, `input`, `fuel`, `price` | program and input blobs available; program ≤ MAX_TASK_PROGRAM_BYTES, input ≤ MAX_TASK_INPUT_BYTES; program is a valid module with no imports exporting function `green_run` and memory `memory`; `1 <= fuel <= MAX_TASK_FUEL`; locks `price`; fee ≥ MIN_TX_FEE + DATA_FEE_PER_BYTE · (program + input bytes). Task id `= hex(H(C(["green-task", pub, nonce, prog, input, fuel, price])))` |
+| `task_commit` | `task`, `commitment` | task open and not reserved (or reservation expired, whose bond then goes to the buyer); locks `task_bond(price)`; reserves for TASK_RESERVE_BLOCKS |
+| `task_reveal` | `task`, `output` | sender holds the reservation; `reservation.height < height <= expires`; `commitment == hex(H(C(["green-task-commit", sender, task, output])))`; opens a window until `height + TASK_CHALLENGE_BLOCKS` |
+| `task_challenge` | `task` | status *revealed* (not *confirmed*); within the window; fee ≥ `challenge_fee(fuel, program bytes)`; locks `task_bond(price)`; adjudication budget of the block not exceeded. Every validator re-runs the task (§7): wrong output → worker's bond and challenger's bond to the challenger, escrow to the buyer, status *failed*; right output → challenger's bond to the worker, status *confirmed* |
+| `guard_set` | `guardian`, `limit`, `period` | `guardian` an address other than the sender; `limit >= 0`; `1 <= period <= MAX_GUARD_PERIOD`. Unguarded sender: creates `{guardian, limit, period, frozen: false, window: floor(height/period), spent: 0}`. Guarded sender: allowed only with the same guardian, `limit <= old limit` and `period >= old period` (stricter); keeps `spent'` and sets `window := floor(height/period)` |
+| `guard_update` | `account`, `guardian`, `limit`, `period`, `frozen` | sender is `account`'s guardian; new `guardian` is not `account`; replaces guardian, limit, period and frozen (window and spent are kept) |
+| `guard_release` | `account` | sender is `account`'s guardian; removes the guard |
+
+### 3.3 End-of-block events
+
+After a block's transactions, at height `h`, in this order:
+
+1. **Job events** scheduled for `h`, in scheduling order:
+   - *expire* (scheduled at `expires + 1`): a batch still *committed* is dropped; its bond goes to the buyer.
+   - *settle* (scheduled at `settle_at`): a *revealed* batch with no open dispute is paid: the miner receives `price · count + bond`, the escrow decreases by `price · count`, its units become delivered.
+   - *deadline* (scheduled at `deadline + 1`): if a dispute of the batch with that deadline is still open, the batch is forfeit: its bond goes to the challenger of the earliest-opened such dispute and the batch is dropped.
+   A dropped batch releases its units (they reopen) and its open disputes; if the job is closed, `price · count` of escrow is refunded to the buyer.
+2. **Job closings** scheduled for `h`: refund `escrow − price · (units in live batches)` to the buyer and mark the job closed. Live batches settle later as usual.
+3. **Task settlements** scheduled for `h`: a *revealed* or *confirmed* task pays the worker `price + bond`.
+4. The miner receives `block_reward(h)` plus all fees of the block. With a payee list, payee i receives `floor(total · w_i / Σw)` and the first payee also the remainder.
+
+### 3.4 Guarded accounts
+
+The state maps an address to at most one guard `{guardian, limit, period, frozen, window, spent}`. A guard lets a person keep an autonomous agent accountable: the agent cannot spend more than `limit` yaprak per `period` blocks (spending as defined by `outflow`, §3), cannot send anything while `frozen`, and can only make its own guard stricter (`guard_set`); loosening, freezing, handing over and removing are the guardian's (`guard_update`, `guard_release`). Incoming coins are never restricted.
+
+## 4. Merkle trees
+
+`merkle_root(leaves)` over hex leaves: level 0 is `H(0x00 ‖ leaf)`; each next level pairs nodes left to right as `H(0x01 ‖ left ‖ right)`, and an odd last node is carried up unchanged. With top node `t` (32 zero bytes for no leaves), the root is `H(0x02 ‖ uint64_BE(len(leaves)) ‖ t)`.
+
+A proof for leaf `i` of `n` lists the sibling at each level where one exists (an odd last node has none). `merkle_verify` recomputes the root from the leaf, the index and the count, using exactly `len(proof)` siblings. The count fixes the tree's shape, so each (count, index) has one valid proof length.
+
+The block's `tx_root` is `merkle_root(txids)`. A batch's `root` is `merkle_root(result hashes in ascending unit index order)`.
+
+## 5. Proof of Useful Work
+
+### 5.1 Header and hashes
+
+A block is `{"header": header, "txs": [...]}`. The header has exactly these fields:
+
+| Field | Value |
+|---|---|
+| `version` | `0x20000000` plus signal bits 0–28 (§5.5); the top three bits must be `001` |
+| `height` | parent height + 1 (genesis 0) |
+| `prev` | parent block hash (genesis: 64 zeros) |
+| `time` | seconds; greater than the median of the previous MTP_WINDOW block times; nodes reject (temporarily) a time more than MAX_FUTURE_SECONDS ahead of their clock |
+| `target` | 64 hex digits; must equal the expected target (§5.3) |
+| `tx_root` | `merkle_root(txids)` |
+| `state_root` | the lattice root of the state after this block (§6.1) |
+| `miner` | the address that receives reward and fees, or `[[address, weight], ...]`: 2 to MAX_PAYEES entries sorted by address, addresses distinct, weights in 1..MAX_PAYEE_WEIGHT (a pool paying its miners) |
+| `work` | `{"job": null, "unit": null}` (filler) or `{"job": job id posted before this block, "unit": [i, l, j] inside it}` |
+| `nonce` | integer |
+| `msg` | string, at most 200 characters |
+| `transcript` | 64 hex digits (§5.2) |
+
+`block_hash = hex(H(C(header)))`. `seed = H(C(header without "transcript"))`, so the seed binds the parent, the transactions, the resulting state, the miner and the nonce.
+
+### 5.2 The work unit
+
+`N = UNIT`, `T = N / BLOCK`, `R = NOISE_RANK`. `prg(seed, label, n)` is the first n bytes of SHAKE-256(seed ‖ label).
+
+1. Inputs: for filler work, `A = prg(seed, "fillA", N²)` and `B = prg(seed, "fillB", N²)` read as int8, row-major. For job work, `A` is block `(i, l)` and `B` block `(l, j)` of the job's matrices.
+2. Noise: `t(label, r, c) = (prg(seed, label, r·c) mod 3) − 1` reshaped row-major. `U = t("U", N, R)`, `V = t("V", R, N)`, `U' = t("Uf", N, R)`, `V' = t("Vf", R, N)`. `A1 = A + U·V`, `B1 = B + U'·V'` (exact integers).
+3. Products: for every `(i, l, j)` in `T³` in row-major order, the tile product `P = A1[i, l] · B1[l, j]` (BLOCK×BLOCK). Flatten all products in order `(i, l, j, r, c)` into a sequence of int32 values `v_0, v_1, ...`.
+4. Digest: for each index `k`, with all arithmetic mod 2^32 and `rotl` a 32-bit left rotation:
+   ```
+   x = v_k (as uint32) * 0xCC9E2D51;  x = rotl(x, 15) * 0x1B873593
+   y = (k * 0x9E3779B9) XOR x;        y = rotl(y, 13) * 5 + 0xE6546B64
+   y ^= y >> 16;  y *= 0x85EBCA6B;  y ^= y >> 13;  y *= 0xC2B2AE35;  y ^= y >> 16
+   lane[k mod 8] ^= y
+   ```
+   `transcript = hex(lane_0 ‖ ... ‖ lane_7)`, each lane uint32 little-endian.
+5. `ticket = int_BE(H(seed ‖ bytes(transcript)))`. The block is valid only if `transcript` matches the recomputation and `ticket <= target`.
+
+### 5.3 Difficulty and fork choice
+
+- `work(target) = floor(2^256 / (target + 1))`; a chain's chainwork is the sum over its blocks (genesis included).
+- The target of every block is set by ASERT (aserti3-2d) from its parent `p` and the anchor, the genesis block `g`: `e = floor(((p.time − (g.time − T)) − T · (p.height + 1)) · 65536 / ASERT_HALFLIFE)` with `T = TARGET_BLOCK_SECONDS` (floor division, rounding toward minus infinity); `shifts = e >> 16` (arithmetic), `frac = e & 0xFFFF`; `factor = 65536 + ((195766423245049·frac + 971821376·frac² + 5127·frac³ + 2^47) >> 48)`; `t = INITIAL_TARGET · factor`, shifted left by `shifts` if `shifts >= 0`, else right by `−shifts`; `target = clamp(t >> 16, 1, MAX_TARGET)`. Block 1 therefore has the genesis target.
+- A node follows the valid chain with the most chainwork; on a tie the first one seen stays. It refuses a block whose fork point (its last ancestor on the node's main chain) is more than MAX_REORG_DEPTH blocks below the node's tip.
+
+### 5.4 Freivalds check of a result
+
+For unit inputs `a` (N×K), `b` (K×N) and claimed result `c` (N×N): let `bound = K · max|a| · max|b|`. Reject if any `|c_xy| > bound`. With `p = FREIVALDS_PRIME`, take `prg(H(C(["freivalds", job, unit, result_hash])), "freivalds", 8·N·FREIVALDS_ROUNDS)` as little-endian uint64 values, reduce them mod p, and arrange them as an N×FREIVALDS_ROUNDS matrix `r`. Accept iff `a·((b·r) mod p) ≡ c·r (mod p)`.
+
+### 5.5 Rule changes: version bits
+
+A deployment is `(name, bit, start, timeout, min_activation = 0, lock_in_on_timeout = false)` with heights that are multiples of SIGNAL_PERIOD; the active set is `DEPLOYMENTS` (empty: none is scheduled). A block signals a deployment if bit `bit` of its version is set. The state of a deployment for a block at height `h` is the state of period `k = floor(h / SIGNAL_PERIOD)` on that block's branch:
+
+- period 0 is DEFINED;
+- for `k >= 1`, with `s` the state of period `k−1`, `H = k · SIGNAL_PERIOD`, and `n` the number of blocks at heights `H − SIGNAL_PERIOD … H − 1` on the branch that signal the deployment:
+  - DEFINED → STARTED if `H >= start`;
+  - STARTED → LOCKED_IN if `n >= SIGNAL_THRESHOLD`; otherwise, if `H >= timeout`, LOCKED_IN when `lock_in_on_timeout`, else FAILED;
+  - LOCKED_IN → ACTIVE if `H >= min_activation`;
+  - ACTIVE and FAILED never change.
+
+A rule added by a deployment applies to blocks whose state is ACTIVE and must only make fewer blocks valid. Unknown signal bits are valid. The example deployment `testdummy`, scheduled only on test networks, limits a header's `msg` to 100 characters while ACTIVE.
+
+## 6. Blocks
+
+A block is valid if its header is valid (§5), its transactions match `tx_root`, it has at most MAX_BLOCK_TXS transactions with distinct txids, `len(C(txs)) <= MAX_BLOCK_BYTES` and at most MAX_BLOCK_SIGS signatures in total (1 per single-key transaction, `k` per multisig one), a job named in `work` exists in the parent state, every transaction applies in order (§3) followed by the events of §3.3, and the root of the resulting state equals `state_root` (§6.1). The genesis block has height 0, no transactions, filler work, the initial target, and pays `block_reward(0)` to its miner (its state root is that of a state holding only this balance).
+
+`block_reward(h) = INITIAL_REWARD >> floor(h / HALVING_INTERVAL)`, and 0 after 64 halvings.
+
+### 6.1 The state and its commitment
+
+The state is a set of maps plus one counter. Their exact content is consensus, because the header commits to it:
+
+| Map | Key | Value |
+|---|---|---|
+| `balances` | address | balance in yaprak, **non-zero only** (an entry whose balance becomes 0 is removed) |
+| `nonces` | address | number of transactions the address has sent (present once ≥ 1) |
+| `jobs` | job id | `{"buyer", "dims" [mu,ku,nu], "price", "escrow", "done": {unit key: batch id}, "delivered": {batch id: {"miner", "units", "count", "root", "manifest"}}, "reserved": {unit key: batch id}, "batches": {batch id: {"miner", "units" (bitmap), "count", "height", "expires", "bond", "status" ("committed"/"revealed"), "root", "manifest", "settle_at", "disputes": {unit key: {"by", "deadline"}}, "proven": set of unit keys}}, "closes_at" (height or null), "closed" (bool)}` |
+| `tasks` | task id | `{"buyer", "prog", "input", "prog_size", "fuel", "price", "escrow", "status" ("open"/"revealed"/"confirmed"/"failed"/"done"), "worker", "output", "reserved" (null or {"worker", "commitment", "height", "expires", "bond"}), "settle_at"}` |
+| `closing` | height (integer) | job ids whose cancellation completes at that height, in the order the cancels were applied |
+| `job_events` | height (integer) | `[kind, job id, batch id, null]` entries (§3.3) in the order they were scheduled |
+| `task_settle` | height (integer) | task ids settling at that height, in scheduling order |
+| `guards` | address | `{"guardian", "limit", "period", "frozen", "window", "spent"}` (§3.4) |
+
+A unit key is `"i,l,j"` (decimal). Entries of `closing`, `job_events` and `task_settle` are created when the first item is scheduled for their height and removed when that height is processed; a removed job batch (paid or dropped) leaves `batches`. The counter `open_disputes` is the number of open job disputes network wide.
+
+**Lattice hash** (LtHash with 1024 16-bit lanes, as in Lewi et al., "Securing Update Propagation with Homomorphic Hashing", 2019). For a map `M`, key `k` and value `v`, `entry(M, k, v)` is the 2,048-byte output of SHAKE-256(`"grn-state-v1:"` ‖ `C([M, k, plain(v)])`) read as 1,024 little-endian uint16 lanes, where `plain` turns sets into lists sorted by code point and dictionary keys into strings. The state's lattice is the lane-wise sum, modulo 2^16, of `entry(M, k, v)` for every entry of every map plus `entry("meta", "open_disputes", open_disputes)`. `state_root = hex(H(lattice as 1,024 uint16 little-endian))`.
+
+Adding an entry adds its vector and removing one subtracts it, so a node updates the lattice in O(entries a block changed) and the result does not depend on the order of writes. Two states have the same root exactly when they have the same content (up to a collision of the lattice hash).
+
+### 6.2 Snapshots
+
+Not consensus, but defined here so that nodes can exchange them. A snapshot of the state after block `b` at height `h` is a list of chunks and a manifest. The entries `[M, k, v]` (maps in the order of the table above, keys sorted, integer keys before string keys) are cut into chunks of about 1 MiB; a chunk is the JSON text (sorted keys, no spaces, sets written as `{"$set": [...]}`) of its entries list. The manifest is `C({"height": h, "hash": b, "root": state_root, "open_disputes": n, "chunks": [hash of each chunk]})`. Chunks and manifests travel as blobs. A node that receives one checks every chunk against the manifest and the lattice of all entries against the `state_root` of header `b`, which must be on its best header chain at least MAX_REORG_DEPTH blocks below the tip. Nodes write a snapshot when their base passes a multiple of SNAPSHOT_INTERVAL.
+
+## 7. WASM execution
+
+Tasks run on wasmtime WASMTIME_VERSION (a consensus constant) with fuel metering, NaN canonicalization, threads and relaxed SIMD disabled, and no imports. The host writes the input at address 65,536 (growing memory if needed), calls `green_run(65536, len)`, and reads `(out_ptr, out_len) = (ret >> 32, ret & 0xFFFFFFFF)` from the i64 return value. A trap, running out of fuel, or an output outside memory is a failed run. A claimed output is right iff the run succeeds and `hex(H(output))` equals it. Adjudication cost is `fuel + program_bytes · COMPILE_COST_PER_BYTE`, at most MAX_BLOCK_ADJUDICATION per block.
+
+## 8. Not consensus (policy of the reference node)
+
+These rules are local; a node may choose differently without forking:
+- Blocks are filled by fee per byte, keeping each sender's transactions in nonce order.
+- The mempool holds at most 5,000 transactions and 100 per sender; when full, the lowest fee-rate transaction that is last in its sender's queue is evicted for a better one.
+- Replace-by-fee: a transaction with the same sender and nonce replaces a pending one if it pays at least 10% and at least MIN_TX_FEE more.
+- Blob relay: job, task and manifest blobs of revealed batches, results listed in a manifest the node holds, and snapshot chunks and manifests are served to peers; committed but unrevealed results are not.
+
+## 9. Peer-to-peer protocol (P2P v1)
+
+Not consensus: it decides how nodes talk, not which chain is valid. Default port 8546 (the HTTP API on 8545 is for wallets and tools, see API.md).
+
+### 9.1 Transport
+
+1. Each side sends 32 bytes: a fresh X25519 public key with its top bit set at random (the receiver clears it).
+2. Both compute the X25519 shared secret (all zeros is refused) and `okm = HKDF-SHA256(ikm = secret, salt = "grn-p2p-v1" ‖ genesis hash (32 bytes), info = initiator key ‖ responder key, 160 bytes)`, split into five 32-byte values: initiator→responder length key, initiator→responder body key, the same two responder→initiator, and the session id.
+3. A frame is `ChaCha20-Poly1305(length key, n, uint32_LE(len(body)))` (20 bytes) followed by `ChaCha20-Poly1305(body key, n, body)`, where the nonce `n` is 4 zero bytes ‖ uint64_LE(frame counter). After REKEY_FRAMES frames in a direction both of its keys become `HKDF-Expand-SHA256(key, "grn-p2p-rekey", 32)` and the counter restarts at 0.
+4. A body is one byte of message type followed by the payload: canonical JSON for every message except `blob`, whose payload is the raw blob.
+5. The first frame each way is `version`: `{"proto": 1, "agent", "id": node public key, "sig", "port": listening port or 0, "relay": wants transaction announcements, "height", "tip", "work": chainwork as a decimal string, "you": the address the sender sees for the receiver, "time", "first": lowest height it has block bodies for}`. `sig = Ed25519(node key, "grn-p2p-auth-v1" ‖ session id ‖ ("I" if the sender initiated, else "R"))`. A connection is up once each side has checked the other's signature. Peers given as `<id>@host:port` must present that id.
+
+A node on another network derives different keys and fails at the first frame.
+
+### 9.2 Messages
+
+| Type | Payload | Meaning |
+|---|---|---|
+| 1 `version` | see above | handshake |
+| 2 `ping`, 3 `pong` | `{"n"}` | liveness and latency |
+| 4 `getaddr`, 5 `addr` | `{}`, `{"addrs": [{"host", "port", "id", "seen"}]}` | address gossip, at most 1,000 per message; one getaddr answered per connection |
+| 6 `inv` | `{"items": [["tx" or "block", hash]]}` | announce, at most 1,000 items |
+| 7 `getdata`, 8 `notfound` | same shape | request announced items / say they are gone |
+| 9 `tx`, 10 `block` | `{"tx": ...}`, `{"block": ...}` | the item |
+| 11 `getheaders` | `{"locator": [hashes]}` (at most 64) | the answer starts after the first locator hash on the responder's main chain |
+| 12 `headers` | `{"headers": [header, ...]}` | at most 2,000 consecutive headers |
+| 13 `getblob`, 14 `blob`, 15 `noblob` | `{"hash", "max"}`, raw bytes, `{"hash"}` | fetch a public blob of at most `max` bytes |
+| 16 `getmempool` | `{}` | announce your mempool to me (once per connection) |
+| 17 `getsnapinfo`, 18 `snapinfo` | `{}`, `{"snapshots": [{"id", "height", "hash", "root"}]}` | snapshots on offer (§6.2) |
+
+### 9.3 Behaviour of the reference node
+
+- **Relay**: new transactions are announced to each peer in batches at exponentially distributed intervals (mean 0.5 s), blocks immediately. A node requests an announced item from one peer and asks the next announcer after a timeout or `notfound`.
+- **Sync**: a node that sees a peer with more chainwork asks for headers, checks each one against every rule of §5 except the work unit, recomputes the work unit of a random sample plus the last header of every message, then downloads the blocks of the best header chain from several peers at once (a window of 256 blocks) and connects them in order, their work units recomputed in parallel beforehand.
+- **Fast sync** (opt in): a new node first gets the header chain, then the newest final snapshot on offer (§6.2), and from there fully validates every block; with no usable snapshot it syncs from genesis.
+- **Limits**: frames above 4 MiB are refused before they are read unless that peer owes a blob we asked for; handshakes must finish in 10 s; at most 1,000 messages wait per peer; at most 32 inbound connections, at most 4 per network group (/16 IPv4, /32 IPv6; local addresses exempt), the youngest peer of the most crowded group evicted for a newcomer while the fastest, most useful and longest-connected ones are protected; 8 outbound connections spread over network groups, 2 of them relaying blocks only; address gossip rate-limited to 0.1 per second per peer after a burst; one source network group can hold at most 64 new address-book entries.
+- **Misbehaviour**: invalid blocks or headers, failed work samples, bad snapshots, data nobody asked for and oversized frames get a peer banned for 24 h; malformed messages add up to a ban. Local addresses are banned by node id, others by IP.
+
+## 10. Constants
+
+| Name | Value |
+|---|---|
+| UNIT, BLOCK, NOISE_RANK | 256, 32, 32 |
+| FREIVALDS_PRIME, FREIVALDS_ROUNDS | 2^31 − 1, 4 |
+| TARGET_BLOCK_SECONDS, ASERT_HALFLIFE | 15, 1,800 |
+| MAX_TARGET, INITIAL_TARGET | 2^256 − 1, MAX_TARGET / 200 |
+| MTP_WINDOW, MAX_FUTURE_SECONDS, MAX_REORG_DEPTH | 11, 60, 100 |
+| SNAPSHOT_INTERVAL (not consensus) | 2,880 |
+| SIGNAL_PERIOD, SIGNAL_THRESHOLD | 20,160, 18,144 (90%) |
+| P2P: REKEY_FRAMES, MAX_FRAME, MAX_HEADERS, MAX_INV | 4,096, 4 MiB, 2,000, 1,000 |
+| INITIAL_REWARD, HALVING_INTERVAL | 125,000,000 yaprak (1.25 GRN), 8,400,000 |
+| MAX_BLOCK_TXS, MAX_BLOCK_BYTES | 500, 1,000,000 |
+| MAX_JOB_UNITS_PER_DIM, MAX_BATCH_UNITS | 16, 4,096 |
+| MIN_TX_FEE, DATA_FEE_PER_BYTE | 10,000, 1 |
+| RESERVE_BLOCKS, JOB_CHALLENGE_BLOCKS, JOB_RESPONSE_BLOCKS | 20, 40, 20 |
+| MAX_BLOCK_JOB_RESPONSES, BOND_DIVISOR, CANCEL_DELAY | 32, 10, 40 |
+| `bond_for(price)` | ceil(price / BOND_DIVISOR) |
+| WASMTIME_VERSION | 49.0.0 |
+| MAX_GUARD_PERIOD | 100,000,000 |
+| MAX_MULTISIG_KEYS, MAX_BLOCK_SIGS | 16, 2,000 |
+| MAX_PAYEES, MAX_PAYEE_WEIGHT | 32, 2^32 |
+| MAX_TASK_FUEL, MAX_TASK_PROGRAM_BYTES, MAX_TASK_INPUT_BYTES | 500,000,000, 2^20, 2^22 |
+| COMPILE_COST_PER_BYTE, MAX_BLOCK_ADJUDICATION, ADJUDICATION_FEE_PER_MUNIT | 200, 1,500,000,000, 1,000 |
+| TASK_RESERVE_BLOCKS, TASK_CHALLENGE_BLOCKS, TASK_BOND_DIVISOR | 20, 40, 2 |
+| `task_bond(price)` | max(1, ceil(price / TASK_BOND_DIVISOR)) |
+| `challenge_fee(fuel, bytes)` | MIN_TX_FEE + ceil(adjudication_cost · ADJUDICATION_FEE_PER_MUNIT / 10^6) |

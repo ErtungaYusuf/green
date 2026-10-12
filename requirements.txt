@@ -1,0 +1,7 @@
+numpy>=2.0
+cryptography>=42
+pytest>=8
+wgpu>=0.19
+# consensus-critical: task adjudication depends on wasmtime's fuel accounting
+wasmtime==49.0.0
+

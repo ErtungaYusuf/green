@@ -1,0 +1,44 @@
+# Prometheus alert rules for Green nodes (scrape GET /metrics; see OPERATIONS.md).
+groups:
+  - name: green
+    rules:
+      - alert: GreenSupplyAuditFailed
+        expr: green_supply_ok == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "Coins are not accounted for on {{ $labels.instance }}: stop and investigate (possible consensus bug)"
+
+      - alert: GreenNoPeers
+        expr: green_peers == 0
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }} has had no peers for 10 minutes"
+
+      - alert: GreenChainStalled
+        expr: increase(green_height[30m]) == 0
+        for: 0m
+        labels: {severity: warning}
+        annotations:
+          summary: "No new block on {{ $labels.instance }} in 30 minutes (blocks are ~15 s apart)"
+
+      - alert: GreenFallingBehind
+        expr: green_headers_ahead > 100
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }} knows headers it has not caught up with for 30 minutes"
+
+      - alert: GreenOperatorWarning
+        expr: green_warnings > 0
+        for: 0m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }} reports a warning (e.g. an unknown rule change being signalled): run grn status"
+
+      - alert: GreenManyBans
+        expr: increase(green_peers_banned_total[1h]) > 20
+        labels: {severity: info}
+        annotations:
+          summary: "{{ $labels.instance }} banned more than 20 peers in an hour (possible attack)"

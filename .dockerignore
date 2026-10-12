@@ -1,0 +1,12 @@
+.venv
+.yedek
+.git
+.github
+.pytest_cache
+**/__pycache__
+data*
+tests
+bench
+examples
+*.npy
+*.npz
