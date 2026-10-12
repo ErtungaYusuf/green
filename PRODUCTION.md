@@ -2,7 +2,7 @@
 
 Where Green stands on every aspect a production cryptocurrency needs, what backs each claim, and what is still missing. "Done" means implemented, tested and measured in this repository; it does not mean audited, battle-tested or ready to carry real value. Nothing here is ready for real money until the items marked **blocker** are done.
 
-Status as of v0.15 (October 2026). 225 automated tests; thirteen internal security reviews (SECURITY.md).
+Status as of v0.16 (October 2026). 241 automated tests; fourteen internal security reviews (SECURITY.md).
 
 ## Summary
 
@@ -14,13 +14,13 @@ Status as of v0.15 (October 2026). 225 automated tests; thirteen internal securi
 | 4. Compute markets (matmul jobs, instant channels, WASM) | Done; optimistic, documented limits | data availability for manifests and WASM outputs |
 | 5. Accountability for autonomous agents | Done (guarded accounts) | — |
 | 6. State, storage, crash safety | Done (with a state commitment in every header) | — |
-| 7. Peer-to-peer networking | Done for a testnet (encrypted, authenticated, eclipse limits, Dandelion++, compact blocks) | NAT traversal, DNS seeds, Tor/I2P |
+| 7. Peer-to-peer networking | Done for a testnet (encrypted, authenticated, eclipse limits, Dandelion++, compact blocks, PCP/NAT-PMP) | DNS seeds, Tor/I2P |
 | 8. Initial sync of new nodes | Done (headers-first, parallel verification, verified snapshots) | — |
 | 9. Mining software | Partial (CPU/GPU miners, non-custodial pools that sell compute; GPU far below hardware peak) | native GPU miner |
 | 10. Wallets and keys | Done for a testnet (recovery phrases, encrypted files, checksummed addresses, multisig) | hardware wallets, a registered coin type |
 | 11. APIs and developer tools | Done for a testnet (versioned API, fee estimates, long-poll, Python SDK) | SDKs in other languages, explorer API |
 | 12. Operations | Done for a testnet (config file, logs, systemd, metrics and alerts, runbook) | — |
-| 13. Testing and QA | Partial (225 tests, fuzz, mutation testing, 8-node simulation) | multi-node testnet, soak tests |
+| 13. Testing and QA | Partial (241 tests, fuzz, mutation testing, 8-node simulation) | multi-node testnet, soak tests |
 | 14. Security assurance | Partial (internal reviews only) | **blocker**: independent audit, bug bounty |
 | 15. Upgrades and governance | Done (version-bits activation, signed releases, published process) | reproducible builds |
 | 16. Privacy | Partial (transaction origin: Dandelion++; data and amounts public) | — (documented) |
@@ -88,7 +88,9 @@ Pruned nodes (v0.11, green/prune.py): every header but only recent block bodies,
 
 **Evidence:** `tests/test_p2p.py` (27 tests: nothing readable on the wire, a corrupted byte drops the link and it recovers, pinning, other networks refused, each transaction crosses each link once, silent announcers skipped, nodes find each other through gossip, fake headers banned, oversized frames, unsolicited data, floods and silent handshakes cut off, unfinished handshakes capped, only authenticated newcomers can evict, stalling peers penalised, eviction and address-book rules); `bench/net_sim.py`; SECURITY.md P1–P5, P10.
 
-**Missing:** NAT traversal (UPnP/PCP) and DNS seeds (`SEED_NODES` is empty until launch); Tor/I2P; Elligator-encoded keys and traffic padding against protocol fingerprinting; a content-routing layer (DHT) so a buyer can always find a miner's results.
+**Port mapping (v0.16):** `--portmap` asks the home router to forward the P2P port and a provider's port with PCP (RFC 6887), falling back to NAT-PMP (RFC 6886), renews the mapping and removes it on shutdown; a router behind carrier-grade NAT is detected and nothing is advertised. Tested against fake gateways only (`tests/test_portmap.py`): real routers vary, so this needs a field test. Gossip can no longer make nodes dial private addresses or look up names.
+
+**Missing:** DNS seeds (`SEED_NODES` is empty until launch); UPnP (deliberately left out: a much larger attack surface); Tor/I2P; Elligator-encoded keys and traffic padding against protocol fingerprinting; a content-routing layer (DHT) so a buyer can always find a miner's results.
 
 ## 8. Initial sync
 

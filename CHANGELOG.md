@@ -2,6 +2,24 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## 0.16.0
+
+**Hardening the compute channels**
+- Providers admit a product request from its headers (shape, channel, voucher, credit, funds) before reading the body; at most 2 products compute at once; kept-alive connections idle for 30 s are closed; a request that breaks off is not billed; books are kept until a channel is past expiry by more than a reorg can undo.
+- Cooperative close (consensus: optional `close` on `channel_claim`): the unspent part of a channel returns to the buyer at once. `ComputeChannel.close`, `ComputeCluster.close`, provider `POST /close`; a claim still waiting in the mempool is replaced by the closing one.
+- `matmul_many`: independent products in parallel, when the measured time per product shows the link is slow enough to gain (on a fast local link threads cost more than they save); training sends each layer's two backward products together (221 instead of 270 ms a step over a 40 ms, 100 Mbit/s link). Channel opens and claims pay the node's fee estimate. `bench/compute_bench.py --rtt --mbit` emulates an internet link.
+
+**Reachability**
+- `--portmap`: PCP (RFC 6887) with a NAT-PMP (RFC 6886) fallback forwards the P2P port and the provider's port on the home router, renews and removes the mapping, and advertises the external address unless it is not global (carrier-grade NAT). `green/portmap.py`.
+
+**Fees**
+- The node pays the fee estimate for its own protocol transactions and raises the fee of any still waiting after 3 blocks (at most 0.1 GRN). `grn bump <txid>` for wallet transactions; a bump of a transaction on its Dandelion stem replaces it.
+
+**Security**
+- Gossiped addresses must be global IP addresses (no names, no private ranges) unless both the address and its source are local; offer URLs must name an IP address.
+- Found on the way: Python's `is_private` does not cover 100.64.0.0/10. And the rare thread warning in test runs since v0.11, never pinned down before: a dial thread still in its handshake read the database after its node had closed it on shutdown. Handshakes now stop when the node is stopping, and connection threads log unexpected errors instead of dying.
+- Fourteenth security review (SECURITY.md, F1-F8). 241 tests. Consensus change (`close` on claims): v0.15 nodes reject such claims.
+
 ## 0.15.0
 
 **Instant compute: train a model by paying miners**

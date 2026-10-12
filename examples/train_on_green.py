@@ -94,24 +94,26 @@ def main():
             f"{reference.accuracy(xt, yt):.3f})")
 
         owed = {c.offer["provider"]: c.owed for c in cluster.channels}
-        cluster.settle()
-        for p in providers:
-            p.claim_due(force=True)
-        log("Vouchers sent; the miners claim their earnings on chain (they also claimed as they went)...")
+        with mine.lock:
+            before = mine.chain.state.balance(buyer.address)
+        closing = [c for c in cluster.channels if c.close()]   # final voucher; the miner claims and closes
+        log(f"Training done: closing the channels ({len(closing)} of {len(cluster.channels)} agreed; a miner "
+            f"declines only when what is left to claim would not pay a claim's fee)...")
         end = time.time() + 60
-        while time.time() < end:                  # settled: a claim for what is left would not pay its fee
+        while time.time() < end:
             with mine.lock:
-                paid = {c.offer["provider"]: mine.chain.state.channels[c.cid]["paid"] for c in cluster.channels}
-                pending = any(t["type"] == "channel_claim" for n in nodes for t in n.mempool.values())
-            if not pending and all(owed[a] - paid[a] < params.MIN_TX_FEE for a in owed):
+                open_ = [c for c in closing if c.cid in mine.chain.state.channels]
+            if not open_:
                 break
             time.sleep(0.5)
+        with mine.lock:
+            back = mine.chain.state.balance(buyer.address) - before
         for c in cluster.channels:
-            a = c.offer["provider"]
-            log(f"  {a[:20]}...: {c.stats['products']} products, {params.fmt_amount(paid[a])} claimed on chain "
-                f"(claim fees come out of it), {owed[a] - paid[a]} yaprak left unclaimed")
-        log(f"The buyer paid {params.fmt_amount(sum(paid.values()))} for {model.products} products; the rest of each "
-            f"channel returns to it when the channel expires.")
+            log(f"  {c.offer['provider'][:20]}...: {c.stats['products']} products, paid "
+                f"{params.fmt_amount(owed[c.offer['provider']])} (claimed on chain by the miner)")
+        log(f"The buyer paid {params.fmt_amount(sum(owed.values()))} for {model.products} products; the unspent "
+            f"{params.fmt_amount(back)} of the closed channels came back at once"
+            + (" (the others return theirs at expiry)." if len(closing) < len(cluster.channels) else "."))
     finally:
         for p in providers:
             p.stop()

@@ -13,7 +13,10 @@ is unbiased, so small gradients are not rounded away and SGD still converges;
 the int32 products are exact, so the only error is the quantization itself.
 
 `matmul` is any function computing an exact int8 product: local_matmul, a
-ComputeChannel's matmul, or a ComputeCluster's.
+ComputeChannel's matmul, or a ComputeCluster's. When it belongs to an object
+with matmul_many (channels and clusters), the two products of a layer's
+backward pass, which do not depend on each other, are sent together: over the
+internet a step then costs 2 round trips per layer instead of 3.
 """
 
 import numpy as np
@@ -61,6 +64,13 @@ def quantize(x: np.ndarray, rng: np.random.Generator | None = None) -> tuple[np.
     return np.clip(y, -127, 127).astype(np.int8), scale
 
 
+def _many(matmul, pairs: list) -> list:
+    owner = getattr(matmul, "__self__", None)
+    if owner is not None and hasattr(owner, "matmul_many"):
+        return owner.matmul_many(pairs)
+    return [matmul(a, b) for a, b in pairs]
+
+
 def softmax(z: np.ndarray) -> np.ndarray:
     e = np.exp(z - z.max(axis=1, keepdims=True))
     return e / e.sum(axis=1, keepdims=True)
@@ -90,12 +100,6 @@ class MLP:
         self.products += 1
         return matmul(xq, wq).astype(np.float32) * np.float32(sx * sw), (xq, sx, wq, sw)
 
-    def _mm(self, a, sa, b, sb, matmul):
-        if matmul is None:
-            return a @ b
-        self.products += 1
-        return matmul(np.ascontiguousarray(a), np.ascontiguousarray(b)).astype(np.float32) * np.float32(sa * sb)
-
     def forward(self, x: np.ndarray, matmul=None):
         cache, h = [], x
         for i, (w, b) in enumerate(zip(self.W, self.b)):
@@ -121,10 +125,19 @@ class MLP:
                 gq, sg = g, 1.0
             else:
                 gq, sg = quantize(g, self.rng)              # unbiased rounding for gradients
-            dw = self._mm(xq.T, sx, gq, sg, matmul)
             db = g.sum(axis=0)
-            if i > 0:
-                g = self._mm(gq, sg, wq.T, sw, matmul)      # the gradient for the layer below
+            if matmul is None:
+                dw = xq.T @ gq
+                if i > 0:
+                    g = gq @ wq.T
+            else:
+                # The weight gradient and the gradient for the layer below are independent.
+                pairs = [(np.ascontiguousarray(xq.T), gq)] + ([(gq, np.ascontiguousarray(wq.T))] if i > 0 else [])
+                out = _many(matmul, pairs)
+                self.products += len(pairs)
+                dw = out[0].astype(np.float32) * np.float32(sx * sg)
+                if i > 0:
+                    g = out[1].astype(np.float32) * np.float32(sg * sw)
             self.vW[i] = momentum * self.vW[i] - lr * dw
             self.vb[i] = momentum * self.vb[i] - lr * db
             self.W[i] += self.vW[i]

@@ -19,6 +19,7 @@ Security notes (details in SECURITY.md):
     disputes the wrong or withheld ones (the buyer-side watchtower).
 """
 
+import ipaddress
 import json
 import os
 import random
@@ -50,6 +51,9 @@ RBF_MIN_BUMP_PERCENT = 10     # a replacement must pay this much more than the t
 REVEAL_CONFIRMATIONS = 2      # wait until the commit has this many confirmations
 COMMIT_INFLIGHT_CAP = 2 * params.MAX_BATCH_UNITS   # units a miner sells at once; the rest are lottery-only
 BATCH_SECONDS = 2.0           # commit a partly filled batch after this long
+BUMP_AFTER_BLOCKS = 3         # our own protocol transaction still waiting after this many blocks gets a higher fee
+MAX_BUMP_FEE = 1000 * params.MIN_TX_FEE    # ...up to this (0.1 GRN), so a fee spike cannot drain the wallet
+BUMP_SECONDS = 5.0
 MAX_MANIFEST_BYTES = txmod.HASH_BYTES * params.MAX_BATCH_UNITS
 RESPONSES_PER_ROUND = 32      # disputes answered per loop; the rest wait for mempool room
 MAX_WAITERS = 16              # API clients long-polling for the next block at once
@@ -100,7 +104,8 @@ class Node:
                  host: str = "127.0.0.1", peers=(), miner_key: Key | None = None, log=print,
                  use_gpu: bool = False, p2p_port: int = 0, listen: bool = True, seeds=None,
                  fast_sync: bool = False, p2p_host: str | None = None, no_signal=(), debug=None,
-                 prune: bool = False, prune_keep: int = prunemod.PRUNE_KEEP_BLOCKS, dandelion: bool = True):
+                 prune: bool = False, prune_keep: int = prunemod.PRUNE_KEEP_BLOCKS, dandelion: bool = True,
+                 portmap: bool = False, portmap_gateway: tuple | None = None):
         self.data_dir = data_dir
         self.port = port
         self.host = host
@@ -120,6 +125,9 @@ class Node:
         self.no_signal = set(no_signal)           # deployments this miner chooses not to signal
         self.dandelion = dandelion                # our own transactions take a stem first (p2p.py)
         self.pool = None                          # a green.pool.Pool selling its miners' units through us
+        self.portmap = portmap                    # ask the router to forward our P2P port (green/portmap.py)
+        self.portmap_gateway = portmap_gateway    # (host, port); None: the default gateway, port 5351
+        self.portmaps: list = []
         self._sell_lock = threading.Lock()        # one thread at a time commits and reveals batches
         self.prune = prune                        # keep recent block bodies and data in use only (green/prune.py)
         self.prune_keep = prune_keep
@@ -138,6 +146,7 @@ class Node:
                       "results_revealed": 0, "tasks_done": 0, "frauds_caught": 0, "started": time.time()}
         self._recent_unit_times: list[float] = []
         self._task_inflight: dict[str, dict] = {}
+        self._own_waiting: dict[tuple, int] = {}   # (sender, nonce) of our pending protocol tx -> height first seen
         self._task_unrunnable: set[str] = set()
         self.running = True
 
@@ -285,6 +294,10 @@ class Node:
             who = txmod.sender(t)
             if any(m["nonce"] == t["nonce"] and txmod.sender(m) == who for m in self.mempool.values()):
                 return False                         # a replacement: the mempool's fee rules decide
+            for other, e in list(self.p2p.stempool.items()):
+                if e["local"] and e["tx"]["nonce"] == t["nonce"] and txmod.sender(e["tx"]) == who:
+                    del self.p2p.stempool[other]     # a fee bump of our own stem transaction replaces it
+                    return False                     # (and goes out at once: speed was the point)
             s = self._stem_view(skip=tid)
             s.adjudication_used = s.responses_used = 0
             self.chain.apply_tx(s, t, self.chain.height + 1)
@@ -678,8 +691,9 @@ class Node:
         manifest = self.blobs.put(txmod.encode_manifest(leaves))
         c = txmod.commitment(addr, job_id, bitmap, root)
         extra = {"payees": payees} if payees else {}
-        t = make_tx(self.miner_key, self.chain.chain_id, "job_commit", nonce, job=job_id, units=bitmap,
-                    commitment=c, **extra)
+        fields = {"job": job_id, "units": bitmap, "commitment": c, **extra}
+        t = make_tx(self.miner_key, self.chain.chain_id, "job_commit", nonce,
+                    self.protocol_fee("job_commit", nonce, **fields), **fields)
         try:
             self.submit_tx(t, stem=False)
         except (InvalidTx, MissingData) as e:
@@ -927,18 +941,71 @@ class Node:
             self._unit_ok.add(key)
         return bad, missing
 
+    def protocol_fee(self, kind: str, nonce: int, fee: int = params.MIN_TX_FEE, **fields) -> int:
+        """A fee for one of our own transactions that should get it into the next blocks
+        (the node's estimate for its size), and never below `fee`."""
+        rate = self.fee_estimate(2)["fee_rate"]
+        if not rate:
+            return fee
+        size = txmod.tx_size(make_tx(self.miner_key, self.chain.chain_id, kind, nonce, fee, **fields))
+        return max(fee, min(MAX_BUMP_FEE, int(rate * size) + 1))       # the cap never undercuts a required fee
+
     def _try_tx(self, kind: str, fee: int = params.MIN_TX_FEE, **fields) -> bool:
         """The node's own protocol transactions (commits, reveals, answers, challenges)
         skip the stem: they have deadlines, their sender is the miner address blocks
-        already show, and the loops that send them look for them in the mempool."""
-        t = make_tx(self.miner_key, self.chain.chain_id, kind, self.pending_nonce(self.miner_key.address),
-                    fee, **fields)
+        already show, and the loops that send them look for them in the mempool. They pay
+        what the fee market asks, and _bump_stuck raises the fee of any that still wait."""
+        nonce = self.pending_nonce(self.miner_key.address)
+        fee = self.protocol_fee(kind, nonce, fee, **fields)
+        t = make_tx(self.miner_key, self.chain.chain_id, kind, nonce, fee, **fields)
         try:
             self.submit_tx(t, stem=False)
             return True
         except (InvalidTx, MissingData) as e:
             self.log(f"[tx] {kind} rejected: {e}")
             return False
+
+    def _bump_stuck(self) -> list[str]:
+        """Replace our own protocol transactions that have waited BUMP_AFTER_BLOCKS blocks
+        with the same transaction at a higher fee (replace-by-fee): a reveal or a dispute
+        answer stuck behind a fee spike would otherwise miss its deadline and lose a bond.
+        Returns the new txids."""
+        if self.miner_key is None:
+            return []
+        me = self.miner_key.address
+        with self.lock:
+            height = self.chain.height
+            mine = {(t["nonce"]): t for t in self.mempool.values() if txmod.sender(t) == me
+                    and t["pub"] == self.miner_key.pub_hex}
+            self._own_waiting = {k: h for k, h in self._own_waiting.items() if k[1] in mine}
+            stuck = []
+            for nonce, t in mine.items():
+                first = self._own_waiting.setdefault((me, nonce), height)
+                if height - first >= BUMP_AFTER_BLOCKS:
+                    stuck.append(t)
+        bumped = []
+        for t in stuck:
+            fields = {k: v for k, v in t.items() if k not in txmod.COMMON}
+            need = t["fee"] + max(params.MIN_TX_FEE, t["fee"] * RBF_MIN_BUMP_PERCENT // 100)   # what RBF accepts
+            fee = min(MAX_BUMP_FEE, max(self.protocol_fee(t["type"], t["nonce"], **fields),
+                                        t["fee"] + max(params.MIN_TX_FEE, t["fee"] // 4)))
+            if fee < need:
+                continue                                  # at the cap: leave it
+            new = make_tx(self.miner_key, self.chain.chain_id, t["type"], t["nonce"], fee, **fields)
+            try:
+                bumped.append(self.submit_tx(new, stem=False))
+                with self.lock:
+                    self._own_waiting[(me, t["nonce"])] = height      # give the new fee its own chance
+                self.log(f"[fees] {t['type']} still waiting after {BUMP_AFTER_BLOCKS} blocks: fee raised "
+                         f"{t['fee']} -> {fee}")
+            except (InvalidTx, MissingData) as e:
+                self.log(f"[fees] could not raise the fee of {t['type']}: {e}")
+        return bumped
+
+    def _bump_loop(self) -> None:
+        while self.running:
+            time.sleep(BUMP_SECONDS)
+            self._bump_stuck()
 
     def _count_unit(self, useful: bool) -> None:
         now = time.time()
@@ -1240,6 +1307,14 @@ class Node:
         self.server = BoundedServer((self.host, self.port), make_handler(self))
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.p2p.start()
+        if self.portmap and self.p2p.listen:
+            m = self.map_port(self.p2p.port)
+            # A non-global "external" address (private, or 100.64/10 carrier-grade NAT, which
+            # is_private does not cover) means another NAT further out: the mapping does not
+            # make us reachable, so nothing is advertised.
+            if m is not None and ipaddress.ip_address(m.external_ip).is_global:
+                self.p2p.public_port = m.external_port
+                self.p2p.my_host = m.external_ip          # what to tell peers to dial
         if self.prune:
             threading.Thread(target=self._maintenance_loop, daemon=True, name="maintenance").start()
         if self.miner_key:
@@ -1247,9 +1322,22 @@ class Node:
             threading.Thread(target=self._supervised, args=("miner", self._mine_loop), daemon=True).start()
             threading.Thread(target=self._supervised, args=("task worker", self._task_worker_loop),
                              daemon=True).start()
+            threading.Thread(target=self._supervised, args=("fee bumper", self._bump_loop), daemon=True).start()
+
+    def map_port(self, port: int):
+        """Ask the router to forward `port` (kept renewed until stop); the PortMapper, or None."""
+        from .portmap import PortMapper
+        host, gw_port = self.portmap_gateway or (None, 5351)
+        m = PortMapper(port, gateway=host, gateway_port=gw_port, log=self.log)
+        if not m.start():
+            return None
+        self.portmaps.append(m)
+        return m
 
     def stop(self) -> None:
         self.running = False
+        for m in self.portmaps:
+            m.stop()                             # remove the router's forwarding
         with self.lock:
             self.tip_changed.notify_all()        # release API clients waiting for a block
         self.server.shutdown()

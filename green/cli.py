@@ -349,7 +349,7 @@ def cmd_node(args):
                 debug=logger.debug if logger.isEnabledFor(logging.DEBUG) else None,
                 use_gpu=args.gpu, p2p_port=args.p2p_port, listen=not args.no_listen, fast_sync=args.fast_sync,
                 p2p_host=args.p2p_host, no_signal=args.no_signal, prune=args.prune, prune_keep=args.prune_keep,
-                dandelion=not args.no_dandelion)
+                dandelion=not args.no_dandelion, portmap=args.portmap)
     node.start(mine=args.mine)
     pool = None
     if args.pool_port is not None:
@@ -410,7 +410,8 @@ CONFIG_KEYS = {"port": int, "host": str, "p2p_port": int, "p2p_host": str, "peer
                "mine": bool, "gpu": bool, "fast_sync": bool, "no_listen": bool, "no_signal": list,
                "report": (int, float), "log_level": str, "log_file": str, "prune": bool, "prune_keep": int,
                "pool_port": int, "pool_host": str, "pool_fee": int, "no_dandelion": bool,
-               "provide_port": int, "provide_host": str, "provide_url": str, "provide_price": int}
+               "provide_port": int, "provide_host": str, "provide_url": str, "provide_price": int,
+               "portmap": bool}
 
 
 def load_config(data: str) -> dict:
@@ -471,6 +472,29 @@ def cmd_pool_mine(args):
     except KeyboardInterrupt:
         print(f"Stopped: {miner.shares} shares accepted, {miner.blocks} blocks found, "
               f"{miner.useful} job units computed and paid for, {miner.rejected} refused")
+
+
+def cmd_bump(args):
+    """Replace a pending transaction of this wallet with the same one at a higher fee."""
+    key = require_wallet(args.data)
+    view = api_get(args, f"/v1/tx/{args.txid}")
+    if view.get("status") != "pending":
+        raise CliError("that transaction is not pending: it is confirmed already, or this node does not know it")
+    t = view["tx"]
+    if t.get("pub") != key.pub_hex:
+        raise CliError("that transaction was not sent by this wallet")
+    need = t["fee"] + max(params.MIN_TX_FEE, t["fee"] // 10)      # what replace-by-fee accepts
+    if args.fee:
+        fee = params.parse_amount(args.fee)
+    else:
+        rate = api_get(args, "/v1/fee?blocks=1")["fee_rate"]
+        fee = max(need, int(rate * txmod.tx_size(t)) + 1)
+    if fee < need:
+        raise CliError(f"a replacement must pay at least {params.fmt_amount(need)}")
+    fields = {k: v for k, v in t.items() if k not in txmod.COMMON}
+    new = make_tx(key, api_get(args, "/status")["genesis"], t["type"], t["nonce"], fee, **fields)
+    txid = api_post(args, "/tx", new)["txid"]
+    print(f"Replaced: fee {params.fmt_amount(t['fee'])} -> {params.fmt_amount(fee)}. New txid: {txid}")
 
 
 def cmd_providers(args):
@@ -940,6 +964,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--p2p-host", help="address the P2P port listens on (default: same as --host); "
                                       "e.g. 0.0.0.0 to be reachable by other nodes while the API stays local")
     s.add_argument("--no-listen", action="store_true", help="do not accept connections from other nodes")
+    s.add_argument("--portmap", action="store_true",
+                   help="ask the home router to forward the P2P port (and the --provide-port) with PCP or "
+                        "NAT-PMP, so other nodes and buyers can reach this one")
     s.add_argument("--no-dandelion", action="store_true",
                    help="announce this node's transactions at once instead of passing them along a stem first "
                         "(faster, but shows the network where they came from)")
@@ -984,6 +1011,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("address", nargs="?")
     s.add_argument("--limit", type=int, default=50)
     s.set_defaults(fn=cmd_history)
+
+    s = sub.add_parser("bump", help="pay a higher fee for a pending transaction of this wallet")
+    s.add_argument("txid")
+    s.add_argument("--fee", help="the new fee in GRN (default: what the next block needs, at least +10%%)")
+    s.set_defaults(fn=cmd_bump)
 
     s = sub.add_parser("providers", help="compute on offer: nodes selling matrix products through channels")
     s.set_defaults(fn=cmd_providers)

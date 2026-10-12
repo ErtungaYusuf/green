@@ -205,3 +205,17 @@ def test_the_nodes_own_protocol_transactions_skip_the_stem(nodes):
     assert len(n.mempool) == 1 and not n.p2p.stempool
     wait_for(lambda: invs(hole), what="the announcement")
     assert hole.messages("dtx") == []
+
+
+def test_a_fee_bump_replaces_a_transaction_still_on_its_stem(nodes):
+    miner, payee = Key.generate(), Key.generate()
+    genesis = make_genesis(miner.address, "bump")
+    hole = Listener(block_hash(genesis))
+    a = nodes("a", genesis, key=miner, peers=[f"127.0.0.1:{hole.port}"], listen=False)
+    wait_for(lambda: hole.ready.is_set() and a.p2p.all_peers(), what="the node to dial its peer")
+    slow = make_tx(miner, a.chain.chain_id, "transfer", 0, to=payee.address, amount=1)
+    http_post(f"{a.url}/tx", slow)
+    wait_for(lambda: hole.messages("dtx"), what="the stem")
+    fast = make_tx(miner, a.chain.chain_id, "transfer", 0, 3 * p2p.params.MIN_TX_FEE, to=payee.address, amount=1)
+    http_post(f"{a.url}/tx", fast)                       # the same nonce, paying more
+    assert list(a.mempool) == [txmod.txid(fast)] and not a.p2p.stempool

@@ -552,3 +552,13 @@ def test_only_an_authenticated_newcomer_can_evict(nodes, monkeypatch):
     wait_for(lambda: {p.node_id for p in a.p2p.all_peers()} == {second.node_id, third.node_id},
              timeout=5, what="the evicted peer to leave")
     silent.close()
+
+
+def test_gossip_cannot_point_us_into_our_own_network():
+    """Addresses from the internet must be public IPs: a private one would have every
+    node dial into its own LAN, a name would make it look up whatever a stranger chose."""
+    assert p2p.gossip_ok("8.8.8.8", "203.0.114.9")
+    for host in ("192.168.1.1", "10.0.0.5", "127.0.0.1", "100.64.0.9", "169.254.1.1", "evil.example"):
+        assert not p2p.gossip_ok(host, "8.8.4.4"), host
+    assert p2p.gossip_ok("192.168.1.20", "192.168.1.7")         # a LAN peer may name LAN nodes
+    assert not p2p.gossip_ok("evil.example", "192.168.1.7")

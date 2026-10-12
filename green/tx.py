@@ -74,7 +74,7 @@ FIELDS = {
 COMMON = {"type", "pub", "nonce", "fee", "sig"}
 # Fields a transaction may carry or leave out. A job_commit's payees share the
 # batch's payment (a pool paying the miners who computed its units).
-OPTIONAL = {"job_commit": {"payees"}, "channel_claim": {"payees"}}
+OPTIONAL = {"job_commit": {"payees"}, "channel_claim": {"payees", "close"}}
 
 
 class InvalidTx(Exception):
@@ -249,6 +249,8 @@ def check_format(tx: dict, chain_id: str) -> None:
             raise InvalidTx("bad channel id or total")
         if not is_hex(tx["voucher"], 128):
             raise InvalidTx("bad voucher signature")
+        if "close" in tx and tx["close"] is not True:
+            raise InvalidTx("close is true or left out")      # one spelling per transaction
     if kind in ("job_reveal", "job_challenge", "job_respond") and not is_hex(tx["batch"], 64):
         raise InvalidTx("bad batch id")
     if kind == "job_reveal" and not (is_hex(tx["root"], 64) and is_hex(tx["manifest"], 64)):

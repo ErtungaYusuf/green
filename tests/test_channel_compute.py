@@ -97,14 +97,13 @@ def test_a_model_trains_on_bought_compute_and_the_provider_is_paid(market):
 def test_a_wrong_product_is_caught_unpaid_and_the_cluster_moves_on(market, monkeypatch):
     node, buyer, provider = market
     honest, cheat = provider(), provider(key=Key.generate())
-    real = cheat.matmul
+    real = cheat.compute
 
     def lying(*args, **kw):
-        c, owed = real(*args, **kw)
-        c = bytearray(c)
+        c = bytearray(real(*args, **kw))
         c[0] ^= 1                                               # one bit of one entry
-        return bytes(c), owed
-    monkeypatch.setattr(cheat, "matmul", lying)
+        return bytes(c)
+    monkeypatch.setattr(cheat, "compute", lying)
     good, bad = channel(node, buyer, honest), channel(node, buyer, cheat)
     rng = np.random.default_rng(5)
     a = rng.integers(-128, 128, (64, 32), dtype=np.int8)
@@ -170,7 +169,8 @@ def test_a_buyer_finds_providers_on_the_network_and_trains(tmp_path, monkeypatch
         losses = train(model, x, y, 15, matmul=cluster.matmul, lr=0.1)
         assert losses[-1] < losses[0] and cluster.owed > 0
         # Without allow_local, offers pointing at local addresses are skipped (they are for tests).
-        assert compute._private("127.0.0.1") and compute._private("10.0.0.5") and not compute._private("8.8.8.8")
+        assert compute._private("127.0.0.1") and compute._private("10.0.0.5") and compute._private("100.64.0.9")
+        assert not compute._private("8.8.8.8")
     finally:
         p.stop()
         mine.stop()
@@ -202,3 +202,106 @@ def test_offers_must_be_signed_and_funded(tmp_path):
         assert raw.closed()                                     # forged offers add up to a ban
     finally:
         node.stop()
+
+
+def test_requests_are_checked_before_their_body_is_read(market):
+    node, buyer, provider = market
+    p = provider()
+    ch = channel(node, buyer, p)
+    for cid, shape, length, code in (("ab" * 32, "4096,4096,4096", 2 * 4096 * 4096, b"404"),   # no such channel
+                                     (ch.cid, "4096,4096,4096", 2 * 4096 * 4096 - 1, b"400")):  # wrong length
+        s = socket.create_connection(("127.0.0.1", p.port), timeout=5)
+        s.sendall(f"POST /matmul HTTP/1.1\r\nHost: x\r\nX-Channel: {cid}\r\nX-Shape: {shape}\r\n"
+                  f"Content-Length: {length}\r\n\r\n".encode())
+        started = time.time()
+        reply = s.recv(4096)                                    # without sending a byte of the 32 MiB
+        assert reply.split(b" ")[1] == code and time.time() - started < 3
+        s.close()
+
+
+def test_a_request_that_breaks_off_is_not_billed(market):
+    node, buyer, provider = market
+    p = provider()
+    ch = channel(node, buyer, p)
+    s = socket.create_connection(("127.0.0.1", p.port), timeout=5)
+    s.sendall(f"POST /matmul HTTP/1.1\r\nHost: x\r\nX-Channel: {ch.cid}\r\nX-Shape: 64,64,64\r\n"
+              f"Content-Length: {2 * 64 * 64}\r\n\r\n".encode() + bytes(100))
+    s.close()                                                   # gone halfway through the body
+    time.sleep(0.5)
+    assert p.books(ch.cid)["owed"] == 0
+    ticket, owed = p.admit(ch.cid, (2, 2, 2))
+    p.admit(ch.cid, (2, 2, 2))
+    p.release(ch.cid, ticket)
+    assert p.books(ch.cid)["owed"] == price_of(2, 2, 2, p.price)
+
+
+def test_books_outlive_a_reorg_and_go_after_expiry(market):
+    node, buyer, provider = market
+    p = provider()
+    ch = channel(node, buyer, p)
+    ch.matmul(np.ones((4, 4), np.int8), np.ones((4, 4), np.int8))
+    ch.settle()
+    p._forget_ended()                       # whatever the state says, a live channel's vouchers are kept
+    assert p.books(ch.cid)["vouched"] == ch.owed
+    with p.lock:
+        p.book[ch.cid]["expires"] = node.chain.height - params.MAX_REORG_DEPTH - 1
+    p._forget_ended()                       # over for good: beyond any reorg
+    with pytest.raises(LookupError):
+        p.books(ch.cid)
+
+
+def test_the_buyer_closes_and_gets_the_rest_back_at_once(market):
+    node, buyer, provider = market
+    p = provider()
+    ch = channel(node, buyer, p, amount=5_000_000)
+    for _ in range(12):                                         # 12 units: more than a claim's fee
+        ch.matmul(np.ones((8, 8), np.int8), np.ones((8, 8), np.int8))
+    before = node.chain.state.balance(buyer.address)
+    assert ch.close()
+    wait_until(lambda: ch.cid not in node.chain.state.channels, "the channel to close")
+    assert node.chain.state.balance(buyer.address) == before + 5_000_000 - ch.owed
+
+
+def test_independent_products_go_out_together(market, monkeypatch):
+    monkeypatch.setattr(compute, "PARALLEL_MIN_SECONDS", 0)     # in parallel even on a fast local link
+    node, buyer, provider = market
+    p1, p2 = provider(), provider(key=Key.generate())
+    cluster = ComputeCluster([channel(node, buyer, p1), channel(node, buyer, p2)])
+    rng = np.random.default_rng(9)
+    pairs = [(rng.integers(-128, 128, (32, 48), dtype=np.int8), rng.integers(-128, 128, (48, 16), dtype=np.int8))
+             for _ in range(6)]
+    assert all(np.array_equal(c, local_matmul(a, b)) for c, (a, b) in zip(cluster.matmul_many(pairs), pairs))
+    assert p1.stats["products"] == 3 and p2.stats["products"] == 3
+    one = cluster.channels[0]
+    assert all(np.array_equal(c, local_matmul(a, b)) for c, (a, b) in zip(one.matmul_many(pairs), pairs))
+
+
+def test_offer_urls_name_an_ip_address():
+    from green import p2p
+    key = Key.generate()
+    for url, ok in (("http://203.0.113.7:8548", True), ("http://[2001:db8::7]:8548", True),
+                    ("http://provider.example:8548", False), ("ftp://203.0.113.7:21", False)):
+        o = {"provider": key.address, "pub": key.pub_hex, "url": url, "price": 5, "max_dim": 1024, "credit": 4,
+             "time": int(time.time())}
+        o["sig"] = key.sign(p2p.offer_bytes("cc" * 32, o))
+        assert (p2p.offer_problem("cc" * 32, o, time.time()) is None) == ok, url
+
+
+def test_a_close_replaces_a_claim_still_waiting(market):
+    node, buyer, provider = market
+    p = provider()
+    ch = channel(node, buyer, p, amount=5_000_000)
+    node.mining = False                                         # so the first claim waits in the mempool
+    for _ in range(12):
+        ch.matmul(np.ones((8, 8), np.int8), np.ones((8, 8), np.int8))
+    ch.settle()
+    assert p.claim_due(force=True) == [ch.cid]
+    for _ in range(12):
+        ch.matmul(np.ones((8, 8), np.int8), np.ones((8, 8), np.int8))
+    assert ch.close()                                           # replaces the waiting claim
+    (claim,) = [t for t in node.mempool.values() if t["type"] == "channel_claim"]
+    assert claim.get("close") and claim["total"] == ch.owed
+    before = node.chain.state.balance(buyer.address)
+    node.mining = True
+    wait_until(lambda: ch.cid not in node.chain.state.channels, "the channel to close")
+    assert node.chain.state.balance(buyer.address) == before + 5_000_000 - ch.owed

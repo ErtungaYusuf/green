@@ -630,6 +630,10 @@ class Chain:
             ch["paid"] = tx["total"]
             for payee, amount in payouts(tx.get("payees", addr), pay - fee):
                 s.credit(payee, amount)
+            if tx.get("close"):
+                # The provider is done: the rest goes back to the buyer now, not at expiry.
+                s.credit(ch["buyer"], ch["amount"] - tx["total"])
+                del s.channels[tx["channel"]]
 
         elif kind == "job_post":
             if tx["job"] in s.jobs:

@@ -39,7 +39,7 @@ log_level = "info"         # debug, info, warning, error
 log_file = "node.log"      # rotated at 10 MB, 5 files kept
 ```
 
-Every key: `port`, `host`, `p2p_port`, `p2p_host`, `peer`, `genesis`, `mine`, `gpu`, `fast_sync`, `no_listen`, `no_signal`, `report`, `log_level`, `log_file`, `prune`, `prune_keep`, `pool_port`, `pool_host`, `pool_fee`, `no_dandelion`, `provide_port`, `provide_host`, `provide_url`, `provide_price`. An unknown key or a wrong type stops the node with a message instead of being ignored.
+Every key: `port`, `host`, `p2p_port`, `p2p_host`, `peer`, `genesis`, `mine`, `gpu`, `fast_sync`, `no_listen`, `no_signal`, `report`, `log_level`, `log_file`, `prune`, `prune_keep`, `pool_port`, `pool_host`, `pool_fee`, `no_dandelion`, `provide_port`, `provide_host`, `provide_url`, `provide_price`, `portmap`. An unknown key or a wrong type stops the node with a message instead of being ignored.
 
 ## Archive or pruned
 
@@ -58,6 +58,14 @@ Data nothing uses any more is marked, and deleted about a day later if it is sti
 ## Selling compute
 
 `provide_port = 8548`, `provide_host = "0.0.0.0"` and `provide_url = "http://<public address>:8548"` make the node sell matrix products through compute channels at `provide_price` yaprak per 2^24 multiply-adds (default 1,000). The offer is advertised over the network once the wallet holds 0.1 GRN and renewed every 20 minutes. Buyers pay with vouchers; the node claims them on chain when they are worth 20 transaction fees, before a channel ends, and on shutdown. Its books are in `provider.json` in the data folder: back it up with the wallet (vouchers not yet claimed are money). Open the port in the firewall; each request is at most 32 MiB.
+
+## Behind a home router
+
+`portmap = true` asks the router to forward the P2P port (and the provider's port) with PCP or NAT-PMP, renews the mapping every half hour and removes it when the node stops; the log says whether the router agreed. Routers without PCP or NAT-PMP (or with it switched off) need a manual port forward. Behind carrier-grade NAT (the router's own address is in 100.64.0.0/10 or private) no mapping helps, and the node advertises nothing.
+
+## Fees
+
+The node pays the fee market's rate for its own commits, reveals, answers and claims, and raises the fee of any still waiting after 3 blocks, up to 0.1 GRN. For a wallet transaction stuck in a busy mempool: `grn bump <txid>` (optionally `--fee`).
 
 ## Network and firewall
 

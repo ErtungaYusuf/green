@@ -79,7 +79,7 @@ from .crypto import verify as crypto_verify
 from .tx import InvalidTx
 
 PROTOCOL_VERSION = 1
-AGENT = "green/0.15.0"
+AGENT = "green/0.16.0"
 
 MAX_OUTBOUND = 8               # outbound connections the node keeps
 BLOCK_RELAY_ONLY = 2           # ...of which relay blocks only
@@ -185,6 +185,18 @@ def is_local(host: str) -> bool:
     except ValueError:
         return host == "localhost"
     return ip.is_loopback or ip.is_private or ip.is_link_local
+
+
+def gossip_ok(host: str, source: str) -> bool:
+    """May an address heard from `source` go in the address book? Only IP addresses (a
+    name would make us look up whatever a stranger chose), and only public ones: a
+    private address from the internet would have us dial into our own network. Local
+    peers may tell us local addresses (test networks, LANs)."""
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_global or is_local(source) and is_local(host)
 
 
 def netgroup(host: str) -> str:
@@ -458,8 +470,12 @@ def offer_problem(chain_id: str, offer, now: float) -> str | None:
     if not isinstance(offer, dict) or set(offer) != OFFER_FIELDS:
         return "bad fields"
     url = offer["url"]
-    if not (isinstance(url, str) and len(url) <= 200 and url.split("://")[0] in ("http", "https")
-            and parse_address(url.split("://", 1)[1].split("/")[0]) is not None):
+    hostport = parse_address(url.split("://", 1)[1].split("/")[0]) if isinstance(url, str) and "://" in url else None
+    if not (len(url) <= 200 and url.split("://")[0] in ("http", "https") and hostport is not None):
+        return "bad url"
+    try:
+        ipaddress.ip_address(hostport[0])     # an IP, not a name: a name could resolve into the buyer's network
+    except ValueError:
         return "bad url"
     if not (txmod.is_uint(offer["price"]) and offer["price"] >= 1 and txmod.is_uint(offer["max_dim"])
             and 1 <= offer["max_dim"] <= 4096 and txmod.is_uint(offer["credit"]) and 1 <= offer["credit"] <= 1000
@@ -644,6 +660,7 @@ class P2P:
         self.connecting: set[str] = set()
         self.pending: dict[str, int] = {}          # host -> inbound handshakes in progress
         self.my_host: str | None = None            # how outbound peers see us
+        self.public_port: int | None = None        # our port as seen from outside, when the router maps one
         self.running = False
         self.server = None
         self._ready: queue.Queue = queue.Queue()
@@ -735,6 +752,7 @@ class P2P:
                 "known_addresses": len(self.addrman), "headers_ahead": len(self.hindex),
                 "best_header_height": self._height_of(self.best), "blocks_in_flight": len(self.requested),
                 "fast_sync": self.snap_state, "stempool": len(self.stempool), "offers": len(self.offers),
+                "public": addr_key(self.my_host, self.public_port or self.port) if self.my_host else None,
                 "stats": dict(self.stats)}
 
     # -- bans --
@@ -817,6 +835,9 @@ class P2P:
     def _inbound(self, sock, host: str, port: int) -> None:
         try:
             self._setup(sock, host, port, True)
+        except Exception as e:                       # never let a connection thread die silently
+            if self.running:
+                self.log(f"[p2p] connection from {addr_key(host, port)} failed: {type(e).__name__}: {e}")
         finally:
             with self.lock:
                 self.pending[host] -= 1
@@ -899,6 +920,9 @@ class P2P:
                 return
             try:
                 self._setup(sock, host, port, False, expect_id=node_id, block_only=block_only, manual_key=key if manual else None)
+            except Exception as e:                   # never let a connection thread die silently
+                if self.running:
+                    self.log(f"[p2p] connecting to {key} failed: {type(e).__name__}: {e}")
             finally:
                 with self.lock:
                     self.connecting.discard(key)
@@ -914,12 +938,15 @@ class P2P:
             peer.send_cipher, peer.recv_cipher, peer.session_id = key_exchange(sock, not inbound, self.chain.genesis_hash)
             sig = self.key.sign(auth_message(peer.session_id, not inbound)).hex()
             with self.node.lock:
+                if not self.running:              # the node is stopping: its database may be closed
+                    raise ConnectionError("shutting down")
                 height, tip = self.chain.height, self.chain.tip
                 work = self.chain.meta[tip]["chainwork"]
+                first = self.chain.first_block
             mine = {"proto": PROTOCOL_VERSION, "agent": AGENT, "id": self.node_id, "sig": sig,
-                    "port": self.port if self.listen else 0, "relay": not block_only,
+                    "port": (self.public_port or self.port) if self.listen else 0, "relay": not block_only,
                     "height": height, "tip": tip, "work": str(work), "you": host, "time": int(time.time()),
-                    "first": self.chain.first_block, "features": FEATURES}
+                    "first": first, "features": FEATURES}
             sock.sendall(peer.send_cipher.seal(encode("version", mine)))
             deadline = time.time() + HANDSHAKE_SECONDS
             length = peer.recv_cipher.open_length(_recv_exact(sock, 20, deadline))
@@ -1021,7 +1048,7 @@ class P2P:
 
     def _advertise_self(self, peer: Peer) -> None:
         if self.listen and self.my_host:
-            peer.send("addr", {"addrs": [{"host": self.my_host, "port": self.port, "id": self.node_id,
+            peer.send("addr", {"addrs": [{"host": self.my_host, "port": self.public_port or self.port, "id": self.node_id,
                                           "seen": int(time.time())}]})
 
     def _closed(self, peer: Peer, reason: str) -> None:
@@ -1116,7 +1143,8 @@ class P2P:
         peer.sent_addr = True
         addrs = self.addrman.sample(MAX_ADDR)
         if self.listen and self.my_host:
-            addrs.append({"host": self.my_host, "port": self.port, "id": self.node_id, "seen": int(time.time())})
+            addrs.append({"host": self.my_host, "port": self.public_port or self.port, "id": self.node_id,
+                          "seen": int(time.time())})
         peer.send("addr", {"addrs": addrs})
 
     def _on_addr(self, peer: Peer, m: dict) -> None:
@@ -1137,7 +1165,7 @@ class P2P:
                 continue
             parsed = parse_address(addr_key(str(a.get("host", "")), int(a.get("port", 0) or 0)))
             node_id = a.get("id") if is_hex(a.get("id"), 64) else None
-            if parsed is None or node_id == self.node_id:
+            if parsed is None or node_id == self.node_id or not gossip_ok(parsed[0], peer.host):
                 continue
             seen = a.get("seen") if isinstance(a.get("seen"), int) else None
             if self.addrman.add(parsed[0], parsed[1], node_id, source=peer.host, seen=seen) and len(addrs) <= 10 \

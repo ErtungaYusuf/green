@@ -130,3 +130,24 @@ def test_a_payment_and_its_spend_survive_a_new_block(node):
     n._add_block(block)
     assert {t["nonce"] for t in n.mempool.values() if t["pub"] == newcomer.pub_hex} == {0}
     assert len(n.mempool) == 3
+
+
+def test_our_protocol_transactions_get_a_higher_fee_when_they_wait(node, monkeypatch):
+    """A reveal or dispute answer stuck behind a fee spike would miss its deadline and
+    lose a bond: after BUMP_AFTER_BLOCKS blocks the node pays more for it."""
+    n, keys = node
+    payee = Key.generate()
+    assert n._try_tx("transfer", to=payee.address, amount=1)
+    (first,) = n.mempool.values()
+    n._bump_stuck()                                             # notes when it was first seen
+    for _ in range(nodemod.BUMP_AFTER_BLOCKS):
+        block, _ = mine(n.chain, keys[1])                       # blocks that leave it out (as if outbid)
+        n._add_block(block)
+    assert len(n._bump_stuck()) == 1
+    (second,) = n.mempool.values()
+    assert second["nonce"] == first["nonce"] and second["to"] == payee.address
+    assert second["fee"] >= first["fee"] + max(FEE, first["fee"] // 4)
+    for _ in range(nodemod.BUMP_AFTER_BLOCKS):
+        n._add_block(mine(n.chain, keys[1])[0])
+    monkeypatch.setattr(nodemod, "MAX_BUMP_FEE", second["fee"])   # at the cap: left alone
+    assert n._bump_stuck() == [] and list(n.mempool.values()) == [second]

@@ -105,3 +105,21 @@ def test_a_claim_can_pay_several_addresses():
     split = dict(payouts(payees, 400_000))
     assert chain.state.balance(m1.address) == split[m1.address] == 300_000
     assert chain.state.balance(m2.address) == 100_000 and chain.state.balance(pool.address) == 0
+
+
+def test_a_provider_can_close_a_channel_early(monkeypatch):
+    monkeypatch.setattr(params, "MIN_CHANNEL_BLOCKS", 3)
+    buyer, provider = Key.generate(), Key.generate()
+    chain = new_chain(buyer)
+    cid = open_channel(chain, buyer, provider, amount=1_000_000, blocks=3)
+    expires = chain.state.channels[cid]["expires"]
+    rejected(chain, claim(chain, provider, cid, 300_000, buyer, close=False), "close is true")
+    before = chain.state.balance(buyer.address)
+    add(chain, buyer, [claim(chain, provider, cid, 300_000, buyer, close=True)])
+    assert cid not in chain.state.channels                       # the rest came back at once
+    # (the buyer also mined that block: its reward and the claim's fee)
+    assert chain.state.balance(buyer.address) == before + 700_000 + params.block_reward(chain.height) + params.MIN_TX_FEE
+    assert chain.state.balance(provider.address) == 300_000 - params.MIN_TX_FEE
+    while chain.height <= expires:                               # the expiry event finds nothing to refund
+        add(chain, buyer)
+    assert supply(chain) == minted(chain)

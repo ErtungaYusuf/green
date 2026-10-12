@@ -13,6 +13,13 @@ A blockchain prototype where miners do AI work (integer matrix multiplication) i
 
 Production status of every area, with evidence and blockers: [PRODUCTION.md](PRODUCTION.md). How rules change: [UPGRADES.md](UPGRADES.md). Design and known limitations: [DESIGN.md](DESIGN.md). Protocol specification: [SPEC.md](SPEC.md). HTTP API: [API.md](API.md). Security reviews and fixes: [SECURITY.md](SECURITY.md). Release notes: [CHANGELOG.md](CHANGELOG.md).
 
+## What's new in v0.16
+
+- **Reachable from home:** `--portmap` asks the router to forward the node's port (PCP, with NAT-PMP as a fallback), so nodes and compute providers behind a home router can be reached.
+- **Hardened compute channels:** providers check a request before reading its body, limit concurrent products, keep their books through reorgs, and close channels on request so the unspent part returns at once; the two products of a layer's backward pass go out together (a fifth fewer round trips per step over the internet).
+- **Transactions do not get stuck:** the node pays the fee market's rate for its own deadline-bound transactions and raises the fee of any still waiting after 3 blocks; `python -m green bump <txid>` does it for wallet transactions.
+- **Gossip cannot point a node into its own network:** addresses from the internet must be public IP addresses.
+
 ## What's new in v0.15
 
 - **Train a model by paying miners, instantly:** compute channels. Lock coins for a miner in one transaction, then send it matrix products directly; every result is checked locally with Freivalds' test before it is used and paid by a signed voucher, and the miner claims its earnings on chain. A 256-128-10 network trains in 300 steps in about 4 seconds on products computed by two miners ([examples/train_on_green.py](examples/train_on_green.py)).
@@ -308,7 +315,7 @@ To be reachable by other computers while keeping the API private, listen on all 
 python -m pytest -q tests
 ```
 
-225 tests: consensus, difficulty, guarded accounts, security regressions, addresses, the fee market, the state engine and storage (restarts, crashes, reorgs across base moves, a differential check against full copies), the state commitment, snapshots and fast sync, rule changes by version bits, signed releases, multisignature accounts, pruning, the transaction index and the light client, non-custodial pools, recovery phrases, Dandelion++ and compact blocks, compute channels and training, transaction atomicity, the P2P protocol (encryption on the wire, identity pinning, relay, headers-first sync, and what happens to peers that lie or flood), the network (watchtowers, dispute answers and reorgs included), the GPU (if present), the WASM sandbox, both compute markets, neural-network inference and the autonomous agent. Two fuzz tests check conservation of money, the exact escrow of every job, the dispute backlog and transaction atomicity at every block, and every block any test builds checks its incremental state root against a full recomputation; mutation testing confirmed they catch injected accounting bugs. CI runs the suite on Linux, Windows and macOS ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
+241 tests: consensus, difficulty, guarded accounts, security regressions, addresses, the fee market, the state engine and storage (restarts, crashes, reorgs across base moves, a differential check against full copies), the state commitment, snapshots and fast sync, rule changes by version bits, signed releases, multisignature accounts, pruning, the transaction index and the light client, non-custodial pools, recovery phrases, Dandelion++ and compact blocks, compute channels and training, port mapping, transaction atomicity, the P2P protocol (encryption on the wire, identity pinning, relay, headers-first sync, and what happens to peers that lie or flood), the network (watchtowers, dispute answers and reorgs included), the GPU (if present), the WASM sandbox, both compute markets, neural-network inference and the autonomous agent. Two fuzz tests check conservation of money, the exact escrow of every job, the dispute backlog and transaction atomicity at every block, and every block any test builds checks its incremental state root against a full recomputation; mutation testing confirmed they catch injected accounting bugs. CI runs the suite on Linux, Windows and macOS ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
 ## Project layout
 
@@ -334,6 +341,7 @@ python -m pytest -q tests
 | `green/hd.py` | Recovery phrases (BIP-39) and key derivation (SLIP-0010 Ed25519) |
 | `green/compute.py` | Compute channels: providers selling products, buyers checking and paying per result |
 | `green/train.py` | Training neural networks on int8 products bought through channels |
+| `green/portmap.py` | Port forwarding on the home router (PCP, NAT-PMP) |
 | `UPGRADES.md` | How Green changes its rules and ships releases |
 | `OPERATIONS.md` | Running a node: settings, service, monitoring, backup, upgrades |
 | `contrib/` | systemd unit and Prometheus alert rules |

@@ -32,6 +32,7 @@ Wire protocol (HTTP on the provider's port; the body is raw bytes, C order):
 """
 
 import http.client
+import itertools
 import json
 import math
 import os
@@ -57,6 +58,10 @@ CREDIT = 4                          # results a provider delivers ahead of payme
 CLAIM_MARGIN = 20                   # blocks before expiry when a provider stops serving and claims
 CLAIM_MIN = 20 * params.MIN_TX_FEE  # unclaimed vouchers worth this much are claimed (fees stay <= 5%)
 CLAIM_SECONDS = 5.0
+CLAIM_TX_BYTES = 450               # about the size of a claim, for its fee
+COMPUTE_SLOTS = 2                  # products computed at once (the BLAS already uses every core)
+IDLE_SECONDS = 30                  # a kept-alive connection with nothing to do is closed
+PARALLEL_MIN_SECONDS = 0.005       # products faster than this on average go one by one (threads cost more)
 SAVE_SECONDS = 1.0
 OFFER_REFRESH = 1200               # providers renew their offer this often (offers live an hour)
 OFFER_RETRY = 10                   # ...and retry this often until the network lists it
@@ -79,13 +84,14 @@ class ProviderError(Exception):
 
 
 def _private(host: str) -> bool:
-    """Loopback, private and link-local addresses: not where strangers' offers should point a buyer."""
+    """Addresses that are not on the public internet (loopback, private, link-local,
+    carrier-grade NAT): not where strangers' offers should point a buyer."""
     import ipaddress
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
         return host == "localhost"
-    return ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_unspecified
+    return not ip.is_global
 
 
 def price_of(m: int, k: int, n: int, unit_price: int) -> int:
@@ -130,8 +136,9 @@ def verify_product(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> bool:
 
 class Provider:
     def __init__(self, node, key: Key, host: str = "127.0.0.1", port: int = 0, price: int = DEFAULT_PRICE,
-                 max_dim: int = MAX_DIM, credit: int = CREDIT, url: str | None = None):
-        if not 1 <= max_dim <= MAX_DIM or price < 1 or credit < 1:
+                 max_dim: int = MAX_DIM, credit: int = CREDIT, url: str | None = None,
+                 compute_slots: int = COMPUTE_SLOTS):
+        if not 1 <= max_dim <= MAX_DIM or price < 1 or credit < 1 or compute_slots < 1:
             raise ValueError("bad provider settings")
         self.node, self.key, self.address = node, key, key.address
         self.host, self.port = host, port
@@ -141,9 +148,13 @@ class Provider:
         self.listed = False               # the network took our offer (we hold OFFER_MIN_BALANCE)
         self.path = os.path.join(node.data_dir, "provider.json")
         self.lock = threading.Lock()
-        self.book: dict[str, dict] = self._load()   # channel -> {"owed", "delivered", "voucher": [total, sig]}
+        # channel -> {"base": amount settled by vouchers, "recent": [[ticket, price], ...] products after
+        # that, "voucher": [total, sig] or None, "expires": height}
+        self.book: dict[str, dict] = self._load()
+        self.tickets = itertools.count(1)
+        self.slots = threading.BoundedSemaphore(compute_slots)   # large products need ~400 MB each
         self.dirty = False
-        self.stats = {"products": 0, "units": 0, "refused": 0, "claims": 0}
+        self.stats = {"products": 0, "units": 0, "refused": 0, "claims": 0, "closed": 0}
         self.server = None
         self.running = False
 
@@ -152,9 +163,14 @@ class Provider:
     def _load(self) -> dict:
         try:
             with open(self.path) as f:
-                return json.load(f)
+                book = json.load(f)
         except (OSError, ValueError):
             return {}
+        for e in book.values():                  # books written by v0.15
+            if "recent" not in e:
+                e.update(base=e.pop("owed", 0), recent=[], expires=e.get("expires", 0))
+                e.pop("delivered", None)
+        return book
 
     def _save(self) -> None:
         with self.lock:
@@ -164,6 +180,17 @@ class Provider:
         with open(self.path + ".tmp", "w") as f:
             f.write(data)
         os.replace(self.path + ".tmp", self.path)
+
+    @staticmethod
+    def _owed(e: dict) -> int:
+        return e["base"] + sum(p for _, p in e["recent"])
+
+    @staticmethod
+    def _settle(e: dict) -> None:
+        """Fold products the voucher covers into the base."""
+        vouched = e["voucher"][0] if e["voucher"] else 0
+        while e["recent"] and e["base"] + e["recent"][0][1] <= vouched:
+            e["base"] += e["recent"].pop(0)[1]
 
     def offer(self) -> dict:
         return {"provider": self.address, "price": self.price, "max_dim": self.max_dim, "credit": self.credit,
@@ -194,94 +221,159 @@ class Provider:
             raise ChannelEnding("the channel expires soon: open a new one")
         return ch
 
+    def _entry(self, cid: str, ch: dict) -> dict:
+        e = self.book.get(cid)
+        if e is None:
+            e = self.book[cid] = {"base": 0, "recent": [], "voucher": None, "expires": ch["expires"]}
+        return e
+
     def take_voucher(self, cid: str, ch: dict, total, sig) -> int:
         """Record a voucher if it is valid and better than the one we hold; returns the vouched total."""
         with self.lock:
-            e = self.book.setdefault(cid, {"owed": 0, "delivered": [], "voucher": None})
+            e = self._entry(cid, ch)
             held = e["voucher"][0] if e["voucher"] else 0
         if total is None or total <= held:
             return held
-        if not (isinstance(total, int) and total <= ch["amount"] and isinstance(sig, str)
+        if not (type(total) is int and total <= ch["amount"] and isinstance(sig, str)
                 and verify(ch["pub"], txmod.voucher_bytes(self.node.chain.chain_id, cid, total), sig)):
             raise PaymentRequired("the voucher is not valid for this channel")
         with self.lock:
             if not e["voucher"] or total > e["voucher"][0]:
                 e["voucher"] = [total, sig]
-                e["delivered"] = [x for x in e["delivered"] if x > total]
+                self._settle(e)
                 self.dirty = True
             return e["voucher"][0]
 
-    def matmul(self, cid: str, shape: tuple, body: bytes, total=None, sig=None) -> tuple[bytes, int]:
-        m, k, n = shape
-        if not all(isinstance(d, int) and 1 <= d <= self.max_dim for d in shape):
-            raise ValueError(f"every dimension must be 1..{self.max_dim}")
-        if len(body) != m * k + k * n:
-            raise ValueError("the body is not A and B of that shape")
+    def admit(self, cid: str, shape: tuple, total=None, sig=None) -> tuple[int, int]:
+        """Everything about a product request except its data: shape, channel, payment,
+        credit and funds. Checked before the body is read, so a stranger cannot make us
+        read 32 MiB. Books the product; returns (ticket, owed). release() undoes it."""
+        if len(shape) != 3 or not all(type(d) is int and 1 <= d <= self.max_dim for d in shape):
+            raise ValueError(f"X-Shape must be three dimensions in 1..{self.max_dim}")
         ch = self._channel(cid)
         vouched = self.take_voucher(cid, ch, total, sig)
-        price = price_of(m, k, n, self.price)
+        price = price_of(*shape, self.price)
         with self.lock:
-            e = self.book[cid]
-            if len([x for x in e["delivered"] if x > vouched]) >= self.credit:
+            e = self._entry(cid, ch)
+            unpaid, running = 0, e["base"]
+            for _, p in e["recent"]:
+                running += p
+                unpaid += running > vouched
+            if unpaid >= self.credit:
                 self.stats["refused"] += 1
-                raise PaymentRequired(f"pay for the results delivered first (owed {e['owed']}, vouched {vouched})")
-            if e["owed"] + price > ch["amount"]:
+                raise PaymentRequired(f"pay for the results delivered first (owed {self._owed(e)}, vouched {vouched})")
+            if self._owed(e) + price > ch["amount"]:
                 self.stats["refused"] += 1
                 raise PaymentRequired("the channel has too little left for this product: open another")
-            e["owed"] += price                    # booked first, so parallel requests cannot overdraw
-            e["delivered"].append(e["owed"])
-            owed = e["owed"]
+            ticket = next(self.tickets)
+            e["recent"].append([ticket, price])  # booked first, so parallel requests cannot overdraw
             self.dirty = True
+            return ticket, self._owed(e)
+
+    def release(self, cid: str, ticket: int) -> None:
+        """A booked product that was never delivered (the request broke off)."""
+        with self.lock:
+            e = self.book.get(cid)
+            if e is not None:
+                e["recent"] = [x for x in e["recent"] if x[0] != ticket]
+                self.dirty = True
+
+    def compute(self, shape: tuple, body: bytes) -> bytes:
+        m, k, n = shape
+        if len(body) != m * k + k * n:
+            raise ValueError("the body is not A and B of that shape")
         a = np.frombuffer(body, dtype=np.int8, count=m * k).reshape(m, k)
         b = np.frombuffer(body, dtype=np.int8, offset=m * k).reshape(k, n)
-        # float64 is exact here (every sum stays below 2^31) and uses the fast BLAS.
-        c = (a.astype(np.float64) @ b.astype(np.float64)).astype("<i4")
+        with self.slots:
+            # float64 is exact here (every sum stays below 2^31) and uses the fast BLAS.
+            c = (a.astype(np.float64) @ b.astype(np.float64)).astype("<i4")
         with self.lock:
             self.stats["products"] += 1
-            self.stats["units"] += price // self.price
-        return c.tobytes(), owed
+            self.stats["units"] += price_of(m, k, n, 1)
+        return c.tobytes()
+
+    def matmul(self, cid: str, shape: tuple, body: bytes, total=None, sig=None) -> tuple[bytes, int]:
+        """admit + compute, for callers that already hold the body."""
+        ticket, owed = self.admit(cid, tuple(shape), total, sig)
+        try:
+            return self.compute(tuple(shape), body), owed
+        except BaseException:
+            self.release(cid, ticket)
+            raise
 
     def books(self, cid: str) -> dict:
         with self.lock:
             e = self.book.get(cid)
-        if e is None:
-            raise LookupError("no such channel in this provider's books")
+            if e is None:
+                raise LookupError("no such channel in this provider's books")
+            owed, vouched = self._owed(e), e["voucher"][0] if e["voucher"] else 0
         with self.node.lock:
             ch = self.node.chain.state.channels.get(cid)
             claimed = ch["paid"] if ch else None
-        return {"owed": e["owed"], "vouched": e["voucher"][0] if e["voucher"] else 0, "claimed": claimed}
+        return {"owed": owed, "vouched": vouched, "claimed": claimed}
 
     # -- getting paid --
 
-    def claim_due(self, force: bool = False) -> list[str]:
-        """Claim vouchers worth claiming (or all, with `force`); returns the claimed channels."""
-        node = self.node
+    def _claim_fee(self) -> int:
+        """A fee that should get a claim into the next blocks, from the node's estimate."""
+        rate = self.node.fee_estimate(2)["fee_rate"]
+        return max(params.MIN_TX_FEE, int(rate * CLAIM_TX_BYTES) + 1 if rate else 0)
+
+    def claim_due(self, force: bool = False, close: set | None = None) -> list[str]:
+        """Claim vouchers worth claiming (all of them with `force`), and close the channels
+        in `close`; returns the channels claimed. A claim still waiting in the mempool is
+        replaced (same nonce, higher fee) when a channel is to be closed."""
+        node, close = self.node, close or set()
+        fee = self._claim_fee()
         with node.lock:
             height = node.chain.height
             state = node.chain.state
-            queued = {t["channel"] for t in node.mempool.values() if t["type"] == "channel_claim"}
+            queued = {t["channel"]: t for t in node.mempool.values()
+                      if t["type"] == "channel_claim" and t["pub"] == self.key.pub_hex}
             with self.lock:
                 due = []
                 for cid, e in self.book.items():
                     ch = state.channels.get(cid)
                     v = e["voucher"]
-                    if ch is None or not v or v[0] <= ch["paid"] or cid in queued or height + 1 > ch["expires"]:
+                    if ch is None or not v or v[0] <= ch["paid"] or height + 1 > ch["expires"]:
                         continue
+                    old = queued.get(cid)
+                    if old is not None and (cid not in close or old.get("close")):
+                        continue                  # already on its way
                     unclaimed = v[0] - ch["paid"]
-                    if unclaimed >= params.MIN_TX_FEE and (force or unclaimed >= CLAIM_MIN
-                                                           or height + CLAIM_MARGIN >= ch["expires"]):
-                        due.append((cid, v[0], v[1]))
+                    if unclaimed >= fee and (force or cid in close or unclaimed >= CLAIM_MIN
+                                             or height + CLAIM_MARGIN >= ch["expires"]):
+                        due.append((cid, v[0], v[1], old))
         done = []
-        for cid, total, sig in due:
-            t = make_tx(self.key, node.chain.chain_id, "channel_claim", node.pending_nonce(self.address),
-                        params.MIN_TX_FEE, channel=cid, total=total, voucher=sig)
+        for cid, total, sig, old in due:
+            extra = {"close": True} if cid in close else {}
+            if old is not None:                   # replace-by-fee: the closing claim takes its place
+                nonce, claim_fee = old["nonce"], max(fee, old["fee"] + max(params.MIN_TX_FEE, old["fee"] // 10))
+            else:
+                nonce, claim_fee = node.pending_nonce(self.address), fee
+            t = make_tx(self.key, node.chain.chain_id, "channel_claim", nonce, claim_fee, channel=cid,
+                        total=total, voucher=sig, **extra)
             try:
                 node.submit_tx(t, stem=False)
                 done.append(cid)
                 self.stats["claims"] += 1
+                self.stats["closed"] += bool(extra)
             except (InvalidTx, MissingData) as e:
                 node.log(f"[provider] claim on channel {cid[:12]}... refused: {e}")
         return done
+
+    def close(self, cid: str, total, sig) -> dict:
+        """The buyer is done: take its final voucher, claim it and close the channel, so
+        what is left goes back to the buyer now rather than at expiry."""
+        with self.node.lock:
+            ch = self.node.chain.state.channels.get(cid) if is_hex(cid, 64) else None
+            ch = dict(ch) if ch else None
+        if ch is None or ch["provider"] != self.address:
+            raise LookupError("no open channel to this provider with that id")
+        self.take_voucher(cid, ch, total, sig)
+        if not self.claim_due(close={cid}):
+            raise ChannelEnding("nothing left to claim that pays the claim's fee: the rest returns at expiry")
+        return {"closing": True}
 
     def _housekeeping(self) -> None:
         last_claim = 0.0
@@ -300,11 +392,13 @@ class Provider:
                 self.node.log(f"[provider] housekeeping error: {type(e).__name__}: {e}")
 
     def _forget_ended(self) -> None:
+        """Drop the books of channels that are over for good: past their expiry by more than
+        a reorg can undo (a channel briefly missing from the state, in a reorg, keeps them)."""
         with self.node.lock:
-            live = set(self.node.chain.state.channels)
+            height = self.node.chain.height
         with self.lock:
-            for cid in [c for c in self.book if c not in live]:
-                del self.book[cid]                # ended (claimed in full or expired): nothing more to do
+            for cid in [c for c, e in self.book.items() if height > e["expires"] + params.MAX_REORG_DEPTH]:
+                del self.book[cid]
                 self.dirty = True
 
     # -- server --
@@ -313,6 +407,10 @@ class Provider:
         self.server = BoundedServer((self.host, self.port), _handler(self))
         self.port = self.server.server_address[1]
         self.running = True
+        if self.url is None and self.node.portmap:   # behind a router: forward our port and advertise that
+            m = self.node.map_port(self.port)
+            if m is not None:
+                self.url = f"http://{m.external_ip}:{m.external_port}"
         if self.url == "":                       # "advertise me at whatever port I got" (tests, local nets)
             self.url = f"http://{'127.0.0.1' if self.host in ('0.0.0.0', '::') else self.host}:{self.port}"
         threading.Thread(target=self.server.serve_forever, daemon=True, name="provider").start()
@@ -333,7 +431,7 @@ def _handler(provider: Provider):
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
-        timeout = 120
+        timeout = IDLE_SECONDS            # a kept-alive connection holds a server slot: not for long
 
         def log_message(self, *args):
             pass
@@ -349,19 +447,31 @@ def _handler(provider: Provider):
             self.end_headers()
             self.wfile.write(data)
 
-        def _guard(self, fn):
+        def _refuse(self, code: int, error: str):
+            """Answer without reading the body (it may be large and unpaid), then hang up."""
+            self.close_connection = True
+            self.send_response(code)
+            data = json.dumps({"error": error}).encode()
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _guard(self, fn, unread: bool = False):
+            fail = self._refuse if unread else (lambda code, error: self._send(code, {"error": error}))
             try:
                 return fn()
             except PaymentRequired as e:
-                return self._send(402, {"error": str(e)})
+                return fail(402, str(e))
             except LookupError as e:
-                return self._send(404, {"error": str(e)})
+                return fail(404, str(e))
             except ChannelEnding as e:
-                return self._send(409, {"error": str(e)})
+                return fail(409, str(e))
             except (ValueError, KeyError, TypeError) as e:
-                return self._send(400, {"error": str(e)})
+                return fail(400, str(e))
             except Exception:
-                return self._send(500, {"error": "internal error"})
+                return fail(500, "internal error")
 
         def do_GET(self):
             path = urlparse(self.path).path
@@ -375,22 +485,40 @@ def _handler(provider: Provider):
             path = urlparse(self.path).path
             raw = self.headers.get("Content-Length", "")
             if not raw.isdigit() or int(raw) > max_body:
-                self.close_connection = True
-                return self._send(413, {"error": "too large"})
-            body = self.rfile.read(int(raw))
+                return self._refuse(413, "too large")
             if path == "/matmul":
-                return self._guard(lambda: self._matmul(body))
+                return self._matmul(int(raw))
+            if int(raw) > 4096:
+                return self._refuse(413, "too large")
+            body = self.rfile.read(int(raw))
             if path == "/voucher":
                 return self._guard(lambda: self._voucher(body))
+            if path == "/close":
+                return self._guard(lambda: self._close(body))
             return self._send(404, {"error": "not found"})
 
-        def _matmul(self, body: bytes):
-            shape = tuple(int(x) for x in self.headers.get("X-Shape", "").split(","))
-            if len(shape) != 3:
-                raise ValueError("X-Shape must be m,k,n")
-            total = self.headers.get("X-Voucher-Total")
-            c, owed = provider.matmul(self.headers.get("X-Channel", ""), shape, body,
-                                      int(total) if total else None, self.headers.get("X-Voucher"))
+        def _matmul(self, length: int):
+            cid = self.headers.get("X-Channel", "")
+            admitted = []
+
+            def check():
+                shape = tuple(int(x) for x in self.headers.get("X-Shape", "").split(","))
+                if len(shape) != 3 or length != shape[0] * shape[1] + shape[1] * shape[2]:
+                    raise ValueError("X-Shape must be m,k,n and the body A and B of that shape")
+                total = self.headers.get("X-Voucher-Total")
+                admitted.append((shape,) + provider.admit(cid, shape, int(total) if total else None,
+                                                          self.headers.get("X-Voucher")))
+            self._guard(check, unread=True)
+            if not admitted:
+                return                                # refused before reading the body
+            shape, ticket, owed = admitted[0]
+            try:
+                body = self.rfile.read(length)
+                c = provider.compute(shape, body)
+            except BaseException:
+                provider.release(cid, ticket)
+                self.close_connection = True
+                raise
             return self._send(200, c, {"X-Owed": str(owed)})
 
         def _voucher(self, body: bytes):
@@ -400,6 +528,10 @@ def _handler(provider: Provider):
                 raise LookupError("no channel given")
             return self._send(200, {"vouched": provider.take_voucher(m["channel"], ch, m.get("total"),
                                                                      m.get("voucher"))})
+
+        def _close(self, body: bytes):
+            m = json.loads(body)
+            return self._send(200, provider.close(m.get("channel", ""), m.get("total"), m.get("voucher")))
     return Handler
 
 
@@ -429,8 +561,15 @@ class ComputeChannel:
         if self.offer["chain"] != st["genesis"]:
             raise ProviderError("the provider is on another network")
         nonce = http_get(f"{self.node}/account/{self.key.address}", timeout=30)["pending_nonce"]
-        t = make_tx(self.key, st["genesis"], "channel_open", nonce, params.MIN_TX_FEE,
-                    provider=self.offer["provider"], amount=amount, expires=st["height"] + 1 + blocks)
+        fields = {"provider": self.offer["provider"], "amount": amount, "expires": st["height"] + 1 + blocks}
+        fee = params.MIN_TX_FEE
+        try:                                      # what gets it into the next blocks when they are full
+            rate = http_get(f"{self.node}/v1/fee?blocks=2", timeout=30)["fee_rate"]
+            size = txmod.tx_size(make_tx(self.key, st["genesis"], "channel_open", nonce, fee, **fields))
+            fee = max(fee, int(rate * size) + 1 if rate else 0)
+        except (OSError, ValueError, KeyError):
+            pass
+        t = make_tx(self.key, st["genesis"], "channel_open", nonce, fee, **fields)
         http_post(f"{self.node}/tx", t, timeout=30)
         self.chain_id, self.cid, self.amount = st["genesis"], txmod.txid(t), amount
         if not wait:
@@ -514,6 +653,37 @@ class ComputeChannel:
                 raise PaymentRequired(reason)
             raise ProviderError(f"provider answered {r.status}: {reason}")
 
+    def matmul_many(self, pairs: list) -> list[np.ndarray]:
+        """Several independent products at once (each on its own connection, at most the
+        provider's credit in flight): over a slow link they cost one round trip, not several."""
+        if len(pairs) <= 1 or self.mean_seconds() < PARALLEL_MIN_SECONDS:
+            return [self.matmul(a, b) for a, b in pairs]
+        with self.lock:
+            if not hasattr(self, "pool"):
+                self.pool = ThreadPoolExecutor(max(1, min(8, self.offer.get("credit", CREDIT))),
+                                               thread_name_prefix="channel")
+        return [f.result() for f in [self.pool.submit(self.matmul, a, b) for a, b in pairs]]
+
+    def mean_seconds(self) -> float:
+        """Average time per product so far (0 before the first): small on a fast link."""
+        with self.lock:
+            return self.stats["seconds"] / self.stats["products"] if self.stats["products"] else 0.0
+
+    def close(self) -> bool:
+        """Done with this provider: send the final voucher and ask it to close the channel,
+        so the unspent part comes back now instead of at expiry. False if it declined
+        (the voucher is still delivered; the rest then returns at expiry)."""
+        with self.lock:
+            total = self.owed
+        body = {"channel": self.cid, "total": total,
+                "voucher": txmod.sign_voucher(self.key, self.chain_id, self.cid, total) if total else None}
+        try:
+            http_post(f"{self.url}/close", body, timeout=30)
+            return True
+        except urllib.error.HTTPError:
+            self.settle()
+            return False
+
     def settle(self) -> int:
         """Send the voucher for everything received (the provider then claims it)."""
         with self.lock:
@@ -534,7 +704,7 @@ class ComputeCluster:
     def __init__(self, channels: list[ComputeChannel], split_macs: int = 4 * UNIT_MACS):
         self.channels = list(channels)
         self.split_macs = split_macs
-        self.pool = ThreadPoolExecutor(max(1, len(self.channels)), thread_name_prefix="compute")
+        self.pool = ThreadPoolExecutor(max(2, 2 * len(self.channels)), thread_name_prefix="compute")
         self.next = 0
         self.lock = threading.Lock()
 
@@ -556,6 +726,18 @@ class ComputeCluster:
             except (WrongResult, ProviderError):
                 prefer.bad = True
                 prefer = None
+
+    def matmul_many(self, pairs: list) -> list[np.ndarray]:
+        """Independent products in parallel, spread over the providers."""
+        live = self.live()
+        if len(pairs) <= 1 or max(c.mean_seconds() for c in live) < PARALLEL_MIN_SECONDS:
+            return [self.matmul(a, b) for a, b in pairs]
+        futures = [self.pool.submit(self._one, a, b, live[i % len(live)]) for i, (a, b) in enumerate(pairs)]
+        return [f.result() for f in futures]
+
+    def close(self) -> int:
+        """Close every channel (what is unspent comes back now); returns how many closed."""
+        return sum(c.close() for c in self.channels if c.cid)
 
     def matmul(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
         live = self.live()
