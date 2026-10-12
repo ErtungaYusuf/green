@@ -1124,6 +1124,14 @@ class Node:
                 view["guard"] = {**g, "spend_left": max(0, g["limit"] - spent)}
             return view
 
+    def channel_view(self, cid: str) -> dict | None:
+        """An open compute channel (green/compute.py); None until it is confirmed and after it ends."""
+        with self.lock:
+            ch = self.chain.state.channels.get(cid)
+            if ch is None:
+                return None
+            return {"id": cid, **ch, "left": ch["amount"] - ch["paid"], "height": self.chain.height}
+
     def supply(self) -> dict:
         """Audit: every coin that exists must sit in a balance, an escrow or a bond,
         and their sum must equal what the block rewards have minted, exactly."""
@@ -1386,6 +1394,11 @@ def make_handler(node: Node):
                 return self._send(200, block) if block else self._send(404, {"error": "no such height"})
             if len(parts) == 2 and parts[0] == "account":
                 return self._send(200, node.account(parts[1]))
+            if parts == ["providers"]:
+                return self._send(200, sorted(node.p2p.offer_list(), key=lambda o: (o["price"], o["provider"])))
+            if len(parts) == 2 and parts[0] == "channel":
+                view = node.channel_view(parts[1])
+                return self._send(200, view) if view else self._send(404, {"error": "no open channel with that id"})
             if parts == ["mempool"]:
                 with node.lock:
                     return self._send(200, list(node.mempool.values()))

@@ -68,11 +68,13 @@ FIELDS = {
     "guard_set": {"guardian", "limit", "period"},
     "guard_update": {"account", "guardian", "limit", "period", "frozen"},
     "guard_release": {"account"},
+    "channel_open": {"provider", "amount", "expires"},
+    "channel_claim": {"channel", "total", "voucher"},
 }
 COMMON = {"type", "pub", "nonce", "fee", "sig"}
 # Fields a transaction may carry or leave out. A job_commit's payees share the
 # batch's payment (a pool paying the miners who computed its units).
-OPTIONAL = {"job_commit": {"payees"}}
+OPTIONAL = {"job_commit": {"payees"}, "channel_claim": {"payees"}}
 
 
 class InvalidTx(Exception):
@@ -116,8 +118,17 @@ def sender(tx: dict) -> str:
 
 
 def sig_count(tx: dict) -> int:
-    """Signatures a validator checks for this transaction."""
-    return tx["pub"]["k"] if isinstance(tx["pub"], dict) else 1
+    """Signatures a validator checks for this transaction (a claim's voucher is one more)."""
+    return (tx["pub"]["k"] if isinstance(tx["pub"], dict) else 1) + (tx.get("type") == "channel_claim")
+
+
+def voucher_bytes(chain_id: str, channel_id: str, total: int) -> bytes:
+    """What a channel's buyer signs: everything it owes the provider so far."""
+    return canonical(["grn-voucher", chain_id, channel_id, total])
+
+
+def sign_voucher(key: Key, chain_id: str, channel_id: str, total: int) -> str:
+    return key.sign(voucher_bytes(chain_id, channel_id, total))
 
 
 def make_multisig_tx(chain_id: str, k: int, keys: list[str], tx_type: str, nonce: int,
@@ -224,8 +235,20 @@ def check_format(tx: dict, chain_id: str) -> None:
         raise InvalidTx("units must be a non-empty bitmap (lowercase hex)")
     if kind == "job_commit" and not is_hex(tx["commitment"], 64):
         raise InvalidTx("bad commitment")
-    if kind == "job_commit" and "payees" in tx and not is_payee_list(tx["payees"]):
+    if kind in ("job_commit", "channel_claim") and "payees" in tx and not is_payee_list(tx["payees"]):
         raise InvalidTx("payees must be 2 to MAX_PAYEES [address, weight] pairs sorted by address")
+    if kind == "channel_open":
+        if not is_address(tx["provider"]):
+            raise InvalidTx("bad provider address")
+        if not is_uint(tx["amount"]) or tx["amount"] == 0 or not is_uint(tx["expires"]):
+            raise InvalidTx("amount must be a positive integer and expires a height")
+        if is_multisig(tx["pub"]):
+            raise InvalidTx("a channel's buyer signs vouchers with a single key")
+    if kind == "channel_claim":
+        if not is_hex(tx["channel"], 64) or not is_uint(tx["total"]) or tx["total"] == 0:
+            raise InvalidTx("bad channel id or total")
+        if not is_hex(tx["voucher"], 128):
+            raise InvalidTx("bad voucher signature")
     if kind in ("job_reveal", "job_challenge", "job_respond") and not is_hex(tx["batch"], 64):
         raise InvalidTx("bad batch id")
     if kind == "job_reveal" and not (is_hex(tx["root"], 64) and is_hex(tx["manifest"], 64)):
@@ -299,6 +322,8 @@ def outflow(tx: dict) -> int:
         out += tx["price"] * mu * ku * nu
     elif tx["type"] == "task_post":
         out += tx["price"]
+    elif tx["type"] == "channel_open":
+        out += tx["amount"]
     return out
 
 

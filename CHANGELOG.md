@@ -2,6 +2,17 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## 0.15.0
+
+**Instant compute: train a model by paying miners**
+- Compute channels (consensus: `channel_open`, `channel_claim`, channels ending at expiry; SPEC.md §3.2, §3.3, §6.1). A buyer locks coins for a provider in one transaction, then buys matrix products straight from it, checks each with Freivalds' test and pays with signed vouchers for the running total; the provider claims on chain, with the fee taken from the claim (or splits it among payees); what is never claimed returns to the buyer at expiry.
+- `green/compute.py`: the provider (`grn node --provide-port ...`, books kept on disk, automatic claims, limited credit), the buyer's `ComputeChannel` (kept-alive connection, every product checked), `ComputeCluster` (several providers, large products split by rows, a cheating provider dropped and its share recomputed), and `ComputeCluster.from_market` (find providers through the node and open channels).
+- `green/train.py`: neural networks trained on int8 products (per-tensor scales, stochastic rounding for gradients) with float32 master weights at the buyer; it reaches the same accuracy as float32 training, and a model trained through a channel is bit-identical to one trained locally.
+- Provider discovery: providers advertise signed offers over P2P (`offers`, kept only while the provider holds 0.1 GRN); `GET /v1/providers`, `grn providers`.
+- `examples/train_on_green.py`: two miners sell compute on a local network and a buyer trains a digit classifier through them (300 steps in about 4 s, 93% test accuracy, the miners paid on chain). `bench/compute_bench.py`.
+- Found on the way: Freivalds' check needed a variant for large products (the market's one is exact only up to about 1,000 output columns), and the first version was slower than computing the product (int64 products bypass the BLAS); `np.abs` of an int8 -128 is -128, which made the size bound too small.
+- Thirteenth security review (SECURITY.md, CH1-CH7). 225 tests. Consensus change (new transaction types): v0.14 nodes reject them.
+
 ## 0.14.0
 
 **Recovery phrases**

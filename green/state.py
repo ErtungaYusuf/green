@@ -217,6 +217,8 @@ MAPS = {
     "job_events": list,       # height -> [[kind, job_id, batch_id, unit_key]]
     "task_settle": list,      # height -> tasks that settle then
     "guards": dict,           # address -> {"guardian", "limit", "period", "frozen", "window", "spent"}
+    "channels": dict,         # channel id -> {"buyer", "pub", "provider", "amount", "paid", "expires"}
+    "channel_expiry": list,   # height -> channels that end then
 }
 
 
@@ -400,7 +402,8 @@ class State:
         """Coins held by the protocol (escrow + bonds), for supply accounting."""
         jobs = sum(j["escrow"] + sum(b["bond"] for b in j["batches"].values()) for j in self.jobs.values())
         tasks = sum(t["escrow"] + (t["reserved"]["bond"] if t["reserved"] else 0) for t in self.tasks.values())
-        return jobs + tasks
+        channels = sum(c["amount"] - c["paid"] for c in self.channels.values())
+        return jobs + tasks + channels
 
     def fingerprint(self) -> str:
         """A hash of the full content, to compare two states (tests, restarts)."""

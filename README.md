@@ -13,6 +13,11 @@ A blockchain prototype where miners do AI work (integer matrix multiplication) i
 
 Production status of every area, with evidence and blockers: [PRODUCTION.md](PRODUCTION.md). How rules change: [UPGRADES.md](UPGRADES.md). Design and known limitations: [DESIGN.md](DESIGN.md). Protocol specification: [SPEC.md](SPEC.md). HTTP API: [API.md](API.md). Security reviews and fixes: [SECURITY.md](SECURITY.md). Release notes: [CHANGELOG.md](CHANGELOG.md).
 
+## What's new in v0.15
+
+- **Train a model by paying miners, instantly:** compute channels. Lock coins for a miner in one transaction, then send it matrix products directly; every result is checked locally with Freivalds' test before it is used and paid by a signed voucher, and the miner claims its earnings on chain. A 256-128-10 network trains in 300 steps in about 4 seconds on products computed by two miners ([examples/train_on_green.py](examples/train_on_green.py)).
+- **Find miners on the network:** nodes that sell compute advertise signed offers over P2P; `python -m green providers` lists them.
+
 ## What's new in v0.14
 
 - **Recovery phrases:** a wallet is 24 words you can write down (`python -m green wallet new`); `wallet restore` brings it back anywhere (BIP-39 with SLIP-0010 Ed25519 keys, the scheme hardware wallets use).
@@ -193,6 +198,23 @@ python -m green guard show <agent-address>
 
 A frozen account can send nothing; incoming coins are never blocked. The agent SDK respects its guard on its own: it waits when its allowance is used up and stops when frozen.
 
+## Training a model by paying miners
+
+The job market above settles in blocks, which is right for big batch jobs but far too slow for training, where every step needs the result of the last. For that there are **compute channels**: the buyer locks coins for one miner (`channel_open`, one block), then sends products straight to it. Every result is checked on arrival with Freivalds' test (milliseconds, and a wrong result passes with probability below 2^-120), so correctness needs no chain; payment is a signed voucher for the running total, which the miner claims on chain when it likes. What it never claims returns to the buyer when the channel expires.
+
+```python
+from green.compute import ComputeCluster
+from green.train import MLP, digits, train
+
+cluster = ComputeCluster.from_market("http://127.0.0.1:8545", my_key, amount_each=10_000_000, count=3)
+x, y = digits(8000)
+model = MLP([256, 128, 10])
+train(model, x, y, steps=300, matmul=cluster.matmul)     # every product computed by miners, checked here
+cluster.settle()
+```
+
+Miners sell compute with `grn node --mine --provide-port 8548 --provide-host 0.0.0.0 --provide-url http://<public address>:8548`; their offers spread over the network once their wallet holds 0.1 GRN. `python examples/train_on_green.py` runs the whole thing on a local network.
+
 ## Mining in a pool
 
 A pool operator adds `--pool-port 8547 --pool-host 0.0.0.0` to its node. Miners point at it:
@@ -286,7 +308,7 @@ To be reachable by other computers while keeping the API private, listen on all 
 python -m pytest -q tests
 ```
 
-214 tests: consensus, difficulty, guarded accounts, security regressions, addresses, the fee market, the state engine and storage (restarts, crashes, reorgs across base moves, a differential check against full copies), the state commitment, snapshots and fast sync, rule changes by version bits, signed releases, multisignature accounts, pruning, the transaction index and the light client, non-custodial pools, recovery phrases, Dandelion++ and compact blocks, transaction atomicity, the P2P protocol (encryption on the wire, identity pinning, relay, headers-first sync, and what happens to peers that lie or flood), the network (watchtowers, dispute answers and reorgs included), the GPU (if present), the WASM sandbox, both compute markets, neural-network inference and the autonomous agent. Two fuzz tests check conservation of money, the exact escrow of every job, the dispute backlog and transaction atomicity at every block, and every block any test builds checks its incremental state root against a full recomputation; mutation testing confirmed they catch injected accounting bugs. CI runs the suite on Linux, Windows and macOS ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
+225 tests: consensus, difficulty, guarded accounts, security regressions, addresses, the fee market, the state engine and storage (restarts, crashes, reorgs across base moves, a differential check against full copies), the state commitment, snapshots and fast sync, rule changes by version bits, signed releases, multisignature accounts, pruning, the transaction index and the light client, non-custodial pools, recovery phrases, Dandelion++ and compact blocks, compute channels and training, transaction atomicity, the P2P protocol (encryption on the wire, identity pinning, relay, headers-first sync, and what happens to peers that lie or flood), the network (watchtowers, dispute answers and reorgs included), the GPU (if present), the WASM sandbox, both compute markets, neural-network inference and the autonomous agent. Two fuzz tests check conservation of money, the exact escrow of every job, the dispute backlog and transaction atomicity at every block, and every block any test builds checks its incremental state root against a full recomputation; mutation testing confirmed they catch injected accounting bugs. CI runs the suite on Linux, Windows and macOS ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
 ## Project layout
 
@@ -310,6 +332,8 @@ python -m pytest -q tests
 | `green/light.py` | Light client: verified headers and payment proofs without a full node |
 | `green/pool.py` | Non-custodial mining pool (server and miner); pool miners compute jobs and are paid per unit |
 | `green/hd.py` | Recovery phrases (BIP-39) and key derivation (SLIP-0010 Ed25519) |
+| `green/compute.py` | Compute channels: providers selling products, buyers checking and paying per result |
+| `green/train.py` | Training neural networks on int8 products bought through channels |
 | `UPGRADES.md` | How Green changes its rules and ships releases |
 | `OPERATIONS.md` | Running a node: settings, service, monitoring, backup, upgrades |
 | `contrib/` | systemd unit and Prometheus alert rules |

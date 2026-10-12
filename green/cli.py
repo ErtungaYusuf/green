@@ -359,6 +359,15 @@ def cmd_node(args):
         log(f"Pool open on {args.pool_host}:{pool.port}: miners run "
             f"`grn pool-mine --pool http://<this host>:{pool.port} --address <theirs>`; "
             f"blocks pay them directly, the pool keeps {args.pool_fee}%")
+    provider = None
+    if args.provide_port is not None:
+        from .compute import Provider
+        provider = Provider(node, key, host=args.provide_host, port=args.provide_port, price=args.provide_price,
+                            url=args.provide_url)
+        provider.start()
+        log(f"Selling matrix products on {args.provide_host}:{provider.port} at {args.provide_price} yaprak per "
+            f"unit; " + (f"advertised to the network as {provider.url} (once this wallet holds 0.1 GRN)"
+                         if provider.url else "not advertised: set --provide-url so buyers can find it"))
     log(f"{params.COIN_NAME} node running. API: {node.url}  (genesis {node.chain.genesis_hash[:16]}...)")
     if node.p2p.listen:
         log(f"P2P: {node.p2p.address}  -- other nodes connect with --peer {node.p2p.full_address}")
@@ -375,6 +384,9 @@ def cmd_node(args):
         log("Shutting down...")
         if pool is not None:
             pool.stop()
+        if provider is not None:
+            provider.claim_due(force=True)       # collect what is owed before going away
+            provider.stop()
         node.stop()
 
 
@@ -397,7 +409,8 @@ def setup_logging(level: str, path: str | None) -> logging.Logger:
 CONFIG_KEYS = {"port": int, "host": str, "p2p_port": int, "p2p_host": str, "peer": list, "genesis": str,
                "mine": bool, "gpu": bool, "fast_sync": bool, "no_listen": bool, "no_signal": list,
                "report": (int, float), "log_level": str, "log_file": str, "prune": bool, "prune_keep": int,
-               "pool_port": int, "pool_host": str, "pool_fee": int, "no_dandelion": bool}
+               "pool_port": int, "pool_host": str, "pool_fee": int, "no_dandelion": bool,
+               "provide_port": int, "provide_host": str, "provide_url": str, "provide_price": int}
 
 
 def load_config(data: str) -> dict:
@@ -458,6 +471,17 @@ def cmd_pool_mine(args):
     except KeyboardInterrupt:
         print(f"Stopped: {miner.shares} shares accepted, {miner.blocks} blocks found, "
               f"{miner.useful} job units computed and paid for, {miner.rejected} refused")
+
+
+def cmd_providers(args):
+    offers = api_get(args, "/v1/providers")
+    if not offers:
+        print("No compute on offer that this node knows of.")
+        return
+    print(f"{'price/unit':>11}  {'max dim':>7}  provider                                     url")
+    for o in offers:
+        print(f"{o['price']:>11}  {o['max_dim']:>7}  {o['provider']}  {o['url']}")
+    print("(A unit is 2^24 multiply-adds; green.compute.ComputeCluster.from_market opens channels to them.)")
 
 
 def cmd_fee(args):
@@ -930,6 +954,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--mine", action="store_true", help="start mining")
     s.add_argument("--gpu", action="store_true", help="mine on the GPU (WebGPU/Vulkan)")
     s.add_argument("--report", type=float, default=15, help="seconds between status lines")
+    s.add_argument("--provide-port", type=int, help="also sell matrix products through channels on this port")
+    s.add_argument("--provide-host", default="127.0.0.1", help="address the seller listens on (0.0.0.0: everyone)")
+    s.add_argument("--provide-url", help="public URL buyers reach it at, e.g. http://203.0.113.7:8548 "
+                                         "(advertised over the network)")
+    s.add_argument("--provide-price", type=int, default=1000, help="yaprak per 2^24 multiply-adds (default 1000)")
     s.add_argument("--pool-port", type=int, help="also run a non-custodial mining pool on this port")
     s.add_argument("--pool-host", default="127.0.0.1", help="address the pool listens on (0.0.0.0 for remote miners)")
     s.add_argument("--pool-fee", type=int, default=1, help="the pool's percentage of each block (default 1)")
@@ -955,6 +984,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("address", nargs="?")
     s.add_argument("--limit", type=int, default=50)
     s.set_defaults(fn=cmd_history)
+
+    s = sub.add_parser("providers", help="compute on offer: nodes selling matrix products through channels")
+    s.set_defaults(fn=cmd_providers)
 
     s = sub.add_parser("fee", help="fee estimate for the next blocks")
     s.add_argument("--blocks", type=int, default=2)

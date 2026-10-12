@@ -1,4 +1,4 @@
-# Green protocol specification (v0.14)
+# Green protocol specification (v0.15)
 
 This document defines the consensus rules of the Green network precisely enough to write an independent, compatible node. Where it and the reference implementation (`green/`) disagree, that is a bug in one of them. Constants are named as in `green/params.py`; their values are listed in §10.
 
@@ -26,7 +26,7 @@ A transaction is a JSON object with exactly the common fields `type`, `pub`, `no
 - The sender is `address(pub)` (a single key's or a multisig account's address). `nonce` must equal the sender's account nonce; applying the transaction increments it.
 - `fee >= MIN_TX_FEE`, plus the data fees listed per type. The fee is paid to the block's miner.
 - A transaction is applied atomically: if any rule fails, the state is unchanged and the transaction, and therefore the block containing it, is invalid.
-- **Guarded accounts.** If the sender has a guard (§3.4), before any other effect: a frozen sender's transaction is invalid; otherwise, with `w = floor(height / period)`, `spent' = (spent if window == w else 0) + outflow(tx)` must be `<= limit`, and on success the guard's `window := w`, `spent := spent'` (a `guard_set` instead writes its own new guard). `outflow(tx)` = fee + `amount` (transfer) + `price · mu·ku·nu` (job_post) + `price` (task_post); bonds are not counted.
+- **Guarded accounts.** If the sender has a guard (§3.4), before any other effect: a frozen sender's transaction is invalid; otherwise, with `w = floor(height / period)`, `spent' = (spent if window == w else 0) + outflow(tx)` must be `<= limit`, and on success the guard's `window := w`, `spent := spent'` (a `guard_set` instead writes its own new guard). `outflow(tx)` = fee + `amount` (transfer and channel_open) + `price · mu·ku·nu` (job_post) + `price` (task_post); bonds are not counted.
 
 ### 3.1 Blobs
 
@@ -61,6 +61,8 @@ Units of a job with dimensions `(mu, ku, nu)` (in units) are triples `[i, l, j]`
 | `guard_set` | `guardian`, `limit`, `period` | `guardian` an address other than the sender; `limit >= 0`; `1 <= period <= MAX_GUARD_PERIOD`. Unguarded sender: creates `{guardian, limit, period, frozen: false, window: floor(height/period), spent: 0}`. Guarded sender: allowed only with the same guardian, `limit <= old limit` and `period >= old period` (stricter); keeps `spent'` and sets `window := floor(height/period)` |
 | `guard_update` | `account`, `guardian`, `limit`, `period`, `frozen` | sender is `account`'s guardian; new `guardian` is not `account`; replaces guardian, limit, period and frozen (window and spent are kept) |
 | `guard_release` | `account` | sender is `account`'s guardian; removes the guard |
+| `channel_open` | `provider`, `amount`, `expires` | the sender is a single key (not multisig) and not `provider`; `amount >= 1`; `height + MIN_CHANNEL_BLOCKS <= expires <= height + MAX_CHANNEL_BLOCKS`; balance ≥ amount + fee; locks `amount` in channel `id = txid` `{buyer, pub (the sender's key), provider, amount, paid: 0, expires}`, ending at `expires + 1` |
+| `channel_claim` | `channel`, `total`, `voucher`; optional `payees` | sender is the channel's provider; `height <= expires`; `paid < total <= amount`; `voucher = Ed25519(buyer's key, C(["grn-voucher", chain_id, channel, total]))`; `total − paid >= fee`. Sets `paid := total` and credits `total − paid − fee` to the provider, or splits it among `payees` (a payee list as in §5.1). The fee comes out of the claim. Counts as two signatures toward MAX_BLOCK_SIGS |
 
 ### 3.3 End-of-block events
 
@@ -73,7 +75,8 @@ After a block's transactions, at height `h`, in this order:
    A dropped batch releases its units (they reopen) and its open disputes; if the job is closed, `price · count` of escrow is refunded to the buyer.
 2. **Job closings** scheduled for `h`: refund `escrow − price · (units in live batches)` to the buyer and mark the job closed. Live batches settle later as usual.
 3. **Task settlements** scheduled for `h`: a *revealed* or *confirmed* task pays the worker `price + bond`.
-4. The miner receives `block_reward(h)` plus all fees of the block. With a payee list, payee i receives `floor(total · w_i / Σw)` and the first payee also the remainder.
+4. **Channel ends** scheduled for `h` (channels whose `expires` is `h − 1`), in opening order: the buyer receives `amount − paid` and the channel is removed.
+5. The miner receives `block_reward(h)` plus all fees of the block. With a payee list, payee i receives `floor(total · w_i / Σw)` and the first payee also the remainder.
 
 ### 3.4 Guarded accounts
 
@@ -152,7 +155,7 @@ A rule added by a deployment applies to blocks whose state is ACTIVE and must on
 
 ## 6. Blocks
 
-A block is valid if its header is valid (§5), its transactions match `tx_root`, it has at most MAX_BLOCK_TXS transactions with distinct txids, `len(C(txs)) <= MAX_BLOCK_BYTES` and at most MAX_BLOCK_SIGS signatures in total (1 per single-key transaction, `k` per multisig one), a job named in `work` exists in the parent state, every transaction applies in order (§3) followed by the events of §3.3, and the root of the resulting state equals `state_root` (§6.1). The genesis block has height 0, no transactions, filler work, the initial target, and pays `block_reward(0)` to its miner (its state root is that of a state holding only this balance).
+A block is valid if its header is valid (§5), its transactions match `tx_root`, it has at most MAX_BLOCK_TXS transactions with distinct txids, `len(C(txs)) <= MAX_BLOCK_BYTES` and at most MAX_BLOCK_SIGS signatures in total (1 per single-key transaction, `k` per multisig one, plus 1 per channel claim for its voucher), a job named in `work` exists in the parent state, every transaction applies in order (§3) followed by the events of §3.3, and the root of the resulting state equals `state_root` (§6.1). The genesis block has height 0, no transactions, filler work, the initial target, and pays `block_reward(0)` to its miner (its state root is that of a state holding only this balance).
 
 `block_reward(h) = INITIAL_REWARD >> floor(h / HALVING_INTERVAL)`, and 0 after 64 halvings.
 
@@ -170,8 +173,10 @@ The state is a set of maps plus one counter. Their exact content is consensus, b
 | `job_events` | height (integer) | `[kind, job id, batch id, null]` entries (§3.3) in the order they were scheduled |
 | `task_settle` | height (integer) | task ids settling at that height, in scheduling order |
 | `guards` | address | `{"guardian", "limit", "period", "frozen", "window", "spent"}` (§3.4) |
+| `channels` | channel id | `{"buyer", "pub", "provider", "amount", "paid", "expires"}` |
+| `channel_expiry` | height (integer) | channel ids ending at that height, in opening order |
 
-A unit key is `"i,l,j"` (decimal). Fields marked * are present only when the batch's commit named payees. Entries of `closing`, `job_events` and `task_settle` are created when the first item is scheduled for their height and removed when that height is processed; a removed job batch (paid or dropped) leaves `batches`. The counter `open_disputes` is the number of open job disputes network wide.
+A unit key is `"i,l,j"` (decimal). Fields marked * are present only when the batch's commit named payees. Entries of `closing`, `job_events`, `task_settle` and `channel_expiry` are created when the first item is scheduled for their height and removed when that height is processed; a removed job batch (paid or dropped) leaves `batches`. The counter `open_disputes` is the number of open job disputes network wide.
 
 **Lattice hash** (LtHash with 1024 16-bit lanes, as in Lewi et al., "Securing Update Propagation with Homomorphic Hashing", 2019). For a map `M`, key `k` and value `v`, `entry(M, k, v)` is the 2,048-byte output of SHAKE-256(`"grn-state-v1:"` ‖ `C([M, k, plain(v)])`) read as 1,024 little-endian uint16 lanes, where `plain` turns sets into lists sorted by code point and dictionary keys into strings. The state's lattice is the lane-wise sum, modulo 2^16, of `entry(M, k, v)` for every entry of every map plus `entry("meta", "open_disputes", open_disputes)`. `state_root = hex(H(lattice as 1,024 uint16 little-endian))`.
 
@@ -203,7 +208,7 @@ Not consensus: it decides how nodes talk, not which chain is valid. Default port
 2. Both compute the X25519 shared secret (all zeros is refused) and `okm = HKDF-SHA256(ikm = secret, salt = "grn-p2p-v1" ‖ genesis hash (32 bytes), info = initiator key ‖ responder key, 160 bytes)`, split into five 32-byte values: initiator→responder length key, initiator→responder body key, the same two responder→initiator, and the session id.
 3. A frame is `ChaCha20-Poly1305(length key, n, uint32_LE(len(body)))` (20 bytes) followed by `ChaCha20-Poly1305(body key, n, body)`, where the nonce `n` is 4 zero bytes ‖ uint64_LE(frame counter). After REKEY_FRAMES frames in a direction both of its keys become `HKDF-Expand-SHA256(key, "grn-p2p-rekey", 32)` and the counter restarts at 0.
 4. A body is one byte of message type followed by the payload: canonical JSON for every message except `blob`, whose payload is the raw blob.
-5. The first frame each way is `version`: `{"proto": 1, "agent", "id": node public key, "sig", "port": listening port or 0, "relay": wants transaction announcements, "height", "tip", "work": chainwork as a decimal string, "you": the address the sender sees for the receiver, "time", "first": lowest height it has block bodies for, "features": optional messages it understands}`. Features are `"dtx"` (messages 19) and `"cmpct"` (20 to 22); a node sends an optional message only to a peer that listed it, and ignores features it does not know. `sig = Ed25519(node key, "grn-p2p-auth-v1" ‖ session id ‖ ("I" if the sender initiated, else "R"))`. A connection is up once each side has checked the other's signature. Peers given as `<id>@host:port` must present that id.
+5. The first frame each way is `version`: `{"proto": 1, "agent", "id": node public key, "sig", "port": listening port or 0, "relay": wants transaction announcements, "height", "tip", "work": chainwork as a decimal string, "you": the address the sender sees for the receiver, "time", "first": lowest height it has block bodies for, "features": optional messages it understands}`. Features are `"dtx"` (message 19), `"cmpct"` (20 to 22) and `"offers"` (23); a node sends an optional message only to a peer that listed it, and ignores features it does not know. `sig = Ed25519(node key, "grn-p2p-auth-v1" ‖ session id ‖ ("I" if the sender initiated, else "R"))`. A connection is up once each side has checked the other's signature. Peers given as `<id>@host:port` must present that id.
 
 A node on another network derives different keys and fails at the first frame.
 
@@ -225,12 +230,14 @@ A node on another network derives different keys and fails at the first frame.
 | 19 `dtx` | `{"tx": ...}` | a transaction in its stem phase (Dandelion++, §9.3): pass it on or announce it, never serve it to `getdata` |
 | 20 `cmpct` | `{"header", "salt": 16 hex, "ids": [12 hex], "fill": [[index, tx]]}` | a new block: its header, the transactions given in `fill` at their indexes, and for the others, in order, `short_id = BLAKE2b-48(txid bytes, key = block hash bytes ‖ salt bytes)` |
 | 21 `getblocktxn`, 22 `blocktxn` | `{"block", "idx": [indexes]}`, `{"block", "txs": [...]}` | the transactions of a compact block the receiver could not find, in the order asked |
+| 23 `offers` | `{"offers": [offer, ...]}` (at most 100) | providers selling compute (§12): `{"provider", "pub", "url", "price", "max_dim", "credit", "time", "sig"}`, `sig = Ed25519(pub, C(["grn-offer", chain_id, offer without sig]))`, `provider = address(pub)` |
 
 ### 9.3 Behaviour of the reference node
 
 - **Relay**: new transactions are announced to each peer in batches at exponentially distributed intervals (mean 0.5 s). A node requests an announced item from one peer and asks the next announcer after a timeout or `notfound`.
 - **Transaction origin (Dandelion++)**: transactions submitted to a node through its API are not announced. The node checks them against its mempool plus its stem pool and sends them as `dtx` to one of two outbound peers (that listed `dtx`) drawn per 10-minute epoch; each incoming link, and the node's own transactions, map to one of the two for the whole epoch. A node receiving `dtx` passes it on the same way, unless it is a diffuser this epoch (probability 0.1, drawn per epoch), has nowhere to pass it, or already holds it in its stem pool (a loop): then it adds it to its mempool and announces it to every peer. Every node on a stem sets an embargo of 15 s plus an exponential delay (mean 5 s) and announces the transaction itself if it has not seen it announced by then. The node's own protocol transactions (batch commits, reveals, answers, challenges) and replace-by-fee replacements are announced directly.
 - **Blocks (compact relay)**: a new block goes at once to peers that listed `cmpct` as a `cmpct` message (transactions the peer is known to have seen as short ids, the rest whole), to the others as an `inv`. The receiver rebuilds the block from its mempool and stem pool, asks with `getblocktxn` for what it lacks, and if the rebuilt transactions do not match `tx_root` (a short-id collision) fetches the whole block with `getdata`. A collision is not misbehaviour.
+- **Compute offers**: a node keeps one offer per provider address (at most 1,000, the least recently renewed dropped first) if it is validly signed, at most an hour old, and its provider holds at least 0.1 GRN on the node's chain (an offer that arrives before the block funding it waits and is checked again); it relays new offers to peers that listed `offers`, sends its list to such a peer when it connects, and serves it at `GET /v1/providers`. Forged offers add up to a ban; offers are rate-limited per peer.
 - **Sync**: a node that sees a peer with more chainwork asks for headers, checks each one against every rule of §5 except the work unit, recomputes the work unit of a random sample plus the last header of every message, then downloads the blocks of the best header chain from several peers at once (a window of 256 blocks) and connects them in order, their work units recomputed in parallel beforehand.
 - **Fast sync** (opt in): a new node first gets the header chain, then the newest final snapshot on offer (§6.2), and from there fully validates every block; with no usable snapshot it syncs from genesis.
 - **Limits**: frames above 4 MiB are refused before they are read unless that peer owes a blob we asked for; handshakes must finish in 10 s; at most 1,000 messages wait per peer; at most 32 inbound connections, at most 4 per network group (/16 IPv4, /32 IPv6; local addresses exempt), the youngest peer of the most crowded group evicted for a newcomer while the fastest, most useful and longest-connected ones are protected; 8 outbound connections spread over network groups, 2 of them relaying blocks only; address gossip rate-limited to 0.1 per second per peer after a burst; one source network group can hold at most 64 new address-book entries.
@@ -260,6 +267,7 @@ A node on another network derives different keys and fails at the first frame.
 | MAX_GUARD_PERIOD | 100,000,000 |
 | MAX_MULTISIG_KEYS, MAX_BLOCK_SIGS | 16, 2,000 |
 | MAX_PAYEES, MAX_PAYEE_WEIGHT | 32, 2^32 |
+| MIN_CHANNEL_BLOCKS, MAX_CHANNEL_BLOCKS | 240, 161,280 |
 | MAX_TASK_FUEL, MAX_TASK_PROGRAM_BYTES, MAX_TASK_INPUT_BYTES | 500,000,000, 2^20, 2^22 |
 | COMPILE_COST_PER_BYTE, MAX_BLOCK_ADJUDICATION, ADJUDICATION_FEE_PER_MUNIT | 200, 1,500,000,000, 1,000 |
 | TASK_RESERVE_BLOCKS, TASK_CHALLENGE_BLOCKS, TASK_BOND_DIVISOR | 20, 40, 2 |
@@ -268,4 +276,8 @@ A node on another network derives different keys and fails at the first frame.
 ## 11. Wallet keys (informative)
 
 Not consensus; defined so that wallets agree. A wallet's key comes from a BIP-39 recovery phrase (12 to 24 words of the standard English list, whose file's SHA-256 is `2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda`; 24 words by default) and an optional passphrase: `seed = PBKDF2-HMAC-SHA512(NFKD(words), "mnemonic" ‖ NFKD(passphrase), 2048, 64 bytes)`. The Ed25519 secret is derived from the seed with SLIP-0010 along `m/44'/HD_COIN_TYPE'/account'`, every step hardened (Ed25519 has no other kind). HD_COIN_TYPE is 7777, provisional until a SLIP-0044 number is registered before a public launch; a wallet file records its path.
+
+## 12. Compute channels (informative)
+
+Not consensus beyond the two transactions of §3.2; defined so that buyers and providers agree. A provider serves HTTP: `GET /offer`, `POST /matmul` with headers `X-Channel`, `X-Shape: m,k,n` and optionally `X-Voucher-Total`, `X-Voucher`, a body of A (`m·k` int8) then B (`k·n` int8) in row-major order, answered with C = A·B as `m·n` little-endian int32 (or 402: pay first or the channel is spent; 404: unknown channel; 409: the channel ends within 20 blocks), and `POST /voucher`. A product costs `price · max(1, ceil(m·k·n / 2^24))`. The buyer checks each C with Freivalds' test over the integers (a secret random matrix with entries in `[0, 2^s)`, `s` the largest value that keeps every sum below 2^53, and `ceil(120 / s)` columns, so a wrong C passes with probability below 2^-120), then signs a voucher for the total it owes for every result checked so far. A provider delivers at most `credit` results ahead of vouchers; it claims vouchers worth at least 20·MIN_TX_FEE, and anything left when the channel is near its end.
 | `challenge_fee(fuel, bytes)` | MIN_TX_FEE + ceil(adjudication_cost · ADJUDICATION_FEE_PER_MUNIT / 10^6) |

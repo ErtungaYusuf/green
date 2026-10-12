@@ -151,6 +151,12 @@ MAX_BLOCK_SIGS = 2000
 MAX_PAYEES = 32
 MAX_PAYEE_WEIGHT = 2**32
 
+# Compute channels (green/compute.py): a buyer locks coins for one provider and
+# pays it off chain, result by result, with vouchers the provider claims on
+# chain; what is left returns to the buyer when the channel expires.
+MIN_CHANNEL_BLOCKS = 240          # about an hour
+MAX_CHANNEL_BLOCKS = 4 * 40_320   # about four weeks
+
 # Wallets derive keys from a recovery phrase along m/44'/HD_COIN_TYPE'/account'
 # (green/hd.py). Provisional: a SLIP-0044 number is registered before a public
 # launch. Wallet files record their path, so changing it never moves a key.

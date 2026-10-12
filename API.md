@@ -1,4 +1,4 @@
-# Green node HTTP API (v0.14)
+# Green node HTTP API (v0.15)
 
 Every node serves this API on its port (default 8545, `127.0.0.1` unless started with `--host`). Requests and responses are JSON unless noted. Amounts are integers in yaprak (1 GRN = 10^8 yaprak). Errors come back as `{"error": "..."}` with status 400 (bad request or invalid transaction), 403 (admin endpoint called remotely), 404 (unknown), 409 (data the node does not have yet), 413 (too large) or 500.
 
@@ -26,6 +26,8 @@ This is the reference node's interface for wallets, tools and agents, not consen
 
 | Method and path | Returns |
 |---|---|
+| `GET /providers` | compute on offer (SPEC.md §12): signed offers `{"provider", "pub", "url", "price", "max_dim", "credit", "time", "sig"}` this node has heard over the network, cheapest first |
+| `GET /channel/<id>` | an open compute channel: `buyer`, `pub`, `provider`, `amount`, `paid`, `left`, `expires`, `height`; 404 before it is confirmed and after it ends |
 | `GET /account/<address>` | `balance`, `nonce` (confirmed), `pending_balance`, `pending_nonce` (including the mempool and this node's own transactions still on their stem; use `pending_nonce` for the next transaction), `guard` (null, or `guardian`, `limit`, `period`, `frozen`, `window`, `spent`, `spend_left`) |
 | `GET /mempool` | the pending transactions |
 | `POST /tx` | body: a signed transaction (SPEC.md §3). Returns `{"txid": ...}` or 400 with the reason. The node first passes it along a Dandelion++ stem (unless started with `--no-dandelion`), so for a few seconds it is not in the mempool of any node. Data a transaction needs (job matrices, WASM programs, results) must have been uploaded or be fetchable from peers (409 otherwise) |

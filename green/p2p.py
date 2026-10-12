@@ -74,11 +74,12 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF, HKDFExpand
 
 from . import params, snapshot, tx as txmod
 from .chain import MAX_JOB_BLOB, InvalidBlock, MissingData, block_hash, target_of, work_for_target
-from .crypto import canonical, hhex, is_hex, merkle_root
+from .crypto import address_of, canonical, hhex, is_hex, merkle_root
+from .crypto import verify as crypto_verify
 from .tx import InvalidTx
 
 PROTOCOL_VERSION = 1
-AGENT = "green/0.14.0"
+AGENT = "green/0.15.0"
 
 MAX_OUTBOUND = 8               # outbound connections the node keeps
 BLOCK_RELAY_ONLY = 2           # ...of which relay blocks only
@@ -126,11 +127,16 @@ EMBARGO_SECONDS = 15           # a stem transaction not seen announced by then (
 EMBARGO_MEAN_EXTRA = 5         # ...is announced by this node itself
 MAX_STEMPOOL = 1000
 SHORT_ID_BYTES = 6
-FEATURES = ["dtx", "cmpct"]    # optional messages this node understands (peers without them get inv/tx)
+MAX_OFFERS = 1000              # compute offers kept (one per provider address)
+OFFER_TTL = 3600               # an offer older than this is dropped; providers renew theirs
+OFFER_MIN_BALANCE = 10_000_000  # yaprak a provider must hold for its offer to be relayed (0.1 GRN)
+OFFERS_PER_MESSAGE = 100
+OFFER_RATE = 0.2               # offers accepted per second per peer, after a burst of MAX_OFFERS
+FEATURES = ["dtx", "cmpct", "offers"]   # optional messages this node understands
 
 CMDS = ["version", "ping", "pong", "getaddr", "addr", "inv", "getdata", "notfound", "tx", "block",
         "getheaders", "headers", "getblob", "blob", "noblob", "getmempool", "getsnapinfo", "snapinfo",
-        "dtx", "cmpct", "getblocktxn", "blocktxn"]
+        "dtx", "cmpct", "getblocktxn", "blocktxn", "offers"]
 CODE = {name: i + 1 for i, name in enumerate(CMDS)}
 NAME = {i: name for name, i in CODE.items()}
 
@@ -439,6 +445,35 @@ def compact_key(bh: str, salt: str) -> bytes:
     return bytes.fromhex(bh) + bytes.fromhex(salt)
 
 
+def offer_bytes(chain_id: str, offer: dict) -> bytes:
+    """What a provider signs to advertise its compute (green/compute.py)."""
+    return canonical(["grn-offer", chain_id, {k: v for k, v in offer.items() if k != "sig"}])
+
+
+OFFER_FIELDS = {"provider", "pub", "url", "price", "max_dim", "credit", "time", "sig"}
+
+
+def offer_problem(chain_id: str, offer, now: float) -> str | None:
+    """Why `offer` is not a valid signed offer (None if it is). Balance is checked separately."""
+    if not isinstance(offer, dict) or set(offer) != OFFER_FIELDS:
+        return "bad fields"
+    url = offer["url"]
+    if not (isinstance(url, str) and len(url) <= 200 and url.split("://")[0] in ("http", "https")
+            and parse_address(url.split("://", 1)[1].split("/")[0]) is not None):
+        return "bad url"
+    if not (txmod.is_uint(offer["price"]) and offer["price"] >= 1 and txmod.is_uint(offer["max_dim"])
+            and 1 <= offer["max_dim"] <= 4096 and txmod.is_uint(offer["credit"]) and 1 <= offer["credit"] <= 1000
+            and txmod.is_uint(offer["time"])):
+        return "bad terms"
+    if not now - OFFER_TTL <= offer["time"] <= now + 60:
+        return "stale"
+    if not is_hex(offer["pub"], 64) or address_of(offer["pub"]) != offer["provider"]:
+        return "the key is not the provider's"
+    if not crypto_verify(offer["pub"], offer_bytes(chain_id, offer), offer["sig"]):
+        return "bad signature"
+    return None
+
+
 def encode(cmd: str, payload) -> bytes:
     if cmd == "blob":
         return bytes([CODE[cmd]]) + payload
@@ -489,6 +524,8 @@ class Peer:
         self.sent_addr = False
         self.sent_mempool = False
         self.addr_tokens = float(MAX_ADDR)
+        self.offer_tokens = float(MAX_OFFERS)
+        self.offer_time = time.time()
         self.addr_time = time.time()
         self.blob_budget = float(BLOB_UPLOAD_PER_MINUTE)
         self.blob_time = time.time()
@@ -621,6 +658,9 @@ class P2P:
         self.stem_fluff = False
         self.stem_dest: list[Peer] = []
         self.stem_route: dict[str, Peer] = {}
+        # compute offers (green/compute.py): provider address -> signed offer (guarded by self.lock)
+        self.offers: OrderedDict[str, dict] = OrderedDict()
+        self.offers_waiting: OrderedDict[str, dict] = OrderedDict()   # valid, but not funded on our chain yet
         # compact blocks waiting for missing transactions (guarded by node.lock)
         self.partial: dict[str, dict] = {}         # hash -> {"header", "txs", "missing", "peer", "time"}
         # headers-first sync (guarded by node.lock)
@@ -694,7 +734,8 @@ class P2P:
                 "inbound": sum(p.inbound for p in peers), "outbound": sum(not p.inbound for p in peers),
                 "known_addresses": len(self.addrman), "headers_ahead": len(self.hindex),
                 "best_header_height": self._height_of(self.best), "blocks_in_flight": len(self.requested),
-                "fast_sync": self.snap_state, "stempool": len(self.stempool), "stats": dict(self.stats)}
+                "fast_sync": self.snap_state, "stempool": len(self.stempool), "offers": len(self.offers),
+                "stats": dict(self.stats)}
 
     # -- bans --
 
@@ -971,6 +1012,10 @@ class P2P:
         if not peer.block_only and peer.relay:
             peer.send("getmempool")
         peer.next_trickle = time.time() + random.expovariate(1 / TRICKLE_MEAN_SECONDS)
+        if "offers" in peer.features:
+            offers = self.offer_list()
+            for i in range(0, len(offers), OFFERS_PER_MESSAGE):
+                peer.send("offers", {"offers": offers[i:i + OFFERS_PER_MESSAGE]})
         if peer.best_work > self._work_of(self.best):
             self._ask_headers(peer)
 
@@ -1239,6 +1284,62 @@ class P2P:
         for i, t in zip(p["missing"], got):
             txs[i] = t
         self._complete(bh, p["header"], txs, peer)
+
+    # -- compute offers: providers advertise, every node lists them --
+
+    def add_offer(self, offer: dict, source: Peer | None = None) -> bool:
+        """Keep and relay a provider's signed offer if it is valid, newer than the one we
+        hold, and its provider holds OFFER_MIN_BALANCE (which makes spam cost coins)."""
+        if offer_problem(self.chain.chain_id, offer, time.time()) is not None:
+            return False
+        with self.node.lock:
+            funded = self.chain.state.balance(offer["provider"]) >= OFFER_MIN_BALANCE
+        with self.lock:
+            held = self.offers.get(offer["provider"])
+            if held is not None and held["time"] >= offer["time"]:
+                return False
+            if not funded:
+                # It may have arrived before the block that funds its provider: look again later.
+                self.offers_waiting.pop(offer["provider"], None)
+                self.offers_waiting[offer["provider"]] = offer
+                while len(self.offers_waiting) > 256:
+                    self.offers_waiting.popitem(last=False)
+                return False
+            self.offers_waiting.pop(offer["provider"], None)
+            self.offers.pop(offer["provider"], None)
+            self.offers[offer["provider"]] = offer
+            while len(self.offers) > MAX_OFFERS:
+                self.offers.popitem(last=False)          # the least recently renewed
+        for p in self.all_peers():
+            if p is not source and "offers" in p.features and not p.block_only:
+                p.send("offers", {"offers": [offer]})
+        return True
+
+    def offer_list(self) -> list[dict]:
+        cutoff = time.time() - OFFER_TTL
+        with self.lock:
+            for addr in [a for a, o in self.offers.items() if o["time"] < cutoff]:
+                del self.offers[addr]
+            return list(self.offers.values())
+
+    def _on_offers(self, peer: Peer, m: dict) -> None:
+        offers = m["offers"]
+        if not isinstance(offers, list) or len(offers) > OFFERS_PER_MESSAGE:
+            raise Misbehaving(20, "oversized offers")
+        if peer.block_only:
+            return
+        now = time.time()
+        peer.offer_tokens = min(float(MAX_OFFERS), peer.offer_tokens + (now - peer.offer_time) * OFFER_RATE)
+        peer.offer_time = now
+        for offer in offers:
+            if peer.offer_tokens < 1:
+                return                                   # rate limited: the rest is ignored
+            peer.offer_tokens -= 1
+            problem = offer_problem(self.chain.chain_id, offer, now)
+            if problem in ("bad signature", "the key is not the provider's", "bad fields"):
+                raise Misbehaving(20, f"invalid offer ({problem})")
+            if problem is None:
+                self.add_offer(offer, source=peer)
 
     # -- Dandelion++: our transactions do not reveal where they came from --
 
@@ -2014,6 +2115,13 @@ class P2P:
                         refetch.append((p["peer"], bh))
         for tid in due:
             self._fluff(tid, embargo=True)
+        with self.lock:
+            waiting = list(self.offers_waiting.values())
+        for offer in waiting:                        # funded by now? (stale ones are dropped)
+            if not self.add_offer(offer) and offer_problem(self.chain.chain_id, offer, now) is not None:
+                with self.lock:
+                    if self.offers_waiting.get(offer["provider"]) is offer:
+                        del self.offers_waiting[offer["provider"]]
         for p, bh in refetch:
             p.send("getdata", {"items": [["block", bh]]})
         for p, tids in retry_tx.values():

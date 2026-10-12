@@ -22,7 +22,7 @@ Version 0.7 replaced the network layer (plain HTTP) with an encrypted, authentic
 
 Version 0.8 added a way to change the rules without splitting the network, and signed releases (eighth review below).
 
-Version 0.9 added multisignature accounts (ninth review below). Version 0.10 added operator and developer tooling (tenth review below). Version 0.11 added pruned nodes (R1–R3 in the tenth review). Version 0.12 added a transaction index and a light client (L1–L2 in the tenth review). Version 0.13 added non-custodial pools (eleventh review below). Version 0.14 added recovery phrases, Dandelion++, compact blocks and pools that sell compute (twelfth review below). All 214 tests pass; two of them are fuzz tests that check conservation of money at every block (one for jobs, one for tasks), and the jobs fuzz also checks every job's exact escrow, the network-wide dispute backlog, and that every rejected transaction leaves the state untouched.
+Version 0.9 added multisignature accounts (ninth review below). Version 0.10 added operator and developer tooling (tenth review below). Version 0.11 added pruned nodes (R1–R3 in the tenth review). Version 0.12 added a transaction index and a light client (L1–L2 in the tenth review). Version 0.13 added non-custodial pools (eleventh review below). Version 0.14 added recovery phrases, Dandelion++, compact blocks and pools that sell compute (twelfth review below). Version 0.15 added compute channels (thirteenth review below). All 225 tests pass; two of them are fuzz tests that check conservation of money at every block (one for jobs, one for tasks), and the jobs fuzz also checks every job's exact escrow, the network-wide dispute backlog, and that every rejected transaction leaves the state untouched.
 
 ## Fixed vulnerabilities
 
@@ -254,6 +254,18 @@ Residual risks: the pool still chooses each block's transactions (miners cannot 
 - Found while testing: stale shares counted as invalid could pause an honest pool miner for ten minutes (now answered as stale, not held against it); a batch flush popped entries while iterating and lost accepted results.
 
 Residual risks: a stem is only as private as its relays are honest (a spy controlling a node's two stem destinations learns that it was the source, as in Dandelion++); the stem pool holds 1,000 transactions, beyond which new ones are announced directly; pool miners trust the pool to pay them for units by naming them in commits, which they can check on chain for every batch and leave a pool that does not.
+
+## Thirteenth review: compute channels (v0.15)
+
+- **CH1: A provider returning wrong products.** Fix: the buyer checks every product with Freivalds' test over the integers before using or paying for it, with a secret random matrix (os.urandom-seeded), sized so every sum stays below 2^53 (float64 is then exact in any summation order) and with enough columns for a false pass below 2^-120; products larger than any int8 product can be are refused outright. A provider caught once is dropped. Found while measuring: the magnitude of an int8 matrix was taken with `np.abs`, which leaves -128 negative, so the bound came out too low and an honest product of extreme values would have been refused (and not paid). (`test_verify_product_is_exact_for_any_allowed_shape`, which fails on the old code; `test_a_wrong_product_is_caught_unpaid_and_the_cluster_moves_on`.)
+- **CH2: Vouchers replayed.** Fix: a voucher signs the chain id, the channel id and a cumulative total; a claim must raise the claimed total and stay within the channel's amount, so a voucher cannot be used on another channel or network, or twice. (`test_claims_that_break_the_rules_are_refused`.)
+- **CH3: A buyer that does not pay.** Fix: the provider delivers at most `credit` results (default 4) ahead of vouchers, and refuses products the channel cannot cover. A buyer's funds are locked until expiry, so what it vouched for is there to claim; the provider stops serving 20 blocks before the end and claims what it holds. (`test_providers_extend_only_limited_credit`, `test_the_rest_returns_to_the_buyer_at_expiry`.)
+- **CH4: Providers without coins could not claim.** Fix: a claim's fee comes out of the claimed amount, so a brand-new provider can be paid. (`test_a_provider_claims_what_the_vouchers_say`.)
+- **CH5: A multisig buyer's voucher.** A voucher is one signature; multisig accounts cannot open channels. (`test_opening_rules`.)
+- **CH6: Offer spam.** Fix: offers are signed by the provider's key, at most an hour old, one per address, kept only while the provider holds 0.1 GRN (spam costs coins), bounded at 1,000 entries, rate-limited per peer, and forged ones add up to a ban. (`test_offers_must_be_signed_and_funded`.)
+- **CH7: Offers pointing buyers somewhere else.** An offer's URL could name someone else's server or an address inside the buyer's network. Fix: the buyer asks the URL for its offer first and uses it only if the provider address matches the signed offer, and skips loopback and private addresses unless told otherwise. A provider cannot take money without a voucher, and the buyer signs vouchers only for checked results.
+
+Residual risks: providers see the data they compute (no confidentiality, as in the job market); a channel is served from one confirmation, so a reorg that drops the opening transaction could cost a provider up to `credit` products; a provider may stop serving at any time (the buyer loses nothing and moves on).
 
 ## Still open (needed before production)
 

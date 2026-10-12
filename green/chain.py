@@ -12,7 +12,7 @@ import threading
 import time
 
 from . import params, tx as txmod, versionbits, work
-from .crypto import ZERO_HASH, canonical, h, hhex, is_address, is_hex, merkle_root, merkle_verify
+from .crypto import ZERO_HASH, canonical, h, hhex, is_address, is_hex, merkle_root, merkle_verify, verify
 from .state import State
 from .tx import InvalidTx
 
@@ -597,6 +597,40 @@ class Chain:
             s.set_balance(addr, bal - tx["amount"] - fee)
             s.credit(tx["to"], tx["amount"])
 
+        elif kind == "channel_open":
+            if tx["provider"] == addr:
+                raise InvalidTx("a channel is opened to someone else")
+            if not height + params.MIN_CHANNEL_BLOCKS <= tx["expires"] <= height + params.MAX_CHANNEL_BLOCKS:
+                raise InvalidTx(f"expires must be {params.MIN_CHANNEL_BLOCKS} to {params.MAX_CHANNEL_BLOCKS} "
+                                f"blocks ahead")
+            if bal < tx["amount"] + fee:
+                raise InvalidTx("insufficient balance")
+            cid = txmod.txid(tx)
+            s.set_balance(addr, bal - tx["amount"] - fee)
+            s.channels[cid] = {"buyer": addr, "pub": tx["pub"], "provider": tx["provider"],
+                               "amount": tx["amount"], "paid": 0, "expires": tx["expires"]}
+            s.channel_expiry.setdefault(tx["expires"] + 1, []).append(cid)
+
+        elif kind == "channel_claim":
+            ch = s.channels.get(tx["channel"])
+            if ch is None:
+                raise InvalidTx("unknown or ended channel")
+            if ch["provider"] != addr:
+                raise InvalidTx("only the channel's provider can claim")
+            if height > ch["expires"]:
+                raise InvalidTx("the channel has expired")
+            if not ch["paid"] < tx["total"] <= ch["amount"]:
+                raise InvalidTx("total must exceed what was claimed and not the channel's amount")
+            pay = tx["total"] - ch["paid"]
+            if pay < fee:
+                raise InvalidTx("the claim does not cover its fee")
+            if not verify(ch["pub"], txmod.voucher_bytes(self.chain_id, tx["channel"], tx["total"]), tx["voucher"]):
+                raise InvalidTx("voucher not signed by the channel's buyer")
+            # The fee comes out of the claim, so a new provider needs no balance.
+            ch["paid"] = tx["total"]
+            for payee, amount in payouts(tx.get("payees", addr), pay - fee):
+                s.credit(payee, amount)
+
         elif kind == "job_post":
             if tx["job"] in s.jobs:
                 raise InvalidTx("job already posted")
@@ -972,6 +1006,14 @@ class Chain:
             self.valid_programs.clear()
         self.valid_programs.add(prog_hash)
 
+    @staticmethod
+    def _end_channels(s: State, height: int) -> None:
+        """Channels past their expiry: what the provider did not claim goes back to the buyer."""
+        for cid in s.channel_expiry.pop(height, []):
+            ch = s.channels.pop(cid, None)
+            if ch is not None:
+                s.credit(ch["buyer"], ch["amount"] - ch["paid"])
+
     def _settle_tasks(self, s: State, height: int) -> None:
         """Pay the worker for a revealed task that survived its challenge window."""
         for task_id in s.task_settle.pop(height, []):
@@ -1045,6 +1087,7 @@ class Chain:
         self._job_events(s, height)
         self._close_jobs(s, height)
         self._settle_tasks(s, height)
+        self._end_channels(s, height)
         for addr, amount in payouts(hdr["miner"], params.block_reward(height) + sum(t["fee"] for t in txs)):
             s.credit(addr, amount)
         return s.commit()

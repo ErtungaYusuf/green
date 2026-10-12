@@ -2,7 +2,7 @@
 
 Where Green stands on every aspect a production cryptocurrency needs, what backs each claim, and what is still missing. "Done" means implemented, tested and measured in this repository; it does not mean audited, battle-tested or ready to carry real value. Nothing here is ready for real money until the items marked **blocker** are done.
 
-Status as of v0.14 (October 2026). 214 automated tests; twelve internal security reviews (SECURITY.md).
+Status as of v0.15 (October 2026). 225 automated tests; thirteen internal security reviews (SECURITY.md).
 
 ## Summary
 
@@ -11,7 +11,7 @@ Status as of v0.14 (October 2026). 214 automated tests; twelve internal security
 | 1. Consensus rules and specification | Done for a testnet | external review of SPEC.md |
 | 2. Proof of useful work | Done; custom digest unaudited | audit of the transcript digest |
 | 3. Difficulty and issuance | Done (ASERT, 21M cap, supply audit) | — |
-| 4. Compute markets (matmul, WASM) | Done; optimistic, documented limits | data availability for manifests and WASM outputs |
+| 4. Compute markets (matmul jobs, instant channels, WASM) | Done; optimistic, documented limits | data availability for manifests and WASM outputs |
 | 5. Accountability for autonomous agents | Done (guarded accounts) | — |
 | 6. State, storage, crash safety | Done (with a state commitment in every header) | — |
 | 7. Peer-to-peer networking | Done for a testnet (encrypted, authenticated, eclipse limits, Dandelion++, compact blocks) | NAT traversal, DNS seeds, Tor/I2P |
@@ -20,7 +20,7 @@ Status as of v0.14 (October 2026). 214 automated tests; twelve internal security
 | 10. Wallets and keys | Done for a testnet (recovery phrases, encrypted files, checksummed addresses, multisig) | hardware wallets, a registered coin type |
 | 11. APIs and developer tools | Done for a testnet (versioned API, fee estimates, long-poll, Python SDK) | SDKs in other languages, explorer API |
 | 12. Operations | Done for a testnet (config file, logs, systemd, metrics and alerts, runbook) | — |
-| 13. Testing and QA | Partial (214 tests, fuzz, mutation testing, 8-node simulation) | multi-node testnet, soak tests |
+| 13. Testing and QA | Partial (225 tests, fuzz, mutation testing, 8-node simulation) | multi-node testnet, soak tests |
 | 14. Security assurance | Partial (internal reviews only) | **blocker**: independent audit, bug bounty |
 | 15. Upgrades and governance | Done (version-bits activation, signed releases, published process) | reproducible builds |
 | 16. Privacy | Partial (transaction origin: Dandelion++; data and amounts public) | — (documented) |
@@ -59,6 +59,8 @@ Status as of v0.14 (October 2026). 214 automated tests; twelve internal security
 **Done.** Matmul jobs: a whole job delivered with two transactions (bitmap + Merkle root), buyer-verified with prime-field Freivalds (2^-124), disputes for any number of units, whole-batch forfeit, backlog-stretched deadlines. WASM tasks: deterministic sandbox, optimistic with on-chain re-execution, watchtowers, per-block adjudication budget.
 
 **Evidence:** `tests/test_chain.py`, `tests/test_compute.py`, `tests/test_network.py` (a cheating miner caught by the buyer's node; a miner answering a dispute with a Merkle proof), SECURITY.md reviews W, V and X.
+
+**Instant compute (v0.15):** compute channels (DESIGN.md §4.5): a buyer locks coins for a provider in one transaction, then buys products directly, checks each with Freivalds' test and pays by voucher; the provider claims on chain. Providers advertise signed, funded offers over P2P. A model trains on products computed by miners at about 12 ms a step (`examples/train_on_green.py`; `tests/test_channels.py`, `tests/test_channel_compute.py`: the model trained remotely is bit-identical to the one trained locally, wrong products are caught and not paid, credit is limited, offers must be signed and funded).
 
 **Missing:** real data availability. A miner that withholds a whole manifest gains nothing but costs the buyer dispute fees; WASM outputs have no availability proof. Erasure coding with sampling is the known fix. Delivery ceiling: 68,267 units/s (~98 RX 9070 XT), set by the transaction count.
 

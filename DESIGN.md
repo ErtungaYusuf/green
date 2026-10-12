@@ -100,6 +100,14 @@ Who checks: `green.nn.MatmulClient` verifies every unit before using it and disp
 
 The ceiling is now set by the transaction count (250 batches per block), and each batch can be a whole job.
 
+## 4.5 Instant compute: channels
+
+The job market settles in blocks: post, commit, reveal, a challenge window. That is right when the buyer may go offline and wants any miner to be able to take the work, but training a network is a long chain of dependent products (per layer and step one forward, two backward), and a block or more per product puts an epoch at days.
+
+The observation that removes the chain from the loop: the buyer can check every result itself, cheaply and immediately, with Freivalds' test. So an interactive session needs the chain only for money. A buyer opens a channel to one provider (`channel_open` locks coins until a height), sends products straight to it, checks each answer (with a secret random matrix: the provider cannot tailor a wrong answer), and pays with a signed voucher for the running total; the provider claims the best voucher on chain whenever it likes, and the rest returns to the buyer at expiry. The buyer pays only for checked results; the provider works at most `credit` results ahead of payment. Neither side needs to trust the other, and the latency is the network's plus the compute.
+
+Measured on one machine (`bench/compute_bench.py`): a small product round trip takes 1.3 ms, a 1024³ product 55 ms (20 ms of it computing, 18 ms checking), and a 256-128-10 classifier trains 300 steps in 4.6 s at 15 ms a step, to the same accuracy as float32 training (`green/train.py`: int8 operands with per-tensor scales, stochastic rounding for gradients). Products that cross the internet add its round trip, so big products are where buying pays off.
+
 ## 5. Economics and the "wasted work" problem
 
 - **Block reward (lottery):** 1.25 GRN, halving every ~4 years (8.4M blocks), ~21M GRN in total. The same pace and supply as Bitcoin.

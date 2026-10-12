@@ -39,7 +39,7 @@ log_level = "info"         # debug, info, warning, error
 log_file = "node.log"      # rotated at 10 MB, 5 files kept
 ```
 
-Every key: `port`, `host`, `p2p_port`, `p2p_host`, `peer`, `genesis`, `mine`, `gpu`, `fast_sync`, `no_listen`, `no_signal`, `report`, `log_level`, `log_file`, `prune`, `prune_keep`, `pool_port`, `pool_host`, `pool_fee`, `no_dandelion`. An unknown key or a wrong type stops the node with a message instead of being ignored.
+Every key: `port`, `host`, `p2p_port`, `p2p_host`, `peer`, `genesis`, `mine`, `gpu`, `fast_sync`, `no_listen`, `no_signal`, `report`, `log_level`, `log_file`, `prune`, `prune_keep`, `pool_port`, `pool_host`, `pool_fee`, `no_dandelion`, `provide_port`, `provide_host`, `provide_url`, `provide_price`. An unknown key or a wrong type stops the node with a message instead of being ignored.
 
 ## Archive or pruned
 
@@ -54,6 +54,10 @@ Data nothing uses any more is marked, and deleted about a day later if it is sti
 ## Running a pool
 
 `pool_port = 8547` (with `pool_host = "0.0.0.0"` for miners on other machines) makes the node a pool. Its blocks pay the miners of the last 1,000 shares by weight, plus `pool_fee` percent (default 1) to the node's wallet, all inside the block: the pool never holds miners' coins. When buyers have posted jobs, the pool also sells its miners' compute: it hands them units, checks every result, and commits batches whose payment goes to the miners who computed them (plus the pool's fee). The bonds come from the node's wallet, so a pool sells only as many units as its balance can bond; with an empty wallet its miners just mine. Open the pool port in the firewall. The pool recomputes every share (about 9 ms each), and pauses a client that sends 20 bad shares for 10 minutes. `GET /status` on the pool port shows miners, shares, blocks and the next payee list.
+
+## Selling compute
+
+`provide_port = 8548`, `provide_host = "0.0.0.0"` and `provide_url = "http://<public address>:8548"` make the node sell matrix products through compute channels at `provide_price` yaprak per 2^24 multiply-adds (default 1,000). The offer is advertised over the network once the wallet holds 0.1 GRN and renewed every 20 minutes. Buyers pay with vouchers; the node claims them on chain when they are worth 20 transaction fees, before a channel ends, and on shutdown. Its books are in `provider.json` in the data folder: back it up with the wallet (vouchers not yet claimed are money). Open the port in the firewall; each request is at most 32 MiB.
 
 ## Network and firewall
 
