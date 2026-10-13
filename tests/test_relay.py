@@ -219,3 +219,36 @@ def test_a_fee_bump_replaces_a_transaction_still_on_its_stem(nodes):
     fast = make_tx(miner, a.chain.chain_id, "transfer", 0, 3 * p2p.params.MIN_TX_FEE, to=payee.address, amount=1)
     http_post(f"{a.url}/tx", fast)                       # the same nonce, paying more
     assert list(a.mempool) == [txmod.txid(fast)] and not a.p2p.stempool
+
+
+def test_a_transaction_does_not_overtake_its_predecessor_on_a_stem(nodes, monkeypatch):
+    """Found by bench/net_sim.py: a sender's first transaction was announced (its node had no
+    stem yet), its second took a fresh stem, reached a node that had not seen the first,
+    and was dropped there; every later one followed, and all waited ~20 s for the embargo."""
+    monkeypatch.setattr(p2p, "TRICKLE_MEAN_SECONDS", 1.0)
+    monkeypatch.setattr(p2p, "DANDELION_FLUFF_PROB", 0.0)
+    miner, payee = Key.generate(), Key.generate()
+    genesis = make_genesis(miner.address, "order")
+    b = nodes("b", genesis)
+    a = nodes("a", genesis, key=miner, peers=[b.p2p.address], listen=False)
+    wait_for(lambda: connected(a, b), what="the link")
+    first = make_tx(miner, a.chain.chain_id, "transfer", 0, to=payee.address, amount=1)
+    a.submit_tx(first, stem=False)                       # announced (slowly), not stemmed
+    second = make_tx(miner, a.chain.chain_id, "transfer", 1, to=payee.address, amount=2)
+    http_post(f"{a.url}/tx", second)                     # must not take a stem past the first
+    wait_for(lambda: len(b.mempool) == 2, timeout=10, what="both, in order, at b")
+    assert a.p2p.stats["stem_relayed"] == 0 and b.p2p.stats["embargo_fired"] == 0
+
+
+def test_a_future_nonce_is_not_marked_rejected(nodes):
+    miner, payee = Key.generate(), Key.generate()
+    n = nodes("n", make_genesis(miner.address, "future"))
+    raw = RawPeer(n)
+    first = make_tx(miner, n.chain.chain_id, "transfer", 0, to=payee.address, amount=1)
+    second = make_tx(miner, n.chain.chain_id, "transfer", 1, to=payee.address, amount=2)
+    raw.send("tx", {"tx": second})                       # arrives before its predecessor
+    raw.send("tx", {"tx": first})
+    wait_for(lambda: txmod.txid(first) in n.mempool, what="the first")
+    assert txmod.txid(second) not in n.p2p.rejected      # so a later announcement fetches it
+    raw.send("tx", {"tx": second})
+    wait_for(lambda: txmod.txid(second) in n.mempool, what="the second, once it can be accepted")

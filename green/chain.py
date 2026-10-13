@@ -16,8 +16,8 @@ from .crypto import ZERO_HASH, canonical, h, hhex, is_address, is_hex, merkle_ro
 from .state import State
 from .tx import InvalidTx
 
-HEADER_FIELDS = {"version", "height", "prev", "time", "target", "tx_root", "state_root", "miner",
-                 "work", "nonce", "msg", "transcript"}
+HEADER_FIELDS = {"version", "height", "prev", "time", "target", "tx_root", "shares_root", "state_root",
+                 "miner", "work", "nonce", "msg", "transcript"}
 # The base sits this far below the tip beyond the reorg window, so every block a
 # fork may still replace has its own diff layer.
 BASE_MARGIN = 32
@@ -182,16 +182,44 @@ def solve(header: dict, blobs: BlobStore):
     return transcript, work.ticket_value(seed, transcript), useful
 
 
+def initial_state() -> State:
+    """The ledger before the genesis block: every coin in the protocol's reserve."""
+    s = State()
+    s.reserve = params.TOTAL_SUPPLY
+    s.commit()
+    return s
+
+
+def share_id(share: dict) -> str:
+    return hhex(canonical(share))
+
+
+def pay_block(s: State, hdr: dict, fees: int, shares: list) -> None:
+    """A block's rewards (SPEC.md §3.5): from the reserve, the finder's part of the
+    emission plus a cut of each share it includes, and each share's reward to the
+    share's miner; of the fees, FEE_RESERVE_PERCENT back into the reserve and the
+    rest to the finder. Coins only move, so the total supply never changes."""
+    finder, per_share, cut = params.emission(s.reserve)
+    to_reserve = fees * params.FEE_RESERVE_PERCENT // 100
+    for sh in shares:
+        for addr, amount in payouts(sh["miner"], per_share - cut):
+            s.credit(addr, amount)
+    for addr, amount in payouts(hdr["miner"], finder + cut * len(shares) + fees - to_reserve):
+        s.credit(addr, amount)
+    s.reserve = s.reserve - finder - per_share * len(shares) + to_reserve
+
+
 def make_genesis(miner: str, msg: str, timestamp: int | None = None, on_try=None) -> dict:
-    """Mine the genesis block. It pays the first block reward to `miner`."""
+    """Mine the genesis block. It pays the first block's reward to `miner`."""
     blobs = BlobStore()
-    first = State()
-    first.credit(miner, params.block_reward(0))
+    first = initial_state().copy()
     header = {
         "version": versionbits.TOP_BITS, "height": 0, "prev": ZERO_HASH, "time": int(timestamp or time.time()),
-        "target": fmt_target(params.INITIAL_TARGET), "tx_root": merkle_root([]), "state_root": first.commit(),
+        "target": fmt_target(params.INITIAL_TARGET), "tx_root": merkle_root([]), "shares_root": merkle_root([]),
         "miner": miner, "work": {"job": None, "unit": None}, "nonce": 0, "msg": msg[:MAX_MSG_LEN],
     }
+    pay_block(first, header, 0, [])
+    header["state_root"] = first.commit()
     while True:
         transcript, ticket, _ = solve(header, blobs)
         if on_try:
@@ -294,6 +322,7 @@ class Chain:
         self.states: dict[str, State] = {}       # the base and every block above it
         self.invalid: set[str] = set()
         self.verified_results: set[tuple] = set()
+        self.verified_shares: set[str] = set()   # shares whose work unit was recomputed and matched
         self.valid_programs: set[str] = set()
         self.verdicts: dict[tuple, bool] = {}
         # Blocks whose work unit was already recomputed and matched (in parallel,
@@ -316,7 +345,7 @@ class Chain:
             return
         self.blocks[g] = genesis
         self.meta[g] = {"height": 0, "chainwork": work_for_target(params.INITIAL_TARGET)}
-        base = self.apply_block(State(), genesis).flattened()
+        base = self.apply_block(initial_state(), genesis).flattened()
         self.states[g] = base
         self.base_hash, self.base_height = g, 0
         self.tip = g
@@ -474,7 +503,7 @@ class Chain:
             raise InvalidBlock("bad integer field")
         if not versionbits.valid_version(hdr["version"]):
             raise InvalidBlock("bad version: must be 0x20000000 plus signal bits")
-        for k in ("prev", "tx_root", "state_root", "transcript", "target"):
+        for k in ("prev", "tx_root", "shares_root", "state_root", "transcript", "target"):
             if not is_hex(hdr[k], 64):
                 raise InvalidBlock(f"bad {k}")
         if not valid_miner(hdr["miner"]):
@@ -561,6 +590,55 @@ class Chain:
         a, b = work_inputs(hdr, seed, self.blobs, MAX_JOB_BLOB)
         return work.compute_unit(a, b, seed)[0]
 
+    def share_problem(self, share, parent_hash: str, seen=()) -> str | None:
+        """Why a block built on `parent_hash` may not include `share` (None if it may),
+        apart from the share's work unit (check_share_work). A share is a header mined
+        on one of the last SHARE_WINDOW blocks of that branch, not itself a block of it,
+        with the target its parent called for, not included before (`seen`)."""
+        try:
+            self._check_header_format(share)
+        except InvalidBlock as e:
+            return str(e)
+        sid = share_id(share)
+        if sid in seen:
+            return "share already included"
+        parent = self.header_or_none(parent_hash)
+        if parent is None:
+            return "unknown parent"
+        height = parent["height"] + 1
+        if not height - params.SHARE_WINDOW <= share["height"] <= height:
+            return "share outside the window"
+        h, cur = parent["height"], parent_hash
+        while h > share["height"] - 1:               # the branch's block at the share's height...
+            if h == share["height"] and cur == sid:
+                return "a block of this branch is not a share"
+            cur = self.header(cur)["prev"]
+            h -= 1
+        if cur != share["prev"]:                     # ...and below it, the block the share was mined on
+            return "share not mined on this branch"
+        if target_of(share) != self.expected_target(share["prev"]):
+            return "share has the wrong target"
+        return None
+
+    def share_target(self, share: dict) -> int:
+        return min(params.MAX_TARGET, target_of(share) * params.SHARE_FACTOR)
+
+    def check_share_work(self, share: dict, job_size: int = MAX_JOB_BLOB) -> None:
+        """Recompute a share's work unit; InvalidBlock if it is not real work meeting the share target."""
+        sid = share_id(share)
+        if sid in self.verified_shares:
+            return
+        seed = seed_of(share)
+        a, b = work_inputs(share, seed, self.blobs, job_size)
+        transcript, _ = work.compute_unit(a, b, seed)
+        if transcript != share["transcript"]:
+            raise InvalidBlock("share transcript does not match its work")
+        if work.ticket_value(seed, transcript) > self.share_target(share):
+            raise InvalidBlock("share ticket does not meet the share target")
+        if len(self.verified_shares) > MAX_CACHE:
+            self.verified_shares.clear()
+        self.verified_shares.add(sid)
+
     def work_ok(self, hdr: dict, transcript: str) -> bool:
         return transcript == hdr["transcript"] and work.ticket_value(seed_of(hdr), transcript) <= target_of(hdr)
 
@@ -574,7 +652,7 @@ class Chain:
         txmod.check_format(tx, self.chain_id)
         addr = txmod.sender(tx)
         if tx["nonce"] != s.nonce(addr):
-            raise InvalidTx(f"nonce must be {s.nonce(addr)}")
+            raise (txmod.FutureNonce if tx["nonce"] > s.nonce(addr) else InvalidTx)(f"nonce must be {s.nonce(addr)}")
         fee = tx["fee"]
         if fee < txmod.min_fee(tx):
             raise InvalidTx(f"fee must be at least {txmod.min_fee(tx)}")
@@ -1073,6 +1151,28 @@ class Chain:
         job_id = hdr["work"]["job"]
         if job_id is not None and job_id not in state.jobs:
             raise InvalidBlock("work references a job that was never posted")
+        shares = block.get("shares", [])
+        if "shares" in block and (not isinstance(shares, list) or not shares):
+            raise InvalidBlock("a block without shares leaves the shares field out", permanent=False)
+        try:
+            share_ids = [share_id(sh) for sh in shares]
+        except (TypeError, ValueError):
+            raise InvalidBlock("unencodable share", permanent=False) from None
+        if merkle_root(share_ids) != hdr["shares_root"]:
+            raise InvalidBlock("shares_root mismatch", permanent=False)
+        if len(shares) > params.MAX_BLOCK_SHARES:
+            raise InvalidBlock("too many shares")
+        if len(set(share_ids)) != len(share_ids):
+            raise InvalidBlock("duplicate share")
+        for sh in shares:                            # cheap checks for all, then the work units
+            problem = self.share_problem(sh, hdr["prev"], state.share_seen)
+            if problem:
+                raise InvalidBlock(problem)
+            if sh["work"]["job"] is not None and sh["work"]["job"] not in state.jobs:
+                raise InvalidBlock("share work references a job that was never posted")
+        for sh in shares:
+            job = sh["work"]["job"]
+            self.check_share_work(sh, txmod.job_blob_size(state.jobs[job]["dims"]) if job else 0)
         height = hdr["height"]
         s = state.copy()
         for t in txs:
@@ -1080,20 +1180,25 @@ class Chain:
                 self.apply_tx(s, t, height)
             except InvalidTx as e:
                 raise InvalidBlock(f"invalid transaction {txmod.txid(t)[:12]}: {e}") from None
-        if self._finish_block(s, hdr, txs) != hdr["state_root"]:
+        if self._finish_block(s, hdr, txs, shares) != hdr["state_root"]:
             # tx_root matched, so this is the body the header commits to: the header is wrong.
             raise InvalidBlock("state root does not match the state after the block")
         return s
 
-    def _finish_block(self, s: State, hdr: dict, txs: list[dict]) -> str:
+    def _finish_block(self, s: State, hdr: dict, txs: list[dict], shares: list = ()) -> str:
         """End-of-block steps after the transactions; returns the new state root."""
         height = hdr["height"]
         self._job_events(s, height)
         self._close_jobs(s, height)
         self._settle_tasks(s, height)
         self._end_channels(s, height)
-        for addr, amount in payouts(hdr["miner"], params.block_reward(height) + sum(t["fee"] for t in txs)):
-            s.credit(addr, amount)
+        for sid in s.share_expiry.pop(height - params.SHARE_WINDOW - 1, []):
+            s.share_seen.pop(sid, None)              # too old to be included again anyway
+        for sh in shares:
+            sid = share_id(sh)
+            s.share_seen[sid] = height
+            s.share_expiry.setdefault(height, []).append(sid)
+        pay_block(s, hdr, sum(t["fee"] for t in txs), list(shares))
         return s.commit()
 
     def _state_of(self, block_hash_: str) -> State:
@@ -1113,7 +1218,8 @@ class Chain:
 
     def add_block(self, block: dict, trusted: bool = False) -> str:
         """Returns "added", "exists" or "orphan". Raises InvalidBlock / MissingData."""
-        if not isinstance(block, dict) or set(block) != {"header", "txs"} or not isinstance(block["header"], dict):
+        if not isinstance(block, dict) or set(block) - {"shares"} != {"header", "txs"} \
+                or not isinstance(block["header"], dict):
             raise InvalidBlock("bad block", permanent=False)
         try:
             bh = block_hash(block)
@@ -1306,8 +1412,11 @@ class Chain:
 
     # -- mining --
 
-    def build_template(self, miner: str, candidates: list[dict], now: int | None = None, signal_skip=()):
+    def build_template(self, miner: str, candidates: list[dict], now: int | None = None, signal_skip=(),
+                       shares: list = ()):
         """Pick valid transactions from `candidates` and return (header, txs, state).
+        `shares` are included as given: the caller passes shares it checked for a
+        block on the tip (green.node.Node.share_candidates).
 
         The header commits to the state after the block, which does not depend on
         the nonce or the work unit, so it stays valid for every attempt."""
@@ -1335,8 +1444,9 @@ class Chain:
             "version": self.deployments.version_for(self.tip, signal_skip), "height": height, "prev": self.tip,
             "time": max(int(now or time.time()), self.median_time_past(self.tip) + 1),
             "target": fmt_target(self.expected_target(self.tip)),
-            "tx_root": merkle_root([txmod.txid(t) for t in chosen]), "miner": miner,
+            "tx_root": merkle_root([txmod.txid(t) for t in chosen]),
+            "shares_root": merkle_root([share_id(sh) for sh in shares]), "miner": miner,
             "work": {"job": None, "unit": None}, "nonce": 0, "msg": "",
         }
-        header["state_root"] = self._finish_block(s, header, chosen)
+        header["state_root"] = self._finish_block(s, header, chosen, list(shares))
         return header, chosen, s

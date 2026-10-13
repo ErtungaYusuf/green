@@ -308,7 +308,8 @@ def cmd_genesis(args):
     path = os.path.join(args.data, "genesis.json")
     if os.path.exists(path) and not args.force:
         raise CliError(f"{path} already exists. Use --force to start a new network.")
-    print(f"Mining the genesis block (first reward {params.fmt_amount(params.block_reward(0))} -> {address})")
+    print(f"Mining the genesis block (first reward {params.fmt_amount(params.emission(params.TOTAL_SUPPLY)[0])} "
+          f"-> {address})")
     print(f"Message: {args.msg!r}")
     started = time.time()
     interactive = sys.stdout.isatty()
@@ -820,12 +821,13 @@ def cmd_supply(args):
     s = api_get(args, "/supply")
     print(f"Height   : {s['height']}")
     print(f"Balances : {params.fmt_amount(s['balances'])}")
-    print(f"Locked   : {params.fmt_amount(s['locked'])}  (escrow and bonds)")
+    print(f"Locked   : {params.fmt_amount(s['locked'])}  (escrow, bonds and channels)")
+    print(f"Reserve  : {params.fmt_amount(s['reserve'])}  (not yet paid out as rewards, and fees flowing back)")
     print(f"Total    : {params.fmt_amount(s['total'])}")
-    print(f"Minted   : {params.fmt_amount(s['minted'])}  (sum of block rewards)")
+    print(f"Supply   : {params.fmt_amount(s['supply'])}  (fixed: it never grows)")
     if not s["ok"]:
-        raise CliError("SUPPLY MISMATCH: coins exist that were never minted, or minted coins are missing")
-    print("OK: every coin is accounted for, none was created from nothing")
+        raise CliError("SUPPLY MISMATCH: coins were created from nothing, or coins are missing")
+    print("OK: every coin is accounted for, and the supply is exactly the fixed total")
 
 
 def cmd_guard(args):

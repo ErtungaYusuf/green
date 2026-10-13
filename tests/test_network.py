@@ -353,7 +353,7 @@ def test_worker_commits_once_when_blocks_are_slow(tmp_path, monkeypatch):
 
 
 def test_reorg_returns_abandoned_transactions_to_mempool(tmp_path):
-    from helpers import T0, mine
+    from helpers import T0, mine, rewards
     from green.chain import block_hash
     key, other = Key.generate(), Key.generate()
     node = Node(str(tmp_path / "r"), make_genesis(key.address, "reorg", timestamp=T0), port=free_port(),
@@ -370,10 +370,11 @@ def test_reorg_returns_abandoned_transactions_to_mempool(tmp_path):
     b2, _ = mine(chain, other, [], t=T0 + 21, parent=block_hash(b1))
     node._add_block(b2)                             # branch B is heavier and never saw the payment
     assert chain.tip == block_hash(b2)
-    assert chain.state.balance(other.address) == 2 * params.block_reward(1)
+    earned = rewards(chain, other, 1)
+    assert earned > 0 and chain.state.balance(other.address) == earned
     # The payment is not lost: it is back in the mempool and will confirm on B.
     assert txmod.txid(pay) in node.mempool
-    assert node._pending.balance(other.address) == 2 * params.block_reward(1) + 12345
+    assert node._pending.balance(other.address) == earned + 12345
 
 
 def test_restart_loads_blocks_from_disk(network):
@@ -392,7 +393,8 @@ def test_supply_audit_and_metrics_on_a_live_node(network):
     n1, n2, miner, buyer = network
     wait_for(lambda: n1.chain.height >= 5, what="blocks")
     s = http_get(f"{n1.url}/supply")
-    assert s["ok"] and s["total"] == s["minted"] and s["minted"] >= 6 * params.block_reward(0)
+    assert s["ok"] and s["total"] == s["supply"] == params.TOTAL_SUPPLY
+    assert s["reserve"] < params.TOTAL_SUPPLY - 5 * params.emission(params.TOTAL_SUPPLY)[0] // 2   # rewards were paid
     import urllib.request
     with urllib.request.urlopen(f"{n1.url}/metrics", timeout=5) as r:
         assert r.headers["Content-Type"].startswith("text/plain")

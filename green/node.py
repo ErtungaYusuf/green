@@ -30,7 +30,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import params, tx as txmod, work
-from .chain import (BlobStore, Chain, InvalidBlock, MissingData, block_hash, fee_rate, seed_of, solve, target_of,
+from .chain import (BlobStore, Chain, InvalidBlock, MissingData, block_hash, fee_rate, seed_of, share_id, solve,
+                    target_of,
                     work_inputs)
 from .crypto import Key, hhex, merkle_proof, merkle_root
 from . import prune as prunemod, snapshot
@@ -54,6 +55,8 @@ BATCH_SECONDS = 2.0           # commit a partly filled batch after this long
 BUMP_AFTER_BLOCKS = 3         # our own protocol transaction still waiting after this many blocks gets a higher fee
 MAX_BUMP_FEE = 1000 * params.MIN_TX_FEE    # ...up to this (0.1 GRN), so a fee spike cannot drain the wallet
 BUMP_SECONDS = 5.0
+MAX_SHARE_POOL = 4096         # shares waiting to be included
+TEMPLATE_SECONDS = 5          # the miner rebuilds its block template at least this often
 MAX_MANIFEST_BYTES = txmod.HASH_BYTES * params.MAX_BATCH_UNITS
 RESPONSES_PER_ROUND = 32      # disputes answered per loop; the rest wait for mempool room
 MAX_WAITERS = 16              # API clients long-polling for the next block at once
@@ -142,11 +145,15 @@ class Node:
         self._unit_ok: set[tuple] = set()         # (batch, unit_key) results we verified for our own jobs
         self._leaf_cache: dict[str, tuple] = {}   # manifest hash -> (root, leaves, set(leaves)), root-checked
         self._warned_bond = False
-        self.stats = {"units": 0, "useful_units": 0, "blocks_found": 0, "batches_committed": 0,
+        self.stats = {"units": 0, "useful_units": 0, "blocks_found": 0, "shares_found": 0, "batches_committed": 0,
                       "results_revealed": 0, "tasks_done": 0, "frauds_caught": 0, "started": time.time()}
         self._recent_unit_times: list[float] = []
         self._task_inflight: dict[str, dict] = {}
         self._own_waiting: dict[tuple, int] = {}   # (sender, nonce) of our pending protocol tx -> height first seen
+        self.share_pool: dict[str, dict] = {}      # share id -> share (SPEC.md §3.5), for our templates
+        self._share_cache: tuple = (None, -1, [])  # (tip, pool version, candidates)
+        self._share_version = 0
+        self._template = None                      # (key, made, header, txs, shares): reused while nothing changed
         self._task_unrunnable: set[str] = set()
         self.running = True
 
@@ -298,6 +305,13 @@ class Node:
                 if e["local"] and e["tx"]["nonce"] == t["nonce"] and txmod.sender(e["tx"]) == who:
                     del self.p2p.stempool[other]     # a fee bump of our own stem transaction replaces it
                     return False                     # (and goes out at once: speed was the point)
+            # A transaction follows its predecessor: on the same stem if that one is on our stem,
+            # announced like it if it was announced (and is still on its way to other nodes). A
+            # stem that overtook its predecessor would reach a node that cannot accept it yet.
+            if source is None and t["nonce"] > self.chain.state.nonce(who) and not any(
+                    e["tx"]["nonce"] == t["nonce"] - 1 and txmod.sender(e["tx"]) == who
+                    for e in self.p2p.stempool.values()):
+                return False
             s = self._stem_view(skip=tid)
             s.adjudication_used = s.responses_used = 0
             self.chain.apply_tx(s, t, self.chain.height + 1)
@@ -363,6 +377,64 @@ class Node:
             self.mempool, self._pending = saved
             raise
         return True
+
+    # --- shares (SPEC.md §3.5) ---
+
+    def submit_share(self, share, source=None, own: bool = False) -> str | None:
+        """Keep a share for our templates and pass it on. Returns its id if it is new and
+        fits a block on our tip; None if it does not (too old, another branch, already
+        included, data missing). Raises InvalidBlock if its work is fake: the sender lied."""
+        if not isinstance(share, dict):
+            raise InvalidBlock("a share is a header")
+        try:
+            sid = share_id(share)
+        except (TypeError, ValueError):
+            raise InvalidBlock("unencodable share") from None
+        with self.lock:
+            if sid in self.share_pool:
+                return None
+            state = self.chain.state
+            problem = self.chain.share_problem(share, self.chain.tip, state.share_seen)
+            job = share["work"]["job"] if problem is None else None
+            if job is not None and job not in state.jobs:
+                problem = "unknown job"
+            job_size = txmod.job_blob_size(state.jobs[job]["dims"]) if job else 0
+        if problem is not None:
+            return None
+        if own:                                      # we just computed it
+            self.chain.verified_shares.add(sid)
+        else:
+            try:
+                self.chain.check_share_work(share, job_size)
+            except MissingData:
+                return None
+        with self.lock:
+            self.share_pool[sid] = share
+            while len(self.share_pool) > MAX_SHARE_POOL:
+                del self.share_pool[min(self.share_pool, key=lambda k: self.share_pool[k]["height"])]
+            self._share_version += 1
+        self.p2p.announce_share(sid, share, source)
+        return sid
+
+    def share_candidates(self) -> list:
+        """Shares a block on our tip may include (oldest first: they expire first), at most MAX_BLOCK_SHARES."""
+        with self.lock:
+            tip, version, cached = self._share_cache
+            if tip == self.chain.tip and version == self._share_version:
+                return cached
+            state = self.chain.state
+            keep = []
+            for sid, sh in list(self.share_pool.items()):
+                job = sh["work"]["job"]
+                if self.chain.share_problem(sh, self.chain.tip, state.share_seen) is None \
+                        and (job is None or job in state.jobs):
+                    keep.append(sh)
+                elif sh["height"] <= self.chain.height - params.SHARE_WINDOW + 1 or sid in state.share_seen:
+                    del self.share_pool[sid]         # it can never be included any more
+            keep.sort(key=lambda sh: sh["height"])
+            keep = keep[:params.MAX_BLOCK_SHARES]
+            self._share_cache = (self.chain.tip, self._share_version, keep)
+            return keep
 
     def pending_nonce(self, addr: str) -> int:
         with self.lock:
@@ -535,9 +607,19 @@ class Node:
                 time.sleep(0.2)
                 continue
             self._process_batches()
+            shares = self.share_candidates()
             with self.lock:
-                header, txs, _ = self.chain.build_template(addr, list(self.mempool.values()),
-                                                           signal_skip=self.no_signal)
+                # The template (transactions, shares, state root) does not depend on the work
+                # unit or the nonce: it is rebuilt only when the tip, the mempool or the shares
+                # change, or every TEMPLATE_SECONDS, not for every try.
+                key = (self.chain.tip, id(self.mempool), len(self.mempool), self._share_version)
+                t = self._template
+                if t is None or t[0] != key or time.time() - t[1] > TEMPLATE_SECONDS:
+                    base, txs, _ = self.chain.build_template(addr, list(self.mempool.values()),
+                                                             signal_skip=self.no_signal, shares=shares)
+                    t = self._template = (key, time.time(), base, txs, shares)
+                _, _, base, txs, shares = t
+                header = dict(base)
                 header["work"] = self._choose_work()
                 header["nonce"] = random.getrandbits(48)
                 tip = self.chain.tip
@@ -563,9 +645,16 @@ class Node:
                 self._buffer_result(work_item, work.recover_useful(a, b, seed))
             self._flush_batches()
 
+            if target_of(header) < ticket <= self.chain.share_target(header):
+                # Not a block, but a share: paid from the reserve when a block includes it.
+                try:
+                    if self.submit_share(dict(header, transcript=transcript), own=True):
+                        self.stats["shares_found"] += 1
+                except (InvalidBlock, MissingData):
+                    pass
             if ticket <= target_of(header):
                 header["transcript"] = transcript
-                block = {"header": header, "txs": txs}
+                block = {"header": header, "txs": txs, **({"shares": shares} if shares else {})}
                 with self.lock:
                     stale = self.chain.tip != tip
                 if stale:
@@ -579,7 +668,7 @@ class Node:
                     self.stats["blocks_found"] += 1
                     kind = "useful work" if header["work"]["job"] else "filler work"
                     self.log(f"*** BLOCK FOUND #{header['height']}  {block_hash(block)[:16]}...  "
-                             f"({kind}, {len(txs)} txs, reward {params.fmt_amount(params.block_reward(header['height']))})")
+                             f"({kind}, {len(txs)} txs, {len(shares)} shares)")
 
     def _job_size(self, work_item: dict) -> int:
         if work_item["job"] is None:
@@ -1040,6 +1129,9 @@ class Node:
                 "units_per_second": round(self.units_per_second(), 2), "stats": dict(self.stats),
                 "warnings": self.warnings(),
                 "pruned": self.prune, "first_block": self.chain.first_block,
+                "reserve": self.chain.state.reserve, "shares_waiting": len(self.share_pool),
+                "next_emission": dict(zip(("finder", "per_share", "inclusion_cut"),
+                                          params.emission(self.chain.state.reserve))),
             }
 
     def maintain(self) -> dict:
@@ -1200,16 +1292,16 @@ class Node:
             return {"id": cid, **ch, "left": ch["amount"] - ch["paid"], "height": self.chain.height}
 
     def supply(self) -> dict:
-        """Audit: every coin that exists must sit in a balance, an escrow or a bond,
-        and their sum must equal what the block rewards have minted, exactly."""
+        """Audit: every coin sits in a balance, an escrow, a bond or a channel, or in the
+        protocol's reserve, and together they are exactly the fixed total supply."""
         with self.lock:
             state, height = self.chain.state, self.chain.height
             balances = sum(state.balances.values())
             locked = state.locked_total()
-        minted = sum(params.block_reward(h) for h in range(height + 1)) if height < 10**6 else \
-            _minted_fast(height)
-        return {"height": height, "balances": balances, "locked": locked, "total": balances + locked,
-                "minted": minted, "ok": balances + locked == minted}
+            reserve = state.reserve
+        return {"height": height, "balances": balances, "locked": locked, "reserve": reserve,
+                "total": balances + locked + reserve, "supply": params.TOTAL_SUPPLY,
+                "ok": balances + locked + reserve == params.TOTAL_SUPPLY}
 
     def metrics(self) -> str:
         """Prometheus text format, for dashboards and alerts."""
@@ -1251,6 +1343,9 @@ class Node:
              sum(p.bytes_in for p in self.p2p.all_peers())),
             ("green_bytes_sent_total", "counter", "P2P bytes sent", sum(p.bytes_out for p in self.p2p.all_peers())),
             ("green_supply_ok", "gauge", "1 if every coin is accounted for (supply audit)", int(self.supply()["ok"])),
+            ("green_reserve", "gauge", "Coins in the protocol's reserve (yaprak)", st["reserve"]),
+            ("green_shares_waiting", "gauge", "Shares waiting for a block", st["shares_waiting"]),
+            ("green_shares_found_total", "counter", "Shares this node found", st["stats"]["shares_found"]),
             ("green_warnings", "gauge", "Warnings the operator should act on", len(st["warnings"])),
         ]
         out = []
@@ -1345,16 +1440,6 @@ class Node:
         self.p2p.stop()
         with self.lock:                 # no block is being written while the database closes
             self.store.close()
-
-
-def _minted_fast(height: int) -> int:
-    """Sum of block rewards for heights 0..height without a loop per block."""
-    total, h = 0, 0
-    while h <= height:
-        era_end = min(height, (h // params.HALVING_INTERVAL + 1) * params.HALVING_INTERVAL - 1)
-        total += params.block_reward(h) * (era_end - h + 1)
-        h = era_end + 1
-    return total
 
 
 class BoundedServer(ThreadingHTTPServer):

@@ -2,6 +2,18 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## 0.17.0
+
+**Money: no halvings, no inflation**
+- The supply is fixed at 21M GRN and starts in the protocol's reserve (state map `protocol`). Each block pays out 1/2^24 of the reserve: ~1.25 GRN at first, then a smooth curve with no halving cliffs. Half of every block's fees flow back into the reserve, so rewards never dry up: after the initial distribution miners are paid from what users pay, smoothed over years. The supply audit (`GET /supply`, `grn supply`) checks balances, locked funds and the reserve against the fixed total. (SPEC.md §3.5.)
+
+**Shares: paid for work, not luck**
+- 80% of each block's emission pays *shares*: headers mined on one of the last 32 blocks whose ticket meets 32 times the block target. Blocks include them (at most 64, committed in the new header field `shares_root`); each share's miner is paid from the reserve and the including block gets 5% of it. A miner is paid in proportion to its work without a pool; a block that loses a race counts as a share. Nodes keep a share pool, miners publish their near-misses as shares, shares travel over P2P (`share`, checked before relay; fake ones get the sender banned) and inside compact blocks; their work units are checked in parallel during sync.
+- The miner reuses its block template while the tip, the mempool and the shares are unchanged (it rebuilt it for every try). `bench/economics_sim.py` shows the emission curve, where rewards settle on fees, and a small miner's income with and without shares.
+- Pools stay useful for selling compute and finer payouts; their own shares are now 1024 times easier than blocks, and a pool share that is also a protocol share pays the pool's payees.
+- Found by the network simulation, present since v0.14: a sender's transaction could take a Dandelion stem while its predecessor was still being announced, reach a node that had not seen the predecessor, and be dropped there; every later transaction followed, and all waited ~20 s for the embargo (half the simulation runs). A transaction now takes a stem only if its predecessor is confirmed or on the same stem, and a transaction with a future nonce is no longer marked rejected, so it is fetched again once its predecessor arrives.
+- Fifteenth security review (SECURITY.md, E1-E9). 249 tests. Consensus change (header field, rewards): v0.16 nodes reject v0.17 blocks.
+
 ## 0.16.0
 
 **Hardening the compute channels**

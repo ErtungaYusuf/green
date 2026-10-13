@@ -1,4 +1,4 @@
-# Green protocol specification (v0.16)
+# Green protocol specification (v0.17)
 
 This document defines the consensus rules of the Green network precisely enough to write an independent, compatible node. Where it and the reference implementation (`green/`) disagree, that is a bug in one of them. Constants are named as in `green/params.py`; their values are listed in §10.
 
@@ -70,13 +70,27 @@ After a block's transactions, at height `h`, in this order:
 
 1. **Job events** scheduled for `h`, in scheduling order:
    - *expire* (scheduled at `expires + 1`): a batch still *committed* is dropped; its bond goes to the buyer.
-   - *settle* (scheduled at `settle_at`): a *revealed* batch with no open dispute is paid: the escrow decreases by `price · count`, which goes to the miner or, if the batch has payees, is split among them as in step 4; the miner gets its bond back; its units become delivered.
+   - *settle* (scheduled at `settle_at`): a *revealed* batch with no open dispute is paid: the escrow decreases by `price · count`, which goes to the miner or, if the batch has payees, is split among them as in §3.5; the miner gets its bond back; its units become delivered.
    - *deadline* (scheduled at `deadline + 1`): if a dispute of the batch with that deadline is still open, the batch is forfeit: its bond goes to the challenger of the earliest-opened such dispute and the batch is dropped.
    A dropped batch releases its units (they reopen) and its open disputes; if the job is closed, `price · count` of escrow is refunded to the buyer.
 2. **Job closings** scheduled for `h`: refund `escrow − price · (units in live batches)` to the buyer and mark the job closed. Live batches settle later as usual.
 3. **Task settlements** scheduled for `h`: a *revealed* or *confirmed* task pays the worker `price + bond`.
 4. **Channel ends** scheduled for `h` (channels whose `expires` is `h − 1`), in opening order: the buyer receives `amount − paid` and the channel is removed.
-5. The miner receives `block_reward(h)` plus all fees of the block. With a payee list, payee i receives `floor(total · w_i / Σw)` and the first payee also the remainder.
+5. **Shares**: the ids of shares included at `h − SHARE_WINDOW − 1` are forgotten, and those of this block's shares recorded at `h`.
+6. **Rewards** (§3.5). Whenever an amount is paid to a `miner` field (a block's or a share's) or to payees, an address receives all of it, and a payee list `[[a_i, w_i]]` gives `a_i` `floor(total · w_i / Σw)`, the first payee also the remainder.
+
+### 3.5 Money: the reserve, rewards and shares
+
+The total supply is fixed at TOTAL_SUPPLY. Before the genesis block all of it is in the protocol's **reserve** (state map `protocol`, key `"reserve"`); coins only ever move between the reserve and accounts, so `Σ balances + escrows + bonds + channel funds + reserve = TOTAL_SUPPLY` at every block. There is no halving and no inflation.
+
+A block whose parent state holds reserve `R` has emission `E = floor(R / EMISSION_DIVISOR)`, of which `per_share = floor(floor(E · SHARES_PERCENT / 100) / SHARE_FACTOR)`, `cut = floor(per_share · SHARE_INCLUSION_PERCENT / 100)` and `finder = E − SHARE_FACTOR · per_share`. With `F` the block's fees and `n` its shares:
+- each share's `miner` receives `per_share − cut`;
+- the block's `miner` receives `finder + n · cut + F − floor(F · FEE_RESERVE_PERCENT / 100)`;
+- the reserve changes by `floor(F · FEE_RESERVE_PERCENT / 100) − finder − n · per_share`.
+
+The finder's part does not depend on `n`: a block that leaves shares out keeps nothing more (what the missing shares would have been paid stays in the reserve), and one that includes them earns their cut.
+
+A **share** is a header (§5.1, all fields, including `transcript`) whose ticket meets `min(MAX_TARGET, target · SHARE_FACTOR)`. A block at height `H` on parent `P` may include up to MAX_BLOCK_SHARES distinct shares, listed in the body as `shares` (present only when not empty) and committed to by `shares_root = merkle_root(share ids)`, where a share's id is `hex(H(C(share)))`. Each share must satisfy: `H − SHARE_WINDOW <= share.height <= H`; `share.prev` is the block at height `share.height − 1` of the branch ending at `P`; the share is not itself the block at its height on that branch; `target` is the target its `prev` calls for (§5.3); its id was not recorded by an earlier block within the window (§3.3); a job named in its `work` exists in the parent state; and its work unit recomputes to its `transcript` and meets the share target. Its `time`, `tx_root`, `shares_root`, `state_root`, `msg` and `version` are not otherwise checked: a share is evidence of work done for a payout address, and the seed covers every field, so neither the address nor the work can be changed. A block of a losing branch is a valid share.
 
 ### 3.4 Guarded accounts
 
@@ -104,6 +118,7 @@ A block is `{"header": header, "txs": [...]}`. The header has exactly these fiel
 | `time` | seconds; greater than the median of the previous MTP_WINDOW block times; nodes reject (temporarily) a time more than MAX_FUTURE_SECONDS ahead of their clock |
 | `target` | 64 hex digits; must equal the expected target (§5.3) |
 | `tx_root` | `merkle_root(txids)` |
+| `shares_root` | `merkle_root(share ids)` of the shares in the body (§3.5) |
 | `state_root` | the lattice root of the state after this block (§6.1) |
 | `miner` | the address that receives reward and fees, or `[[address, weight], ...]`: 2 to MAX_PAYEES entries sorted by address, addresses distinct, weights in 1..MAX_PAYEE_WEIGHT (a pool paying its miners) |
 | `work` | `{"job": null, "unit": null}` (filler) or `{"job": job id posted before this block, "unit": [i, l, j] inside it}` |
@@ -155,9 +170,7 @@ A rule added by a deployment applies to blocks whose state is ACTIVE and must on
 
 ## 6. Blocks
 
-A block is valid if its header is valid (§5), its transactions match `tx_root`, it has at most MAX_BLOCK_TXS transactions with distinct txids, `len(C(txs)) <= MAX_BLOCK_BYTES` and at most MAX_BLOCK_SIGS signatures in total (1 per single-key transaction, `k` per multisig one, plus 1 per channel claim for its voucher), a job named in `work` exists in the parent state, every transaction applies in order (§3) followed by the events of §3.3, and the root of the resulting state equals `state_root` (§6.1). The genesis block has height 0, no transactions, filler work, the initial target, and pays `block_reward(0)` to its miner (its state root is that of a state holding only this balance).
-
-`block_reward(h) = INITIAL_REWARD >> floor(h / HALVING_INTERVAL)`, and 0 after 64 halvings.
+A block is `{"header", "txs"}` plus `"shares"` when it includes any. It is valid if its header is valid (§5), its transactions match `tx_root` and its shares `shares_root`, its shares are valid (§3.5), it has at most MAX_BLOCK_TXS transactions with distinct txids, `len(C(txs)) <= MAX_BLOCK_BYTES` and at most MAX_BLOCK_SIGS signatures in total (1 per single-key transaction, `k` per multisig one, plus 1 per channel claim for its voucher), a job named in `work` exists in the parent state, every transaction applies in order (§3) followed by the events of §3.3, and the root of the resulting state equals `state_root` (§6.1). The genesis block has height 0, no transactions, no shares, filler work and the initial target; it is applied to the state whose reserve is TOTAL_SUPPLY and pays its finder's part (§3.5).
 
 ### 6.1 The state and its commitment
 
@@ -175,8 +188,11 @@ The state is a set of maps plus one counter. Their exact content is consensus, b
 | `guards` | address | `{"guardian", "limit", "period", "frozen", "window", "spent"}` (§3.4) |
 | `channels` | channel id | `{"buyer", "pub", "provider", "amount", "paid", "expires"}` |
 | `channel_expiry` | height (integer) | channel ids ending at that height, in opening order |
+| `protocol` | `"reserve"` | the reserve (§3.5) |
+| `share_seen` | share id | height of the block that included it |
+| `share_expiry` | height (integer) | share ids included at that height, in block order |
 
-A unit key is `"i,l,j"` (decimal). Fields marked * are present only when the batch's commit named payees. Entries of `closing`, `job_events`, `task_settle` and `channel_expiry` are created when the first item is scheduled for their height and removed when that height is processed; a removed job batch (paid or dropped) leaves `batches`. The counter `open_disputes` is the number of open job disputes network wide.
+A unit key is `"i,l,j"` (decimal). Fields marked * are present only when the batch's commit named payees. Entries of `closing`, `job_events`, `task_settle`, `channel_expiry` and `share_expiry` are created when the first item is scheduled for their height and removed when that height is processed; a removed job batch (paid or dropped) leaves `batches`. The counter `open_disputes` is the number of open job disputes network wide.
 
 **Lattice hash** (LtHash with 1024 16-bit lanes, as in Lewi et al., "Securing Update Propagation with Homomorphic Hashing", 2019). For a map `M`, key `k` and value `v`, `entry(M, k, v)` is the 2,048-byte output of SHAKE-256(`"grn-state-v1:"` ‖ `C([M, k, plain(v)])`) read as 1,024 little-endian uint16 lanes, where `plain` turns sets into lists sorted by code point and dictionary keys into strings. The state's lattice is the lane-wise sum, modulo 2^16, of `entry(M, k, v)` for every entry of every map plus `entry("meta", "open_disputes", open_disputes)`. `state_root = hex(H(lattice as 1,024 uint16 little-endian))`.
 
@@ -208,7 +224,7 @@ Not consensus: it decides how nodes talk, not which chain is valid. Default port
 2. Both compute the X25519 shared secret (all zeros is refused) and `okm = HKDF-SHA256(ikm = secret, salt = "grn-p2p-v1" ‖ genesis hash (32 bytes), info = initiator key ‖ responder key, 160 bytes)`, split into five 32-byte values: initiator→responder length key, initiator→responder body key, the same two responder→initiator, and the session id.
 3. A frame is `ChaCha20-Poly1305(length key, n, uint32_LE(len(body)))` (20 bytes) followed by `ChaCha20-Poly1305(body key, n, body)`, where the nonce `n` is 4 zero bytes ‖ uint64_LE(frame counter). After REKEY_FRAMES frames in a direction both of its keys become `HKDF-Expand-SHA256(key, "grn-p2p-rekey", 32)` and the counter restarts at 0.
 4. A body is one byte of message type followed by the payload: canonical JSON for every message except `blob`, whose payload is the raw blob.
-5. The first frame each way is `version`: `{"proto": 1, "agent", "id": node public key, "sig", "port": listening port or 0, "relay": wants transaction announcements, "height", "tip", "work": chainwork as a decimal string, "you": the address the sender sees for the receiver, "time", "first": lowest height it has block bodies for, "features": optional messages it understands}`. Features are `"dtx"` (message 19), `"cmpct"` (20 to 22) and `"offers"` (23); a node sends an optional message only to a peer that listed it, and ignores features it does not know. `sig = Ed25519(node key, "grn-p2p-auth-v1" ‖ session id ‖ ("I" if the sender initiated, else "R"))`. A connection is up once each side has checked the other's signature. Peers given as `<id>@host:port` must present that id.
+5. The first frame each way is `version`: `{"proto": 1, "agent", "id": node public key, "sig", "port": listening port or 0, "relay": wants transaction announcements, "height", "tip", "work": chainwork as a decimal string, "you": the address the sender sees for the receiver, "time", "first": lowest height it has block bodies for, "features": optional messages it understands}`. Features are `"dtx"` (message 19), `"cmpct"` (20 to 22), `"offers"` (23) and `"shares"` (24); a `cmpct` carries the block's shares whole; a node sends an optional message only to a peer that listed it, and ignores features it does not know. `sig = Ed25519(node key, "grn-p2p-auth-v1" ‖ session id ‖ ("I" if the sender initiated, else "R"))`. A connection is up once each side has checked the other's signature. Peers given as `<id>@host:port` must present that id.
 
 A node on another network derives different keys and fails at the first frame.
 
@@ -230,6 +246,7 @@ A node on another network derives different keys and fails at the first frame.
 | 19 `dtx` | `{"tx": ...}` | a transaction in its stem phase (Dandelion++, §9.3): pass it on or announce it, never serve it to `getdata` |
 | 20 `cmpct` | `{"header", "salt": 16 hex, "ids": [12 hex], "fill": [[index, tx]]}` | a new block: its header, the transactions given in `fill` at their indexes, and for the others, in order, `short_id = BLAKE2b-48(txid bytes, key = block hash bytes ‖ salt bytes)` |
 | 21 `getblocktxn`, 22 `blocktxn` | `{"block", "idx": [indexes]}`, `{"block", "txs": [...]}` | the transactions of a compact block the receiver could not find, in the order asked |
+| 24 `share` | `{"share": header}` | a share (§3.5), checked (its work unit recomputed) before it is passed on; a fake one gets the sender banned |
 | 23 `offers` | `{"offers": [offer, ...]}` (at most 100) | providers selling compute (§12): `{"provider", "pub", "url", "price", "max_dim", "credit", "time", "sig"}`, `sig = Ed25519(pub, C(["grn-offer", chain_id, offer without sig]))`, `provider = address(pub)` |
 
 ### 9.3 Behaviour of the reference node
@@ -257,7 +274,8 @@ A node on another network derives different keys and fails at the first frame.
 | SIGNAL_PERIOD, SIGNAL_THRESHOLD | 20,160, 18,144 (90%) |
 | P2P: REKEY_FRAMES, MAX_FRAME, MAX_HEADERS, MAX_INV | 4,096, 4 MiB, 2,000, 1,000 |
 | P2P (not consensus): Dandelion++ epoch, fluff probability, destinations, embargo | 600 s, 0.1, 2, 15 s + Exp(mean 5 s) |
-| INITIAL_REWARD, HALVING_INTERVAL | 125,000,000 yaprak (1.25 GRN), 8,400,000 |
+| TOTAL_SUPPLY, EMISSION_DIVISOR, FEE_RESERVE_PERCENT | 2,100,000,000,000,000 yaprak (21,000,000 GRN), 2^24, 50 |
+| SHARE_FACTOR, SHARES_PERCENT, SHARE_INCLUSION_PERCENT, MAX_BLOCK_SHARES, SHARE_WINDOW | 32, 80, 5, 64, 32 |
 | MAX_BLOCK_TXS, MAX_BLOCK_BYTES | 500, 1,000,000 |
 | MAX_JOB_UNITS_PER_DIM, MAX_BATCH_UNITS | 16, 4,096 |
 | MIN_TX_FEE, DATA_FEE_PER_BYTE | 10,000, 1 |

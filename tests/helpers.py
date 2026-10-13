@@ -137,10 +137,31 @@ def settle_batch(chain, key, job_id, bid):
 
 
 def supply(chain) -> int:
-    """Every coin that exists must be in a balance, an escrow or a bond."""
+    """Every coin is in a balance, an escrow, a bond, a channel or the protocol's reserve."""
     s = chain.state
-    return sum(s.balances.values()) + s.locked_total()
+    return sum(s.balances.values()) + s.locked_total() + s.reserve
 
 
 def minted(chain) -> int:
-    return sum(params.block_reward(h) for h in range(chain.height + 1))
+    """The supply never changes: coins only move between the reserve and accounts."""
+    return params.TOTAL_SUPPLY
+
+
+def reward(state, fees: int = 0, shares: int = 0) -> int:
+    """What the finder of a block on `state` receives (SPEC.md §3.5)."""
+    finder, _, cut = params.emission(state.reserve)
+    return finder + cut * shares + fees - fees * params.FEE_RESERVE_PERCENT // 100
+
+
+def rewards(chain, key, start: int, end: int | None = None) -> int:
+    """What `key` received as the finder of main-chain blocks start..end (reward and
+    its share of the fees), computed from each block's parent state."""
+    from green.chain import initial_state
+    total = 0
+    for h in range(start, (chain.height if end is None else end) + 1):
+        block = chain.block(chain.main[h])
+        if block["header"]["miner"] != key.address:
+            continue
+        parent = initial_state() if h == 0 else chain.states[block["header"]["prev"]]
+        total += reward(parent, sum(t["fee"] for t in block["txs"]), len(block.get("shares", [])))
+    return total

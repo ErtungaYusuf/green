@@ -54,7 +54,8 @@ from .crypto import hhex, is_address, is_hex
 from .node import COMMIT_INFLIGHT_CAP, BoundedServer, http_get, http_post
 from .tx import InvalidTx
 
-SHARE_FACTOR = 64              # shares are this much easier than blocks
+SHARE_FACTOR = 1024            # pool shares are this much easier than blocks (32 times easier than
+                               # protocol shares, so payouts follow miners' work closely)
 WINDOW_SHARES = 1000           # PPLNS window
 TEMPLATE_SECONDS = 10          # templates are refreshed this often (and on every new block)
 MINER_REFRESH_SECONDS = 1.0    # miners ask for the current template this often (cheap: it is cached)
@@ -122,12 +123,14 @@ class Pool:
         if cur and cur["header"]["prev"] == tip and time.time() - cur["made"] < TEMPLATE_SECONDS:
             return cur
         miner = self.payees()
+        shares = node.share_candidates()
         with node.lock:
             header, txs, _ = node.chain.build_template(miner, list(node.mempool.values()),
-                                                       signal_skip=node.no_signal)
+                                                       signal_skip=node.no_signal, shares=shares)
         share_target = min(params.MAX_TARGET, target_of(header) * SHARE_FACTOR)
         tid = block_hash({"header": dict(header, transcript="00" * 32)})
-        t = {"id": tid, "header": header, "txs": txs, "share_target": share_target, "made": time.time()}
+        t = {"id": tid, "header": header, "txs": txs, "shares": shares, "share_target": share_target,
+             "made": time.time()}
         with self.lock:
             self.templates[tid] = t
             self.current = tid
@@ -320,9 +323,15 @@ class Pool:
             self.stats["shares"] += 1
             self.stats["useful_shares"] += w["job"] is not None
         status = None
+        if target_of(header) < ticket <= self.node.chain.share_target(header):
+            try:                                     # a protocol share too: it pays the pool's payees
+                self.node.submit_share(dict(header), own=True)
+            except (InvalidBlock, MissingData):
+                pass
         if ticket <= target_of(header):
             try:
-                status = self.node.submit_block({"header": header, "txs": t["txs"]})
+                status = self.node.submit_block({"header": header, "txs": t["txs"],
+                                                 **({"shares": t["shares"]} if t["shares"] else {})})
             except (InvalidBlock, MissingData) as e:     # e.g. its job closed since the template
                 self.node.log(f"[pool] a share that met the block target was not a valid block: {e}")
                 status = "invalid"

@@ -219,6 +219,9 @@ MAPS = {
     "guards": dict,           # address -> {"guardian", "limit", "period", "frozen", "window", "spent"}
     "channels": dict,         # channel id -> {"buyer", "pub", "provider", "amount", "paid", "expires"}
     "channel_expiry": list,   # height -> channels that end then
+    "protocol": None,         # "reserve" -> the coins not yet paid out (and fees flowing back)
+    "share_seen": None,       # share id -> height of the block that included it
+    "share_expiry": list,     # height -> shares included then (forgotten SHARE_WINDOW + 1 blocks later)
 }
 
 
@@ -397,6 +400,14 @@ class State:
 
     def schedule(self, height: int, kind: str, job_id: str, batch_id: str, unit_key: str | None = None) -> None:
         self.job_events.setdefault(height, []).append([kind, job_id, batch_id, unit_key])
+
+    @property
+    def reserve(self) -> int:
+        return self.protocol.get("reserve", 0)
+
+    @reserve.setter
+    def reserve(self, amount: int) -> None:
+        self.protocol["reserve"] = amount
 
     def locked_total(self) -> int:
         """Coins held by the protocol (escrow + bonds), for supply accounting."""

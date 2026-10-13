@@ -1,4 +1,4 @@
-# Green node HTTP API (v0.16)
+# Green node HTTP API (v0.17)
 
 Every node serves this API on its port (default 8545, `127.0.0.1` unless started with `--host`). Requests and responses are JSON unless noted. Amounts are integers in yaprak (1 GRN = 10^8 yaprak). Errors come back as `{"error": "..."}` with status 400 (bad request or invalid transaction), 403 (admin endpoint called remotely), 404 (unknown), 409 (data the node does not have yet), 413 (too large) or 500.
 
@@ -19,7 +19,7 @@ This is the reference node's interface for wallets, tools and agents, not consen
 | `GET /fee?blocks=<n>` | fee estimate for inclusion within n blocks (default 2, at most 100): `fee_rate` (yaprak per byte, 0 when the minimum is enough), `transfer_fee` (for a typical transfer, at least `min_fee`), `min_fee`, `mempool` (transactions waiting), `basis` (`mempool`, `recent blocks` or `minimum`) |
 | `GET /wait?tip=<hash>&timeout=<s>` | long-poll: answers as soon as the tip is not `<hash>` any more, or after the timeout (at most 60 s): `tip`, `height`, `changed`, `mempool`. 503 if too many clients are already waiting. Clients use this instead of polling (`green.node.wait_for_block`) |
 | `GET /deployments` | scheduled rule changes (UPGRADES.md): `name`, `bit`, `state` (`defined`, `started`, `locked_in`, `active`, `failed`), `start`, `timeout`, `min_activation`, `lock_in_on_timeout`, `period_start`, `signalled` (blocks of this period so far, while started), `threshold`, `period` |
-| `GET /supply` | supply audit: `balances`, `locked` (escrow and bonds), `total`, `minted` (sum of block rewards), `ok` (true if total equals minted) |
+| `GET /supply` | supply audit: `balances`, `locked` (escrow, bonds, channel funds), `reserve`, `total`, `supply` (the fixed total supply), `ok` (true if they match exactly) |
 | `GET /metrics` | Prometheus text format (`text/plain; version=0.0.4`): height, base height, peers (total, inbound, outbound), mempool, mining, units per second, open disputes, blocks found, work units, useful units, results delivered, frauds caught, headers ahead of the chain, blocks in flight, peers banned, P2P bytes received and sent, supply audit (`green_supply_ok`), warnings (`green_warnings`). Alert rules: [contrib/prometheus-alerts.yml](contrib/prometheus-alerts.yml) |
 
 ## Accounts and transactions

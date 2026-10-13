@@ -13,6 +13,11 @@ A blockchain prototype where miners do AI work (integer matrix multiplication) i
 
 Production status of every area, with evidence and blockers: [PRODUCTION.md](PRODUCTION.md). How rules change: [UPGRADES.md](UPGRADES.md). Design and known limitations: [DESIGN.md](DESIGN.md). Protocol specification: [SPEC.md](SPEC.md). HTTP API: [API.md](API.md). Security reviews and fixes: [SECURITY.md](SECURITY.md). Release notes: [CHANGELOG.md](CHANGELOG.md).
 
+## What's new in v0.17
+
+- **Money that neither inflates nor halves:** the 21M GRN supply is fixed and starts in the protocol's reserve; each block pays out a fixed fraction of what is left (a smooth curve, no halving cliffs), and half of every fee flows back in, so rewards never dry up and the supply never grows.
+- **Paid for work, not luck:** 80% of each block's reward goes to *shares*, tickets 32 times easier than a block, so every miner is paid in proportion to its work, block after block, without a pool. A block that loses a race still counts as a share.
+
 ## What's new in v0.16
 
 - **Reachable from home:** `--portmap` asks the router to forward the node's port (PCP, with NAT-PMP as a fallback), so nodes and compute providers behind a home router can be reached.
@@ -263,7 +268,7 @@ A multisig address can be an agent's guardian, so freezing the agent takes the a
 python -m green supply
 ```
 
-checks that every coin is accounted for: balances plus escrow plus bonds equal the sum of all block rewards, exactly. `GET /metrics` serves Prometheus metrics. Running a node as a service, its settings file, monitoring, backups and upgrades: [OPERATIONS.md](OPERATIONS.md). A Docker image: see the comments at the top of the [Dockerfile](Dockerfile).
+checks that every coin is accounted for: balances plus escrow, bonds and channel funds plus the reserve equal the fixed supply, exactly. `GET /metrics` serves Prometheus metrics. Running a node as a service, its settings file, monitoring, backups and upgrades: [OPERATIONS.md](OPERATIONS.md). A Docker image: see the comments at the top of the [Dockerfile](Dockerfile).
 
 ## Running a neural network on the network
 
@@ -315,7 +320,7 @@ To be reachable by other computers while keeping the API private, listen on all 
 python -m pytest -q tests
 ```
 
-241 tests: consensus, difficulty, guarded accounts, security regressions, addresses, the fee market, the state engine and storage (restarts, crashes, reorgs across base moves, a differential check against full copies), the state commitment, snapshots and fast sync, rule changes by version bits, signed releases, multisignature accounts, pruning, the transaction index and the light client, non-custodial pools, recovery phrases, Dandelion++ and compact blocks, compute channels and training, port mapping, transaction atomicity, the P2P protocol (encryption on the wire, identity pinning, relay, headers-first sync, and what happens to peers that lie or flood), the network (watchtowers, dispute answers and reorgs included), the GPU (if present), the WASM sandbox, both compute markets, neural-network inference and the autonomous agent. Two fuzz tests check conservation of money, the exact escrow of every job, the dispute backlog and transaction atomicity at every block, and every block any test builds checks its incremental state root against a full recomputation; mutation testing confirmed they catch injected accounting bugs. CI runs the suite on Linux, Windows and macOS ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
+249 tests: consensus, difficulty, guarded accounts, security regressions, addresses, the fee market, the state engine and storage (restarts, crashes, reorgs across base moves, a differential check against full copies), the state commitment, snapshots and fast sync, rule changes by version bits, signed releases, multisignature accounts, pruning, the transaction index and the light client, non-custodial pools, recovery phrases, Dandelion++ and compact blocks, compute channels and training, port mapping, the reserve and shares, transaction atomicity, the P2P protocol (encryption on the wire, identity pinning, relay, headers-first sync, and what happens to peers that lie or flood), the network (watchtowers, dispute answers and reorgs included), the GPU (if present), the WASM sandbox, both compute markets, neural-network inference and the autonomous agent. Two fuzz tests check conservation of money, the exact escrow of every job, the dispute backlog and transaction atomicity at every block, and every block any test builds checks its incremental state root against a full recomputation; mutation testing confirmed they catch injected accounting bugs. CI runs the suite on Linux, Windows and macOS ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
 ## Project layout
 

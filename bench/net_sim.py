@@ -75,6 +75,9 @@ def main():
     params.TARGET_BLOCK_SECONDS = 3
     params.INITIAL_TARGET = params.MAX_TARGET // 60
     params.ASERT_HALFLIFE = 60
+    # Every node checks every share (a work unit each). Eight nodes in one Python process with
+    # 3 s blocks would measure the process, not the network, so the simulation uses few shares.
+    params.SHARE_FACTOR = 4
     p2p.TRICKLE_MEAN_SECONDS = 0.2
     p2p.MAX_OUTBOUND = 4
     keys = [Key.generate() for _ in range(count)]

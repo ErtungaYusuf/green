@@ -19,7 +19,7 @@ from green.crypto import Key
 from green.node import Node, TooLarge, http_get, http_post
 from green.p2p import parse_address
 from green.tx import InvalidTx
-from helpers import (SALES, T0, add, challenge, commit, minted, mine, new_chain, post_job, respond, reveal,
+from helpers import (SALES, T0, add, challenge, commit, mine, minted, new_chain, post_job, respond, reveal, rewards,
                      settle_batch, supply, tx, unit_result)
 
 
@@ -108,8 +108,7 @@ def test_S3_cancel_cannot_dodge_payment():
     buyer_before, h0 = chain.state.balance(buyer.address), chain.height
     while not chain.state.jobs[job_id]["closed"]:
         add(chain, buyer)
-    rewards = sum(params.block_reward(h) for h in range(h0 + 1, chain.height + 1))
-    assert chain.state.balance(buyer.address) == buyer_before + 10**6 + rewards
+    assert chain.state.balance(buyer.address) == buyer_before + 10**6 + rewards(chain, buyer, h0 + 1)
     assert bid in chain.state.jobs[job_id]["batches"]
     settle_batch(chain, buyer, job_id, bid)
     assert chain.state.balance(miner.address) == miner_before + 10**6 + params.bond_for(10**6) - params.MIN_TX_FEE

@@ -63,10 +63,25 @@ DEPLOYMENTS: dict[str, dict] = {}
 # which new nodes can start from instead of replaying history (green/snapshot.py).
 SNAPSHOT_INTERVAL = 2880
 
-# 1.25 GRN per block, halving every 8.4M blocks (~4 years at 15 s blocks):
-# 2 * 1.25 * 8.4M = 21M GRN total, the same supply and pace as Bitcoin.
-INITIAL_REWARD = 125_000_000
-HALVING_INTERVAL = 8_400_000
+# Money (SPEC.md §3.5). The total supply is fixed: all of it sits in the protocol's
+# reserve at genesis, and coins only ever move between the reserve and accounts, so
+# the supply never grows (no inflation). Each block pays out reserve / EMISSION_DIVISOR:
+# a smooth curve with no halvings, ~1.25 GRN at first. Part of every fee flows back
+# into the reserve, so block rewards never dry up: once the reserve has been handed
+# out, miners are paid from what users pay, smoothed over years.
+TOTAL_SUPPLY = 21_000_000 * 100_000_000
+EMISSION_DIVISOR = 2 ** 24        # a block pays out 1/16,777,216 of the reserve
+FEE_RESERVE_PERCENT = 50          # of every block's fees, into the reserve (the rest to its miner)
+
+# Shares: tickets that meet SHARE_FACTOR times the block target (on headers mined on
+# one of the last SHARE_WINDOW blocks) are included in blocks and paid from the
+# reserve, so every miner is paid in proportion to its work, not all or nothing.
+SHARE_FACTOR = 32                 # shares are 32 times easier than blocks: ~32 per block (each costs
+                                  # every node a work unit to check, ~2% of a core at 15 s blocks)
+SHARES_PERCENT = 80               # of each block's emission, paid to shares (SHARE_FACTOR shares' worth)
+SHARE_INCLUSION_PERCENT = 5       # of each share's reward, to the block that includes it
+MAX_BLOCK_SHARES = 64
+SHARE_WINDOW = 32                 # a share is mined on one of the last 32 blocks
 
 MAX_BLOCK_TXS = 500
 # Serialized size of a block's transactions. Bounds what every node has to
@@ -191,11 +206,12 @@ def challenge_fee(fuel: int, program_bytes: int) -> int:
 assert adjudication_cost(MAX_TASK_FUEL, MAX_TASK_PROGRAM_BYTES) <= MAX_BLOCK_ADJUDICATION
 
 
-def block_reward(height: int) -> int:
-    halvings = height // HALVING_INTERVAL
-    if halvings >= 64:
-        return 0
-    return INITIAL_REWARD >> halvings
+def emission(reserve: int) -> tuple[int, int, int]:
+    """What a block whose parent holds `reserve` pays out: (the finder's part, the
+    reward per included share, the finder's cut of each share it includes)."""
+    e = reserve // EMISSION_DIVISOR
+    share = e * SHARES_PERCENT // 100 // SHARE_FACTOR
+    return e - SHARE_FACTOR * share, share, share * SHARE_INCLUSION_PERCENT // 100
 
 
 def bond_for(price: int) -> int:

@@ -16,7 +16,7 @@ from green.crypto import Key
 from green.node import Node, http_get, http_post
 from green.pool import Pool, PoolMiner
 from green.tx import InvalidTx, make_tx
-from helpers import T0, add, commit, grind, minted, new_chain, post_job, sell, supply, tx, unit_result
+from helpers import T0, add, commit, grind, minted, new_chain, post_job, reward, sell, supply, tx, unit_result
 
 
 def test_a_block_can_pay_several_miners_by_weight():
@@ -26,11 +26,12 @@ def test_a_block_can_pay_several_miners_by_weight():
     pay = tx(chain, alice, "transfer", to=bob.address, amount=1)
     header, chosen, _ = chain.build_template(payees, [pay], now=T0 + 10)
     block, _ = grind(chain, header, chosen)
-    bob_before = chain.state.balance(bob.address)
+    bob_before, parent = chain.state.balance(bob.address), chain.state
     assert chain.add_block(block) == "added"
-    total = params.block_reward(1) + pay["fee"]
+    total = reward(parent, pay["fee"])
     split = dict(payouts(payees, total))
-    assert sum(split.values()) == total and split[bob.address] >= 3 * split[carol.address]
+    # 3:1 up to rounding (the remainder of the division goes to the first payee by address)
+    assert sum(split.values()) == total and abs(split[bob.address] - 3 * split[carol.address]) <= 3
     assert chain.state.balance(carol.address) == split[carol.address]
     assert chain.state.balance(bob.address) == bob_before + 1 + split[bob.address]
     assert chain.state.root() == block["header"]["state_root"]

@@ -22,7 +22,7 @@ Version 0.7 replaced the network layer (plain HTTP) with an encrypted, authentic
 
 Version 0.8 added a way to change the rules without splitting the network, and signed releases (eighth review below).
 
-Version 0.9 added multisignature accounts (ninth review below). Version 0.10 added operator and developer tooling (tenth review below). Version 0.11 added pruned nodes (R1–R3 in the tenth review). Version 0.12 added a transaction index and a light client (L1–L2 in the tenth review). Version 0.13 added non-custodial pools (eleventh review below). Version 0.14 added recovery phrases, Dandelion++, compact blocks and pools that sell compute (twelfth review below). Version 0.15 added compute channels (thirteenth review below). Version 0.16 hardened them and added port mapping and fee bumping (fourteenth review below). All 241 tests pass; two of them are fuzz tests that check conservation of money at every block (one for jobs, one for tasks), and the jobs fuzz also checks every job's exact escrow, the network-wide dispute backlog, and that every rejected transaction leaves the state untouched.
+Version 0.9 added multisignature accounts (ninth review below). Version 0.10 added operator and developer tooling (tenth review below). Version 0.11 added pruned nodes (R1–R3 in the tenth review). Version 0.12 added a transaction index and a light client (L1–L2 in the tenth review). Version 0.13 added non-custodial pools (eleventh review below). Version 0.14 added recovery phrases, Dandelion++, compact blocks and pools that sell compute (twelfth review below). Version 0.15 added compute channels (thirteenth review below). Version 0.16 hardened them and added port mapping and fee bumping (fourteenth review below). Version 0.17 replaced the halving schedule with a fixed supply paid from a reserve, and added shares (fifteenth review below). All 249 tests pass; two of them are fuzz tests that check conservation of money at every block (one for jobs, one for tasks), and the jobs fuzz also checks every job's exact escrow, the network-wide dispute backlog, and that every rejected transaction leaves the state untouched.
 
 ## Fixed vulnerabilities
 
@@ -50,7 +50,7 @@ Version 0.9 added multisignature accounts (ninth review below). Version 0.10 add
 - **S19: Cheap checks first.** Data (blob) downloads happen only after a transaction passes the cheap checks (signature, balance, fee), so an invalid transaction cannot make a node download data.
 
 ### Economics / wallet
-- **S8: Emission schedule bug.** A calculation error minted 99% of the supply in ~8 months. Fix: block reward 1.25 GRN, halving every ~4 years, ~21M GRN in total (the same pace as Bitcoin). `test_emission_matches_bitcoin_schedule` checks it.
+- **S8: Emission schedule bug.** A calculation error minted 99% of the supply in ~8 months. Fix then: 1.25 GRN per block, halving every ~4 years. Since v0.17 the supply is fixed and paid out from a reserve at 1/2^24 per block, with the supply audit checking the total at every block (`test_emission_is_smooth_and_the_supply_never_grows`).
 - **Wallet encryption.** The secret key is now encrypted with a password (scrypt + AES-256-GCM). The unencrypted mode is only available with `--no-password` and an explicit warning.
 
 ## Integrity of the Proof of Useful Work
@@ -279,6 +279,20 @@ Residual risks: providers see the data they compute (no confidentiality, as in t
 - **F8: `is_private` misses carrier-grade NAT.** 100.64.0.0/10 is neither private nor global in Python's `ipaddress`; behind such a NAT the router's "external" address was advertised although unreachable. Fix: reachability checks use `is_global`. (`test_a_node_advertises_its_mapped_address[100.64.0.9]`, which failed before the fix.)
 
 Residual risks: port mapping changes the router's state (hence opt-in) and is tested against fake gateways only; fee bumping spends up to 0.1 GRN per transaction in a fee spike.
+
+## Fifteenth review: the reserve and shares (v0.17)
+
+- **E1: Supply.** Coins only move between the reserve and accounts; the audit checks `balances + locked + reserve == TOTAL_SUPPLY` at every block, and a fuzz-style test does it after random transfers and fees. (`test_the_supply_never_changes_and_half_of_every_fee_goes_back`.)
+- **E2: Stealing a share.** A share's seed covers every header field, the payout address included: changing the address changes the ticket. (Covered by the transcript check: `test_shares_that_break_the_rules_make_the_block_invalid`.)
+- **E3: Paying a share twice.** Included share ids are recorded for SHARE_WINDOW + 1 blocks, and a share is valid only within SHARE_WINDOW blocks of its own height, so it can never be included twice. (Same test: "already included".)
+- **E4: Precomputed or foreign shares.** A share must be mined on a block of the including block's own branch, at most 32 blocks back, with the target that block called for. (Same test: "not mined on this branch", "outside the window", "wrong target".)
+- **E5: Paying a block twice.** A block of the branch cannot be included as a share of that branch; a block of a losing branch can (its finder lost the race, and its work is honoured once). (Same test; `test_an_orphaned_block_becomes_a_share`.)
+- **E6: Finders leaving shares out.** If the finder received what the missing shares would have been paid, it would profit from censoring them. Fix: the finder's part is fixed; unclaimed share rewards stay in the reserve; each included share pays the finder 5% of it. (`test_shares_pay_their_miners_from_the_reserve` checks that the split is exact and independent of the number of shares.)
+- **E7: Fake shares as a denial of service.** Checking a share costs a work unit (~9 ms on one core). Fix: a node checks a share once, when it arrives; a share whose work does not check out gets the sender banned; blocks carry at most 64 shares, whose work units are checked in parallel during sync. (`test_shares_travel_the_network_and_fake_ones_get_the_sender_banned`.)
+- **E9: Stems overtaking their predecessor (liveness, since v0.14).** A transaction stemmed while its predecessor was still being announced could reach a node that had not seen the predecessor and die there, holding up every later transaction of the sender until the embargo (~20 s). Fix: a transaction follows its predecessor (the same stem, or an announcement), and future-nonce transactions are not marked rejected. (`test_a_transaction_does_not_overtake_its_predecessor_on_a_stem`, `test_a_future_nonce_is_not_marked_rejected`; `bench/net_sim.py` went from 0.3 s or 18-23 s at random to 0.3 s every time.)
+- **E8: A price-linked subsidy (considered and rejected).** Minting more when compute is expensive would let anyone who buys from itself set the price and collect new coins, and minting would raise the very prices it targets. Issuance does not depend on anything a participant reports.
+
+Residual risks: checking a block's ~32 shares costs ~0.3 s of one core in this Python implementation, so a full sync from genesis takes ~0.3 s per block beyond the block's own work (fast sync from a snapshot avoids it; a native or GPU node is needed at scale); the share window and factor are untested at internet scale.
 
 ## Still open (needed before production)
 

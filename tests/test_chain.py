@@ -5,7 +5,7 @@ from green import params, tx as txmod
 from green.chain import BlobStore, Chain, InvalidBlock, MissingData, block_hash, make_genesis, solve
 from green.crypto import Key, canonical, merkle_proof
 from green.tx import InvalidTx, make_tx
-from helpers import (SALES, T0, add, challenge, commit, grind, minted, mine, new_chain, post_job, respond, reveal, sell,
+from helpers import (SALES, T0, add, challenge, commit, grind, mine, minted, new_chain, post_job, respond, reveal, rewards, sell,
                      settle_batch, supply, tx, unit_result)
 
 FEE = params.MIN_TX_FEE
@@ -15,16 +15,18 @@ def test_genesis_pays_reward():
     alice = Key.generate()
     chain = new_chain(alice)
     assert chain.height == 0
-    assert chain.state.balance(alice.address) == params.block_reward(0)
+    assert chain.state.balance(alice.address) == params.emission(params.TOTAL_SUPPLY)[0]
+    assert chain.state.balance(alice.address) + chain.state.reserve == params.TOTAL_SUPPLY
 
 
 def test_transfer_and_rejections():
     alice, bob = Key.generate(), Key.generate()
     chain = new_chain(alice)
     t = tx(chain, alice, "transfer", to=bob.address, amount=params.YAPRAK_PER_COIN)
+    first = chain.state.balance(alice.address)
     add(chain, bob, [t])
-    assert chain.state.balance(bob.address) == params.YAPRAK_PER_COIN + params.block_reward(1) + FEE
-    assert chain.state.balance(alice.address) == params.block_reward(0) - params.YAPRAK_PER_COIN - FEE
+    assert chain.state.balance(bob.address) == params.YAPRAK_PER_COIN + rewards(chain, bob, 1)
+    assert chain.state.balance(alice.address) == first - params.YAPRAK_PER_COIN - FEE
 
     s = chain.state.copy()
     h = chain.height + 1
@@ -78,9 +80,8 @@ def test_job_batch_commit_reveal_settle_pays_miner():
     assert job["done"] == {"0,0,0": bid, "0,1,0": bid}
     assert job["delivered"][bid]["root"] == sale.root and job["delivered"][bid]["manifest"] == sale.manifest
     assert job["escrow"] == 0 and job["reserved"] == {} and job["batches"] == {}
-    # paid the price, got the bond back; its fees went to itself as the block producer
-    rewards = sum(params.block_reward(h) for h in range(h0 + 1, chain.height + 1))
-    assert chain.state.balance(miner.address) == before + 2000 + rewards
+    # paid the price, got the bond back; it paid two fees and, mining the blocks, got back their finder's part
+    assert chain.state.balance(miner.address) == before + 2000 + rewards(chain, miner, h0 + 1) - 2 * FEE
     assert supply(chain) == minted(chain)
 
 
@@ -469,7 +470,7 @@ def test_heaviest_chain_wins_and_state_follows():
     b2, _ = mine(chain, bob, t=T0 + 20, parent=b1_hash)
     chain.add_block(b2)
     assert chain.height == 2 and chain.main[1] == b1_hash
-    assert chain.state.balance(bob.address) == 7 + 2 * params.block_reward(1) + FEE
+    assert chain.state.balance(bob.address) == 7 + rewards(chain, bob, 1)
 
 
 def mine_at(chain, key, t):
@@ -516,11 +517,20 @@ def test_asert_matches_the_formula():
     assert asert(1, 0, 0, 0, 10**6, H) == 1
 
 
-def test_emission_matches_bitcoin_schedule():
-    total = sum(params.block_reward(h * params.HALVING_INTERVAL) * params.HALVING_INTERVAL for h in range(64))
-    assert 20_999_990 * params.YAPRAK_PER_COIN < total <= 21_000_000 * params.YAPRAK_PER_COIN
-    years = params.HALVING_INTERVAL * params.TARGET_BLOCK_SECONDS / (365.25 * 86400)
-    assert 3.9 < years < 4.1
+def test_emission_is_smooth_and_the_supply_never_grows():
+    """No halvings and no inflation: each block pays out a fixed fraction of the
+    reserve, so the reward falls smoothly and the coins paid out approach, but never
+    pass, the fixed supply (SPEC.md §3.5)."""
+    reserve, paid, rewards_seen = params.TOTAL_SUPPLY, 0, []
+    blocks_per_year = 365 * 86400 // params.TARGET_BLOCK_SECONDS
+    for year in range(30):
+        e = reserve // params.EMISSION_DIVISOR
+        rewards_seen.append(e)
+        out = int(reserve * (1 - (1 - 1 / params.EMISSION_DIVISOR) ** blocks_per_year))
+        reserve, paid = reserve - out, paid + out
+    assert 1.2 * params.YAPRAK_PER_COIN < rewards_seen[0] < 1.3 * params.YAPRAK_PER_COIN
+    assert all(b < a and b / a > 0.8 for a, b in zip(rewards_seen, rewards_seen[1:]))   # smooth: no halving cliffs
+    assert paid < params.TOTAL_SUPPLY and paid > 0.97 * params.TOTAL_SUPPLY             # ~97% paid out in 30 years
 
 
 def test_decoded_job_data_is_cached_within_a_bound():

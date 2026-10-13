@@ -2,7 +2,7 @@
 
 Where Green stands on every aspect a production cryptocurrency needs, what backs each claim, and what is still missing. "Done" means implemented, tested and measured in this repository; it does not mean audited, battle-tested or ready to carry real value. Nothing here is ready for real money until the items marked **blocker** are done.
 
-Status as of v0.16 (October 2026). 241 automated tests; fourteen internal security reviews (SECURITY.md).
+Status as of v0.17 (October 2026). 249 automated tests; fifteen internal security reviews (SECURITY.md).
 
 ## Summary
 
@@ -10,7 +10,7 @@ Status as of v0.16 (October 2026). 241 automated tests; fourteen internal securi
 |---|---|---|
 | 1. Consensus rules and specification | Done for a testnet | external review of SPEC.md |
 | 2. Proof of useful work | Done; custom digest unaudited | audit of the transcript digest |
-| 3. Difficulty and issuance | Done (ASERT, 21M cap, supply audit) | — |
+| 3. Difficulty and issuance | Done (ASERT, fixed 21M supply paid from a reserve, fee recycling, shares, supply audit) | — |
 | 4. Compute markets (matmul jobs, instant channels, WASM) | Done; optimistic, documented limits | data availability for manifests and WASM outputs |
 | 5. Accountability for autonomous agents | Done (guarded accounts) | — |
 | 6. State, storage, crash safety | Done (with a state commitment in every header) | — |
@@ -20,7 +20,7 @@ Status as of v0.16 (October 2026). 241 automated tests; fourteen internal securi
 | 10. Wallets and keys | Done for a testnet (recovery phrases, encrypted files, checksummed addresses, multisig) | hardware wallets, a registered coin type |
 | 11. APIs and developer tools | Done for a testnet (versioned API, fee estimates, long-poll, Python SDK) | SDKs in other languages, explorer API |
 | 12. Operations | Done for a testnet (config file, logs, systemd, metrics and alerts, runbook) | — |
-| 13. Testing and QA | Partial (241 tests, fuzz, mutation testing, 8-node simulation) | multi-node testnet, soak tests |
+| 13. Testing and QA | Partial (249 tests, fuzz, mutation testing, 8-node simulation) | multi-node testnet, soak tests |
 | 14. Security assurance | Partial (internal reviews only) | **blocker**: independent audit, bug bounty |
 | 15. Upgrades and governance | Done (version-bits activation, signed releases, published process) | reproducible builds |
 | 16. Privacy | Partial (transaction origin: Dandelion++; data and amounts public) | — (documented) |
@@ -48,7 +48,7 @@ Status as of v0.16 (October 2026). 241 automated tests; fourteen internal securi
 
 ## 3. Difficulty and issuance
 
-**Done.** Per-block ASERT difficulty since v0.6: in simulation with miners that come and go, the old windowed rule ran 37% slow and drifted 9.3 hours behind schedule in 6,000 blocks; ASERT held 15.0 s and zero drift (`bench/difficulty_sim.py`). Issuance: 1.25 GRN per block, halving every 8.4M blocks, cap 20,999,998.908 GRN. Every node can audit the supply (`grn supply`, `GET /supply`): balances plus escrow plus bonds must equal the sum of block rewards, exactly.
+**Done.** Per-block ASERT difficulty since v0.6: in simulation with miners that come and go, the old windowed rule ran 37% slow and drifted 9.3 hours behind schedule in 6,000 blocks; ASERT held 15.0 s and zero drift (`bench/difficulty_sim.py`). Issuance (v0.17): a fixed 21M GRN, all of it in the protocol's reserve at genesis; each block pays out 1/2^24 of the reserve (~1.25 GRN at first, a smooth curve with no halvings), half of all fees flow back in, and 80% of each block's emission pays shares (tickets 32 times easier than a block) so miners are paid in proportion to their work. Every node can audit the supply (`grn supply`, `GET /supply`): balances, escrow, bonds, channel funds and the reserve must add up to the fixed supply, exactly (`tests/test_economics.py`).
 
 **Evidence:** `test_asert_matches_the_formula`, `test_difficulty_follows_the_schedule_every_block`, `test_emission_matches_bitcoin_schedule`, the supply audit on a live node (`test_supply_audit_and_metrics_on_a_live_node`), and two fuzz tests that check conservation of money at every block.
 
@@ -178,7 +178,7 @@ Since v0.12: a transaction and address index kept consistent through reorgs (`/v
 
 ## 19. Economics and launch
 
-**Today:** fixed supply schedule with no premine (the genesis reward is the only coinbase not mined in competition, 1.25 GRN), fees to miners, data fees against storage spam, bonds and forfeits in both markets.
+**Today:** a fixed supply with no premine (the genesis block's reward is the only one not mined in competition, ~0.25 GRN), paid out from the reserve with no halvings and no inflation, half of every fee recycled into the reserve, data fees against storage spam, bonds and forfeits in both markets.
 
 **Missing:** a fair-launch plan (announced genesis date, open-source release beforehand, no founder allocation); a public testnet run long enough to observe fees, delivery and disputes under real use; economic modeling of miner incentives when compute demand is low or bursty.
 

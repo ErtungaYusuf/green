@@ -13,3 +13,7 @@ def easy_target(monkeypatch):
     # Every ticket wins, so tests do not have to grind. Tests that need real
     # difficulty set their own target.
     monkeypatch.setattr(params, "INITIAL_TARGET", params.MAX_TARGET)
+    # Where every ticket is a block no ticket can be a share, so the shares' part of
+    # each block's emission would just stay in the reserve: the finder gets it all.
+    # Tests of the share economy set SHARES_PERCENT (and a real target) themselves.
+    monkeypatch.setattr(params, "SHARES_PERCENT", 0)

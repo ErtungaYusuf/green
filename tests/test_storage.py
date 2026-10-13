@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from green import chain as chainmod, params
-from green.chain import BlobStore, Chain, InvalidBlock, block_hash, make_genesis
+from green.chain import BlobStore, Chain, InvalidBlock, block_hash, initial_state, make_genesis
 from green.crypto import Key
 from green.node import Node
 from green.state import State
@@ -28,7 +28,7 @@ def short_windows(monkeypatch):
 
 def reference(chain: Chain) -> State:
     """The main chain replayed from genesis with full, flat copies (the v0.4 way)."""
-    s = chain.apply_block(State(), chain.block(chain.genesis_hash)).flattened()
+    s = chain.apply_block(initial_state(), chain.block(chain.genesis_hash)).flattened()
     for bh in chain.main[1:]:
         s = chain.apply_block(s, chain.block(bh)).flattened()
     return s

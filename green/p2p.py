@@ -73,13 +73,13 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF, HKDFExpand
 
 from . import params, snapshot, tx as txmod
-from .chain import MAX_JOB_BLOB, InvalidBlock, MissingData, block_hash, target_of, work_for_target
+from .chain import MAX_JOB_BLOB, InvalidBlock, MissingData, block_hash, share_id, target_of, work_for_target
 from .crypto import address_of, canonical, hhex, is_hex, merkle_root
 from .crypto import verify as crypto_verify
 from .tx import InvalidTx
 
 PROTOCOL_VERSION = 1
-AGENT = "green/0.16.0"
+AGENT = "green/0.17.0"
 
 MAX_OUTBOUND = 8               # outbound connections the node keeps
 BLOCK_RELAY_ONLY = 2           # ...of which relay blocks only
@@ -132,11 +132,11 @@ OFFER_TTL = 3600               # an offer older than this is dropped; providers 
 OFFER_MIN_BALANCE = 10_000_000  # yaprak a provider must hold for its offer to be relayed (0.1 GRN)
 OFFERS_PER_MESSAGE = 100
 OFFER_RATE = 0.2               # offers accepted per second per peer, after a burst of MAX_OFFERS
-FEATURES = ["dtx", "cmpct", "offers"]   # optional messages this node understands
+FEATURES = ["dtx", "cmpct", "offers", "shares"]   # optional messages this node understands
 
 CMDS = ["version", "ping", "pong", "getaddr", "addr", "inv", "getdata", "notfound", "tx", "block",
         "getheaders", "headers", "getblob", "blob", "noblob", "getmempool", "getsnapinfo", "snapinfo",
-        "dtx", "cmpct", "getblocktxn", "blocktxn", "offers"]
+        "dtx", "cmpct", "getblocktxn", "blocktxn", "offers", "share"]
 CODE = {name: i + 1 for i, name in enumerate(CMDS)}
 NAME = {i: name for name, i in CODE.items()}
 
@@ -1186,6 +1186,26 @@ class P2P:
             with p.lock:
                 p.trickle.append(tid)
 
+    def announce_share(self, sid: str, share: dict, source: Peer | None = None) -> None:
+        """Shares are small and few (about SHARE_FACTOR per block): sent whole to peers
+        that speak them and have not seen them."""
+        for p in self.all_peers():
+            if p is not source and "shares" in p.features and sid not in p.known:
+                p.known.add(sid)
+                p.send("share", {"share": share})
+
+    def _on_share(self, peer: Peer, m: dict) -> None:
+        share = m["share"]
+        try:
+            sid = share_id(share)
+        except (TypeError, ValueError):
+            raise Misbehaving(20, "unencodable share") from None
+        peer.known.add(sid)
+        try:
+            self.node.submit_share(share, source=peer)
+        except InvalidBlock as e:                    # its work unit does not check out: a lie
+            raise Misbehaving(BAN_SCORE, f"sent a fake share ({e})") from None
+
     def announce_block(self, bh: str, source: Peer | None = None) -> None:
         """Peers that speak compact blocks get the block at once as its header and
         short transaction ids; the others get an inv and fetch it."""
@@ -1215,10 +1235,16 @@ class P2P:
                 ids.append(short_id(key, tid))
             else:
                 fill.append([i, t])
-        return {"header": block["header"], "salt": salt, "ids": ids, "fill": fill}
+        out = {"header": block["header"], "salt": salt, "ids": ids, "fill": fill}
+        if block.get("shares"):
+            out["shares"] = block["shares"]          # few and small: sent whole
+        return out
 
     def _on_cmpct(self, peer: Peer, m: dict) -> None:
         hdr, salt, ids, fill = m["header"], m["salt"], m["ids"], m["fill"]
+        shares = m.get("shares", [])
+        if not isinstance(shares, list) or len(shares) > params.MAX_BLOCK_SHARES:
+            raise Misbehaving(20, "malformed compact block")
         if not (isinstance(hdr, dict) and is_hex(salt, 16) and isinstance(ids, list) and isinstance(fill, list)
                 and len(ids) + len(fill) <= params.MAX_BLOCK_TXS
                 and all(is_hex(s, 2 * SHORT_ID_BYTES) for s in ids)):
@@ -1264,16 +1290,17 @@ class P2P:
                     missing.append(i)
         if missing:
             with self.node.lock:
-                self.partial[bh] = {"header": hdr, "txs": txs, "missing": missing, "peer": peer,
+                self.partial[bh] = {"header": hdr, "txs": txs, "shares": shares, "missing": missing, "peer": peer,
                                     "time": time.time()}
             self.stats["cmpct_txs_requested"] += len(missing)
             peer.send("getblocktxn", {"block": bh, "idx": missing})
             return
-        self._complete(bh, hdr, txs, peer)
+        self._complete(bh, hdr, txs, peer, shares)
 
-    def _complete(self, bh: str, hdr: dict, txs: list, peer: Peer) -> None:
+    def _complete(self, bh: str, hdr: dict, txs: list, peer: Peer, shares: list = ()) -> None:
         try:
-            ok = merkle_root([txmod.txid(t) for t in txs]) == hdr.get("tx_root")
+            ok = (merkle_root([txmod.txid(t) for t in txs]) == hdr.get("tx_root")
+                  and merkle_root([share_id(sh) for sh in shares]) == hdr.get("shares_root"))
         except (TypeError, ValueError, KeyError):
             ok = False
         if not ok:
@@ -1286,7 +1313,7 @@ class P2P:
             peer.send("getdata", {"items": [["block", bh]]})
             return
         self.stats["cmpct_rebuilt"] += 1
-        self._submit({"header": hdr, "txs": txs}, peer)
+        self._submit({"header": hdr, "txs": txs, **({"shares": list(shares)} if shares else {})}, peer)
 
     def _on_getblocktxn(self, peer: Peer, m: dict) -> None:
         bh, idx = m["block"], m["idx"]
@@ -1311,7 +1338,7 @@ class P2P:
         txs = p["txs"]
         for i, t in zip(p["missing"], got):
             txs[i] = t
-        self._complete(bh, p["header"], txs, peer)
+        self._complete(bh, p["header"], txs, peer, p["shares"])
 
     # -- compute offers: providers advertise, every node lists them --
 
@@ -1437,6 +1464,8 @@ class P2P:
             return
         try:
             self.node.submit_tx(t, source=peer, stem=True)
+        except txmod.FutureNonce:
+            pass                                     # its predecessor has not reached us yet
         except (InvalidTx, MissingData):
             self.rejected.add(tid)                   # policy can differ between nodes: no penalty
 
@@ -1558,6 +1587,9 @@ class P2P:
         peer.last_tx = time.time()
         try:
             self.node.submit_tx(t, source=peer)
+        except txmod.FutureNonce:
+            pass                                     # not "rejected": once its predecessor arrives, the
+                                                     # next announcement of it is fetched again
         except (InvalidTx, MissingData):
             self.rejected.add(tid)                   # policy can differ between nodes: no penalty
 
@@ -1940,6 +1972,11 @@ class P2P:
                 self.stats["prechecked"] += 1
         except (MissingData, InvalidBlock, InvalidTx):
             pass                                     # add_block will fetch the data or reject it
+        for sh in block.get("shares", []):           # the shares' work units too, in parallel
+            try:
+                self.chain.check_share_work(sh)
+            except (MissingData, InvalidBlock, InvalidTx, TypeError, KeyError, ValueError):
+                pass
 
     def _drop_branch(self, bh: str) -> None:
         """Forget a header whose block failed, and every header built on it."""

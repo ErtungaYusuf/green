@@ -81,6 +81,10 @@ class InvalidTx(Exception):
     pass
 
 
+class FutureNonce(InvalidTx):
+    """The sender has an earlier transaction this node has not seen yet: valid later, perhaps."""
+
+
 def txid(tx: dict) -> str:
     return hhex(canonical(tx))
 

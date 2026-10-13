@@ -7,7 +7,7 @@ from green import params, tx as txmod
 from green.chain import payouts
 from green.crypto import Key
 from green.tx import InvalidTx
-from helpers import add, minted, new_chain, supply, tx
+from helpers import add, minted, new_chain, rewards, supply, tx
 
 
 def open_channel(chain, buyer, provider, amount=1_000_000, blocks=None):
@@ -91,7 +91,7 @@ def test_the_rest_returns_to_the_buyer_at_expiry(monkeypatch):
     rewards_before = chain.state.balance(buyer.address)
     add(chain, buyer)                                            # the block after expiry ends it
     assert cid not in chain.state.channels
-    assert chain.state.balance(buyer.address) == rewards_before + params.block_reward(chain.height) + 750_000
+    assert chain.state.balance(buyer.address) == rewards_before + rewards(chain, buyer, chain.height) + 750_000
     rejected(chain, claim(chain, provider, cid, 400_000, buyer), "unknown or ended")
     assert supply(chain) == minted(chain)
 
@@ -117,8 +117,8 @@ def test_a_provider_can_close_a_channel_early(monkeypatch):
     before = chain.state.balance(buyer.address)
     add(chain, buyer, [claim(chain, provider, cid, 300_000, buyer, close=True)])
     assert cid not in chain.state.channels                       # the rest came back at once
-    # (the buyer also mined that block: its reward and the claim's fee)
-    assert chain.state.balance(buyer.address) == before + 700_000 + params.block_reward(chain.height) + params.MIN_TX_FEE
+    # (the buyer also mined that block: its reward and its part of the claim's fee)
+    assert chain.state.balance(buyer.address) == before + 700_000 + rewards(chain, buyer, chain.height)
     assert chain.state.balance(provider.address) == 300_000 - params.MIN_TX_FEE
     while chain.height <= expires:                               # the expiry event finds nothing to refund
         add(chain, buyer)
