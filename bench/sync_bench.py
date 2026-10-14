@@ -2,7 +2,11 @@
 units checked in parallel) versus fast sync (a verified snapshot, then only the
 blocks after it), over the real P2P protocol on this machine.
 
-    python bench/sync_bench.py [blocks]
+    python bench/sync_bench.py [blocks] [shares per block] [--threads]
+
+Since v0.17 a block carries shares (about SHARE_FACTOR of them), each a work unit
+every syncing node checks: with shares the work dominates a full sync, and the
+node checks it in worker processes (green/verify.py). --threads keeps it in threads.
 """
 
 import os
@@ -29,8 +33,19 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-def build(chain, keys, blocks):
-    """Blocks with a few transfers each, mined at the easiest target."""
+def make_shares(chain, keys, h, count):
+    """Shares for the next block: headers mined on the tip by other miners (with the easiest
+    target a header's ticket meets any share target, like an orphaned block's)."""
+    out = []
+    for i in range(count):
+        header, chosen, _ = chain.build_template(keys[(h + i) % len(keys)].address, [], now=T0 + 15 * h + 1 + i)
+        header["transcript"], _, _ = solve(header, chain.blobs)
+        out.append(header)
+    return out
+
+
+def build(chain, keys, blocks, shares=0):
+    """Blocks with a few transfers (and `shares` shares) each, mined at the easiest target."""
     for h in range(1, blocks + 1):
         sender = keys[h % len(keys)] if h > len(keys) else keys[0]
         txs = []
@@ -38,29 +53,36 @@ def build(chain, keys, blocks):
             nonce = chain.state.nonce(sender.address)
             txs = [make_tx(sender, chain.chain_id, "transfer", nonce + i, to=keys[(h + i + 1) % len(keys)].address,
                            amount=1) for i in range(3)]
-        header, chosen, _ = chain.build_template(keys[h % len(keys)].address, txs, now=T0 + 15 * h)
+        sh = make_shares(chain, keys, h, shares) if shares and h > 1 else []
+        header, chosen, _ = chain.build_template(keys[h % len(keys)].address, txs, now=T0 + 15 * h, shares=sh)
         while True:
             header["transcript"], ticket, _ = solve(header, chain.blobs)
             if ticket <= int(header["target"], 16):
                 break
             header["nonce"] += 1
-        assert chain.add_block({"header": header, "txs": chosen}) == "added"
+        assert chain.add_block({"header": header, "txs": chosen, **({"shares": sh} if sh else {})}) == "added"
 
 
-def timed_sync(data, genesis, source, fast):
-    node = Node(data, genesis, port=free_port(), log=lambda m: None, peers=[source.p2p.address], fast_sync=fast)
+def timed_sync(data, genesis, source, fast, processes=True):
+    node = Node(data, genesis, port=free_port(), log=lambda m: None, peers=[source.p2p.address], fast_sync=fast,
+                verify_processes=processes)
     started = time.perf_counter()
     node.start()
     while node.chain.tip != source.chain.tip:
         time.sleep(0.02)
     took = time.perf_counter() - started
     replayed = node.chain.height - node.chain.first_block + 1
+    st = node.p2p.stats
+    print(f"  (blocks checked ahead: {st['prechecked']} in threads, {st['checked_in_processes']} in processes)")
     node.stop()
     return took, replayed
 
 
 def main():
-    blocks = int(sys.argv[1]) if len(sys.argv) > 1 else 600
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    blocks = int(args[0]) if args else 600
+    shares = int(args[1]) if len(args) > 1 else 0
+    processes = "--threads" not in sys.argv
     params.INITIAL_TARGET = params.MAX_TARGET
     params.ASERT_HALFLIFE = 10**9
     params.SNAPSHOT_INTERVAL = 100
@@ -70,12 +92,12 @@ def main():
     try:
         source = Node(os.path.join(tmp, "source"), genesis, port=free_port(), log=lambda m: None)
         t = time.perf_counter()
-        build(source.chain, keys, blocks)
-        print(f"built {blocks} blocks in {time.perf_counter() - t:.1f} s; snapshots at "
+        build(source.chain, keys, blocks, shares)
+        print(f"built {blocks} blocks ({shares} shares each) in {time.perf_counter() - t:.1f} s; snapshots at "
               f"{[s['height'] for s in source.snapshots]}")
         source.start()
         for fast in (False, True):
-            took, replayed = timed_sync(os.path.join(tmp, f"fresh{int(fast)}"), genesis, source, fast)
+            took, replayed = timed_sync(os.path.join(tmp, f"fresh{int(fast)}"), genesis, source, fast, processes)
             print(f"{'fast sync' if fast else 'full sync'}: {took:.2f} s, {replayed} blocks re-executed, "
                   f"{blocks / took:.0f} blocks/s overall")
         source.stop()

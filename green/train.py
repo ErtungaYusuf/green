@@ -21,6 +21,8 @@ internet a step then costs 2 round trips per layer instead of 3.
 
 import numpy as np
 
+from . import work
+
 # 5x7 bitmaps of the digits 0-9, for a small dataset that needs no download.
 FONT = [
     "01110100011001110101110011000101110", "00100011000010000100001000010001110",
@@ -34,7 +36,7 @@ SIDE = 16                          # images are SIDE x SIDE
 
 def local_matmul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """The exact int8 product on this machine (float64 is exact for these sums)."""
-    return (a.astype(np.float64) @ b.astype(np.float64)).astype(np.int64)
+    return work.blas_matmul(a, b, np.int64)
 
 
 def digits(n: int, seed: int = 0, noise: float = 0.35) -> tuple[np.ndarray, np.ndarray]:

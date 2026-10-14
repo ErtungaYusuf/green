@@ -135,14 +135,13 @@ A block is `{"header": header, "txs": [...]}`. The header has exactly these fiel
 1. Inputs: for filler work, `A = prg(seed, "fillA", N²)` and `B = prg(seed, "fillB", N²)` read as int8, row-major. For job work, `A` is block `(i, l)` and `B` block `(l, j)` of the job's matrices.
 2. Noise: `t(label, r, c) = (prg(seed, label, r·c) mod 3) − 1` reshaped row-major. `U = t("U", N, R)`, `V = t("V", R, N)`, `U' = t("Uf", N, R)`, `V' = t("Vf", R, N)`. `A1 = A + U·V`, `B1 = B + U'·V'` (exact integers).
 3. Products: for every `(i, l, j)` in `T³` in row-major order, the tile product `P = A1[i, l] · B1[l, j]` (BLOCK×BLOCK). Flatten all products in order `(i, l, j, r, c)` into a sequence of int32 values `v_0, v_1, ...`.
-4. Digest: for each index `k`, with all arithmetic mod 2^32 and `rotl` a 32-bit left rotation:
+4. Digest (since v0.18): for each index `k`, with all arithmetic mod 2^32 (lowbias32 of the value XOR its position):
    ```
-   x = v_k (as uint32) * 0xCC9E2D51;  x = rotl(x, 15) * 0x1B873593
-   y = (k * 0x9E3779B9) XOR x;        y = rotl(y, 13) * 5 + 0xE6546B64
-   y ^= y >> 16;  y *= 0x85EBCA6B;  y ^= y >> 13;  y *= 0xC2B2AE35;  y ^= y >> 16
+   y = v_k (as uint32) XOR (k * 0x9E3779B9)
+   y ^= y >> 16;  y *= 0x7FEB352D;  y ^= y >> 15;  y *= 0x846CA68B;  y ^= y >> 16
    lane[k mod 8] ^= y
    ```
-   `transcript = hex(lane_0 ‖ ... ‖ lane_7)`, each lane uint32 little-endian.
+   `transcript = hex(lane_0 ‖ ... ‖ lane_7)`, each lane uint32 little-endian, all lanes starting at 0. XOR is order-independent, so an implementation may compute the products and fold them in any order (the reference computes, for each `l`, all `(i, j)` products at once as `A1[:, l] · B1[l, :]`, and the GPU in parallel). Test vector: for filler work with `seed = 0x07` repeated 32 times, `transcript = 22f044a7ddbf20f469bd9cdec7aad9723b48abc62bbbd2b7e58a6cafbfd87a2e`. Before v0.18 the mix was MurmurHash3-style (`x = rotl(v·0xCC9E2D51, 15)·0x1B873593; y = rotl((k·0x9E3779B9) XOR x, 13)·5 + 0xE6546B64`, then the fmix32 finalizer).
 5. `ticket = int_BE(H(seed ‖ bytes(transcript)))`. The block is valid only if `transcript` matches the recomputation and `ticket <= target`.
 
 ### 5.3 Difficulty and fork choice

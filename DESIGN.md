@@ -129,9 +129,9 @@ The lottery (every unit is a ticket) and delivery (batched commit-reveal) are se
 
 Matrix multiplication is what GPUs do best, but a naive speedup does not help. The transcript that PoUW hashes is proportional to the multiplication work (`UNIT³/BLOCK`), so **the hashing must happen on the GPU too**. Otherwise moving the 2 MB transcript to the CPU for every nonce slows everything down (measured: ~1.2×).
 
-The solution is a transcript digest that gives bit-identical results on CPU and GPU and parallelizes well: a u32 function with MurmurHash3-style per-element nonlinear mixing and order-independent XOR, 256 bits wide. The GPU kernel computes each tile-product element, mixes it and accumulates it with a workgroup-local atomic XOR; only a 32-byte digest goes back to the node, and the 2 MB never crosses PCIe. The useful result is just `a1@b1`, which the CPU gets cheaply from BLAS.
+The solution is a transcript digest that gives bit-identical results on CPU and GPU and parallelizes well: a u32 function with per-element nonlinear mixing (lowbias32 of the value XOR its position, since v0.18; MurmurHash3-style before) and order-independent XOR, 256 bits wide. Order independence also lets the CPU compute the products one column block at a time (`A1[:, l] · B1[l, :]` holds every tile pair of one `l`) and digest each block while it is still in cache, never holding the 2 MB stream. The GPU kernel computes each tile-product element, mixes it and accumulates it with a workgroup-local atomic XOR; only a 32-byte digest goes back to the node, and the 2 MB never crosses PCIe. The useful result is just `a1@b1`, which the CPU gets cheaply from BLAS.
 
-Measured (AMD RX 9070 XT, WebGPU/Vulkan): CPU ~50–115 units/s, GPU ~600–820 units/s, **~12–17×** depending on hardware and bottleneck. The remaining bottleneck is CPU-side noise generation (SHAKE) and per-nonce wgpu call overhead; generating the noise on the GPU and batching nonces would give more (future work).
+Measured (AMD RX 9070 XT, WebGPU/Vulkan): CPU ~50–115 units/s, GPU ~600–820 units/s, **~12–17×** depending on hardware and bottleneck. Since v0.18 one CPU core does ~480 units/s (products in cache, one BLAS thread) and the GPU ~1,250–1,300, so the gap is now ~2.7× per core. The remaining bottleneck is CPU-side noise generation (SHAKE) and per-nonce wgpu call overhead; generating the noise on the GPU and batching nonces would give more (future work).
 
 **Safety:** a GPU that produced a different result would spend its work on blocks every other node rejects. So the node checks the GPU bit-for-bit against the CPU at startup and falls back to the CPU on any mismatch. The security analysis of using a custom transcript digest instead of BLAKE2b is in [SECURITY.md](SECURITY.md).
 
@@ -185,7 +185,7 @@ Real confidentiality needs secure hardware (the confidential-computing mode of d
 
 ## 10. Known limitations (prototype)
 
-- Python reference implementation: CPU + numpy and a single GPU kernel. The GPU miner reaches ~700 units/s, a small fraction of the card's int8 peak; a native miner is needed.
+- Python reference implementation: CPU + numpy and a single GPU kernel. The GPU miner reaches ~1,300 units/s, a small fraction of the card's int8 peak; a native miner is needed.
 - The base state is held in memory (one copy; a disk-backed base loaded on demand is future work) and so is the main-chain hash index.
 - The transcript digest is an analyzed custom function, not an audited hash (§6, SECURITY.md).
 - Matmul delivery and WASM tasks are optimistic: they assume the buyer or a watchtower is online during the challenge window (§4.3, §7). Withholding a whole manifest costs the buyer dispute fees (§4.3).

@@ -2,6 +2,27 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## 0.18.0
+
+**Work units 4× faster**
+- The transcript digest mixes each value with lowbias32 (two xorshift-multiply rounds) instead of the MurmurHash3-style mix: lower measured avalanche bias, half the operations. This is the consensus change of this release, pinned by a test vector (SPEC.md §5.2).
+- The tile products are computed one column block at a time (`A1[:, l] · B1[l, :]` holds every tile pair of one `l`: 8 BLAS calls instead of 512 tiny products), in float32, and each block is digested while it is still in cache, so the 2 MB transcript is never held in memory. float32 is exact for tile products (at most 819,200 < 2^24, 20× headroom, asserted when `green.work` loads); v0.7 rejected it for the whole product, which has under 3×.
+- Mining and checking skip A·B; the deliverable comes straight from the BLAS when it is needed.
+- One BLAS thread by default (`green/__init__.py`, before numpy loads; an operator's OPENBLAS_NUM_THREADS etc. wins): a BLAS thread per core made each unit slower and serialized the node's threads. Large products (providers, training) are split into row or column blocks computed on every core in threads instead (`work.blas_matmul`): 4096³ in 1.06 s against 1.13 s with a BLAS thread per core, a 63×4096×4096 product in 29 ms. Buyers check a 2048³ product in 32–36 ms instead of 52–61 (`bench/compute_bench.py`, interleaved with v0.17); a 300-step training run takes 1.8–2.0 s instead of 2.1–2.4.
+- Measured on one core (v0.17 and v0.18 interleaved, best of several runs): mining or checking a unit 8.4 → 2.1 ms (4.1×), a unit with its product 8.4 → 3.0 ms, across 8 threads 4.0 → 0.75 ms per unit. The GPU miner makes its noise in float32 too: ~700 → ~1,280 tickets/s on an RX 9070 XT.
+
+**New nodes catch up 9× faster**
+- Since v0.17 a block carries ~32 shares, each a work unit every syncing node checks. When 32 or more downloaded blocks wait to be connected, a pool of worker processes (green/verify.py: at most 8, each with one BLAS thread, stopped after 30 s idle) recomputes the transcripts of the blocks and their shares; the node alone decides what counts as checked. Threads could not do this: the interpreter lock caps them, and the 2 MB transcript made even separate processes run each unit 3× slower once 8 ran at once (memory bandwidth). The new unit's working set, about 1.5 MB, stays in a core's cache: 8 processes check a unit every ~0.45 ms.
+- `bench/sync_bench.py [blocks] [shares per block] [--threads]`. 300 blocks with 32 shares each: full sync 66.1 → 7.2 s (9.2×), fast sync 44.1 → 5.2 s (8.5×), building them 376 → 123 s. 600 blocks without shares: full sync 6.3–6.8 → 3.1–3.3 s, fast sync 2.2 → 1.5–1.7 s, building them 23 → 6.8 s.
+
+**Also**
+- Every verified share goes through one bounded cache (a node's own shares were added without the bound).
+- Two fetches of one blob from the same peer at once (the buyer's watchtower and its API client asking for one result) made the second give up on that peer, so a node with one peer answered 404. The second now waits for the first one's answer. (A full test run failed once with such a 404 after blocks got faster; this race is the likely cause, shown by a test that fails without the fix, though that run was not reproduced.)
+- Found by a full test run, present since v0.16: a provider refusing a product from its headers hung up while the body (sent after the headers) was still arriving; the reset that a closed socket answers with can discard, on Windows, the refusal the buyer had not read yet, so a buyer whose channel the provider's node had not seen yet got "connection aborted" instead of a 404 to retry. The provider now drains and drops the body (at most the largest valid body, for at most 10 s) before hanging up; it still answers before reading a byte of it.
+- Moving the reorg base keeps its states in one height-ordered pass instead of walking each state's ancestry (O(window log window) instead of O(window²) per block).
+- `bench/compute_bench.py` funded its buyer from the genesis reward, which v0.17 cut to a fifth (the rest pays shares), and failed with a 400 since; it now turns shares off like the tests.
+- Sixteenth security review (SECURITY.md, G1–G6). 257 tests. Consensus change (the transcript digest): v0.17 nodes reject v0.18 blocks.
+
 ## 0.17.0
 
 **Money: no halvings, no inflation**

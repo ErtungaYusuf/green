@@ -177,8 +177,7 @@ def solve(header: dict, blobs: BlobStore):
     """
     seed = seed_of(header)
     a, b = work_inputs(header, seed, blobs)
-    transcript, c = work.compute_unit(a, b, seed)
-    useful = c if header["work"]["job"] is not None else None
+    transcript, useful = work.compute_unit(a, b, seed, product=header["work"]["job"] is not None)
     return transcript, work.ticket_value(seed, transcript), useful
 
 
@@ -541,7 +540,7 @@ class Chain:
         if hdr["work"]["job"] is not None:
             job_size = txmod.job_blob_size(parent_state.jobs[hdr["work"]["job"]]["dims"])
         a, b = work_inputs(hdr, seed, self.blobs, job_size)
-        transcript, _ = work.compute_unit(a, b, seed)
+        transcript, _ = work.compute_unit(a, b, seed, product=False)
         if transcript != hdr["transcript"]:
             raise InvalidBlock("transcript does not match the work")
         if work.ticket_value(seed, transcript) > target_of(hdr):
@@ -588,7 +587,7 @@ class Chain:
         """
         seed = seed_of(hdr)
         a, b = work_inputs(hdr, seed, self.blobs, MAX_JOB_BLOB)
-        return work.compute_unit(a, b, seed)[0]
+        return work.compute_unit(a, b, seed, product=False)[0]
 
     def share_problem(self, share, parent_hash: str, seen=()) -> str | None:
         """Why a block built on `parent_hash` may not include `share` (None if it may),
@@ -630,11 +629,15 @@ class Chain:
             return
         seed = seed_of(share)
         a, b = work_inputs(share, seed, self.blobs, job_size)
-        transcript, _ = work.compute_unit(a, b, seed)
+        transcript, _ = work.compute_unit(a, b, seed, product=False)
         if transcript != share["transcript"]:
             raise InvalidBlock("share transcript does not match its work")
         if work.ticket_value(seed, transcript) > self.share_target(share):
             raise InvalidBlock("share ticket does not meet the share target")
+        self.share_verified(sid)
+
+    def share_verified(self, sid: str) -> None:
+        """Remember that a share's work unit checked out (a bounded cache)."""
         if len(self.verified_shares) > MAX_CACHE:
             self.verified_shares.clear()
         self.verified_shares.add(sid)
@@ -1331,15 +1334,19 @@ class Chain:
         # Keep a state only if its whole ancestry stays above the new base. The rest
         # are merged into the base, or belong to forks that left the main chain too
         # deep to ever be accepted (their parents' layers are now merged away).
-        above = {id(v) for k, v in self.states.items() if self.meta[k]["height"] > target}
+        # One pass, parents before children (a parent is one block lower): a state is
+        # kept when its parent is the base or a kept state. (Walking every state's
+        # ancestry instead cost O(window^2) per block.)
         kept, dropped = {}, []
-        for k, st in self.states.items():
-            cur = st
-            while cur is not base and cur is not None and id(cur) in above:
-                cur = cur.parent
-            if cur is base and self.meta[k]["height"] > target:
+        good = {id(base)}
+        for k in sorted(self.states, key=lambda k: self.meta[k]["height"]):
+            if self.meta[k]["height"] <= target:
+                continue                         # merged into the base, or a fork below it
+            st = self.states[k]
+            if id(st.parent) in good:
+                good.add(id(st))
                 kept[k] = st
-            elif self.meta[k]["height"] > target:
+            else:
                 dropped.append(k)
         self.base_hash, self.base_height = self.main[target], target
         kept[self.base_hash] = base

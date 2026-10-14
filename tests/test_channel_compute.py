@@ -149,6 +149,26 @@ def test_providers_extend_only_limited_credit(market, monkeypatch):
     assert books["vouched"] == 2 * price and books["owed"] == 3 * price
 
 
+def test_a_refusal_reaches_the_client_whose_body_comes_later(market):
+    """A provider refuses a product from its headers and never keeps the body. HTTP
+    clients send the body after the headers (http.client: a second send), so it can
+    arrive after the provider has answered and hung up; a closed socket answers it with
+    a reset, which on Windows discards the answer the client has not read yet (seen as
+    WinError 10053 in a test). The answer must arrive anyway."""
+    node, buyer, provider = market
+    p = provider()
+    for m, k, n in ((2, 2, 2), (256, 512, 256)):                # 8 bytes and 256 KiB
+        body = bytes(m * k + k * n)
+        with socket.create_connection(("127.0.0.1", p.port), timeout=10) as s:
+            s.sendall(f"POST /matmul HTTP/1.1\r\nHost: x\r\nX-Channel: {'ab' * 32}\r\nX-Shape: {m},{k},{n}\r\n"
+                      f"Content-Length: {len(body)}\r\n\r\n".encode())
+            time.sleep(0.3)                                     # the provider answers from the headers
+            s.sendall(body)
+            time.sleep(0.3)                                     # and the client reads late
+            answer = s.makefile("rb").read()
+        assert answer.startswith(b"HTTP/1.1 404 ") and b'"error"' in answer   # no such channel
+
+
 def test_a_buyer_finds_providers_on_the_network_and_trains(tmp_path, monkeypatch):
     monkeypatch.setattr(compute, "OFFER_RETRY", 0.5)
     buyer, miner = Key.generate(), Key.generate()

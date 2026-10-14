@@ -36,6 +36,7 @@ import itertools
 import json
 import math
 import os
+import socket
 import threading
 import time
 import urllib.error
@@ -45,7 +46,7 @@ from urllib.parse import urlparse
 
 import numpy as np
 
-from . import params, tx as txmod
+from . import params, tx as txmod, work
 from .crypto import Key, is_hex, verify
 from .node import BoundedServer, http_get, http_post
 from .chain import MissingData
@@ -61,6 +62,7 @@ CLAIM_SECONDS = 5.0
 CLAIM_TX_BYTES = 450               # about the size of a claim, for its fee
 COMPUTE_SLOTS = 2                  # products computed at once (the BLAS already uses every core)
 IDLE_SECONDS = 30                  # a kept-alive connection with nothing to do is closed
+DRAIN_SECONDS = 10                 # after a refusal, the unread body is read and dropped for at most this long
 PARALLEL_MIN_SECONDS = 0.005       # products faster than this on average go one by one (threads cost more)
 SAVE_SECONDS = 1.0
 OFFER_REFRESH = 1200               # providers renew their offer this often (offers live an hour)
@@ -128,8 +130,8 @@ def verify_product(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> bool:
     rounds = -(-SOUNDNESS_BITS // s)
     rng = np.random.default_rng(int.from_bytes(os.urandom(32), "big"))
     r = rng.integers(0, 1 << s, size=(n, rounds)).astype(np.float64)
-    lhs = a.astype(np.float64) @ (b.astype(np.float64) @ r)
-    return bool(np.array_equal(lhs, cf @ r))
+    lhs = work.blas_matmul(a, work.blas_matmul(b, r))
+    return bool(np.array_equal(lhs, work.blas_matmul(cf, r)))
 
 
 # --- the provider (a miner's node selling products) ------------------------------
@@ -286,7 +288,7 @@ class Provider:
         b = np.frombuffer(body, dtype=np.int8, offset=m * k).reshape(k, n)
         with self.slots:
             # float64 is exact here (every sum stays below 2^31) and uses the fast BLAS.
-            c = (a.astype(np.float64) @ b.astype(np.float64)).astype("<i4")
+            c = work.blas_matmul(a, b, "<i4")
         with self.lock:
             self.stats["products"] += 1
             self.stats["units"] += price_of(m, k, n, 1)
@@ -448,7 +450,7 @@ def _handler(provider: Provider):
             self.wfile.write(data)
 
         def _refuse(self, code: int, error: str):
-            """Answer without reading the body (it may be large and unpaid), then hang up."""
+            """Answer without keeping the body (it may be large and unpaid), then hang up."""
             self.close_connection = True
             self.send_response(code)
             data = json.dumps({"error": error}).encode()
@@ -457,6 +459,28 @@ def _handler(provider: Provider):
             self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(data)
+            self._drain()
+
+        def _drain(self):
+            """Read and drop the body before hanging up. Clients send it after the headers,
+            so it may still be arriving; a socket closed on arriving data answers with a
+            reset, and on Windows the reset discards the answer the client has not read
+            yet -- a buyer would see "connection aborted" instead of "pay first" or "no
+            such channel yet". Nothing is kept or computed, at most max_body bytes are
+            read, and for at most DRAIN_SECONDS."""
+            raw = self.headers.get("Content-Length", "")
+            left = min(int(raw), max_body) if raw.isdigit() else 0
+            end = time.monotonic() + DRAIN_SECONDS
+            try:
+                self.connection.shutdown(socket.SHUT_WR)          # the answer is complete
+                self.connection.settimeout(DRAIN_SECONDS)
+                while left > 0 and time.monotonic() < end:
+                    chunk = self.rfile.read1(min(left, 1 << 16))
+                    if not chunk:
+                        break
+                    left -= len(chunk)
+            except OSError:
+                pass
 
         def _guard(self, fn, unread: bool = False):
             fail = self._refuse if unread else (lambda code, error: self._send(code, {"error": error}))

@@ -309,7 +309,7 @@ class Pool:
             a, b = work_inputs(header, seed, self.node.blobs, job_size)
         except (InvalidBlock, InvalidTx, MissingData) as e:
             raise ValueError(f"cannot do that work unit: {e}") from None
-        if work.compute_unit(a, b, seed)[0] != transcript:
+        if work.compute_unit(a, b, seed, product=False)[0] != transcript:
             raise ValueError("the transcript does not match the work")
         ticket = work.ticket_value(seed, transcript)
         if ticket > t["share_target"]:
@@ -516,7 +516,7 @@ class PoolMiner:
         a, b = work.filler_inputs(seed)
         if self.gpu is not None:
             return self.gpu.ticket(a, b, seed)
-        transcript = work.compute_unit(a, b, seed)[0]
+        transcript = work.compute_unit(a, b, seed, product=False)[0]
         return transcript, work.ticket_value(seed, transcript)
 
     def stop(self) -> None:

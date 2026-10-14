@@ -9,7 +9,7 @@ device, which is what consensus needs.
 Throughput comes from doing BOTH the matmul and the transcript digest on the
 GPU, so the 2 MB product stream never crosses PCIe -- only the 32-byte digest
 is read back per nonce. Each thread computes one tile-product element, mixes it
-(MurmurHash3 finalizer, see green.work.transcript_digest) and XORs it into a
+(lowbias32, see green.work.transcript_digest) and XORs it into a
 workgroup-local 8-lane accumulator; one thread folds that into the global
 digest with atomics. XOR is commutative, so the parallel result equals the CPU
 pass exactly.
@@ -33,12 +33,9 @@ _SHADER = f"""
 const N  : u32 = {N}u;
 const BLK: u32 = {BLK}u;
 const T  : u32 = {T}u;
-const C1 : u32 = 0xCC9E2D51u;
-const C2 : u32 = 0x1B873593u;
-const C3 : u32 = 0xE6546B64u;
 const GOLDEN : u32 = 0x9E3779B9u;
-const F1 : u32 = 0x85EBCA6Bu;
-const F2 : u32 = 0xC2B2AE35u;
+const M1 : u32 = 0x7FEB352Du;
+const M2 : u32 = 0x846CA68Bu;
 
 @group(0) @binding(0) var<storage, read>       a1 : array<i32>;
 @group(0) @binding(1) var<storage, read>       b1 : array<i32>;
@@ -47,16 +44,13 @@ const F2 : u32 = 0xC2B2AE35u;
 var<workgroup> wacc : array<atomic<u32>, {LANES}u>;
 
 fn mix(value : u32, idx : u32) -> u32 {{
-    var k : u32 = value * C1;
-    k = ((k << 15u) | (k >> 17u)) * C2;
-    var hh : u32 = (idx * GOLDEN) ^ k;
-    hh = ((hh << 13u) | (hh >> 19u)) * 5u + C3;
-    hh ^= hh >> 16u;
-    hh *= F1;
-    hh ^= hh >> 13u;
-    hh *= F2;
-    hh ^= hh >> 16u;
-    return hh;
+    var h : u32 = value ^ (idx * GOLDEN);   // lowbias32 of the value and its position
+    h ^= h >> 16u;
+    h *= M1;
+    h ^= h >> 15u;
+    h *= M2;
+    h ^= h >> 16u;
+    return h;
 }}
 
 @compute @workgroup_size(BLK, BLK, 1)
@@ -135,16 +129,13 @@ class GPUMiner:
 
     @staticmethod
     def _factors(a, b, seed):
-        af = a.astype(np.float64)
-        bf = b.astype(np.float64)
+        """A' and B' as int32 (the noise products are exact in float32: |entries| <= RANK)."""
         u, v, uf, vf = work.noise_factors(seed)
-        a1 = (af + u @ v).astype(np.int32)
-        b1 = (bf + uf @ vf).astype(np.int32)
-        return af, bf, u, v, uf, vf, a1, b1
+        return (a + u @ v).astype(np.int32), (b + uf @ vf).astype(np.int32)
 
     def ticket(self, a: np.ndarray, b: np.ndarray, seed: bytes) -> tuple[str, int]:
         """Transcript and ticket value for one nonce. The hot path: no A@B."""
-        *_, a1, b1 = self._factors(a, b, seed)
+        a1, b1 = self._factors(a, b, seed)
         transcript = self._digest(a1, b1)
         return transcript, work.ticket_value(seed, transcript)
 

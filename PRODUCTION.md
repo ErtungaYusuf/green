@@ -2,7 +2,7 @@
 
 Where Green stands on every aspect a production cryptocurrency needs, what backs each claim, and what is still missing. "Done" means implemented, tested and measured in this repository; it does not mean audited, battle-tested or ready to carry real value. Nothing here is ready for real money until the items marked **blocker** are done.
 
-Status as of v0.17 (October 2026). 249 automated tests; fifteen internal security reviews (SECURITY.md).
+Status as of v0.18 (October 2026). 257 automated tests; sixteen internal security reviews (SECURITY.md).
 
 ## Summary
 
@@ -20,7 +20,7 @@ Status as of v0.17 (October 2026). 249 automated tests; fifteen internal securit
 | 10. Wallets and keys | Done for a testnet (recovery phrases, encrypted files, checksummed addresses, multisig) | hardware wallets, a registered coin type |
 | 11. APIs and developer tools | Done for a testnet (versioned API, fee estimates, long-poll, Python SDK) | SDKs in other languages, explorer API |
 | 12. Operations | Done for a testnet (config file, logs, systemd, metrics and alerts, runbook) | — |
-| 13. Testing and QA | Partial (249 tests, fuzz, mutation testing, 8-node simulation) | multi-node testnet, soak tests |
+| 13. Testing and QA | Partial (257 tests, fuzz, mutation testing, 8-node simulation) | multi-node testnet, soak tests |
 | 14. Security assurance | Partial (internal reviews only) | **blocker**: independent audit, bug bounty |
 | 15. Upgrades and governance | Done (version-bits activation, signed releases, published process) | reproducible builds |
 | 16. Privacy | Partial (transaction origin: Dandelion++; data and amounts public) | — (documented) |
@@ -40,11 +40,11 @@ Status as of v0.17 (October 2026). 249 automated tests; fifteen internal securit
 
 ## 2. Proof of useful work
 
-**Done.** Integer matrix multiplication with seed-derived low-rank noise; every unit is both a lottery ticket and a deliverable; the useful result is recovered cheaply; knowing A·B gives no shortcut (noise rank ≥ tile size); bit-exact on CPU and GPU (the GPU is checked against the CPU at startup). Since v0.7 the digest is computed in cache-sized chunks: a unit verifies in 9 ms on one core (was 17 ms), bit for bit the same.
+**Done.** Integer matrix multiplication with seed-derived low-rank noise; every unit is both a lottery ticket and a deliverable; the useful result is recovered cheaply; knowing A·B gives no shortcut (noise rank ≥ tile size); bit-exact on CPU and GPU (the GPU is checked against the CPU at startup). A unit is mined or checked in 2.1 ms on one core (17 ms in v0.6, 8.4 ms in v0.17): since v0.18 the tile products are computed one column block at a time in float32, which is exact for them, and digested while in cache, bit for bit the definition.
 
 **Evidence:** `tests/test_chain.py` (tampered blocks, stolen tickets), `tests/test_gpu.py` (bit-for-bit), `tests/test_work.py` (the fast digest against its definition), DESIGN.md §3.
 
-**Missing:** the transcript digest is a custom MurmurHash3-style function chosen for GPU speed, analyzed but not proven (SECURITY.md); either an audit or BLAKE2b/BLAKE3 on the GPU.
+**Missing:** the transcript digest is a custom function (lowbias32 per element since v0.18) chosen for GPU speed, analyzed but not proven (SECURITY.md); either an audit or BLAKE2b/BLAKE3 on the GPU.
 
 ## 3. Difficulty and issuance
 
@@ -94,7 +94,7 @@ Pruned nodes (v0.11, green/prune.py): every header but only recent block bodies,
 
 ## 8. Initial sync
 
-**Done (v0.7).** Headers first, each checked against every rule except its work unit, with a random sample of work units recomputed per message before any block is fetched; blocks downloaded from several peers at once in a 256-block window; each block's work unit sent to 8 verification threads the moment it arrives while a separate thread connects blocks in order. Measured with `bench/sync_bench.py` on 600 blocks: full sync 4.2 s (144 blocks/s; before this pipeline 14.6 s), fast sync 1.4 s. Fast sync: nodes write the ledger every 2,880 blocks as content-addressed chunks, and a new node starts from the newest final snapshot after checking it against the `state_root` in that block's header, then validates every later block. This is trustless relative to the heaviest header chain (Ethereum's snap-sync model), where Bitcoin's assumeutxo trusts a hash shipped with the software. It also removes the need for old job matrices to join the network.
+**Done (v0.7).** Headers first, each checked against every rule except its work unit, with a random sample of work units recomputed per message before any block is fetched; blocks downloaded from several peers at once in a 256-block window; each block's work unit sent to 8 verification threads the moment it arrives while a separate thread connects blocks in order. Measured with `bench/sync_bench.py` on 600 blocks: full sync 4.2 s (144 blocks/s; before this pipeline 14.6 s), fast sync 1.4 s. Since v0.18 a long sync checks the work units of blocks and their shares in worker processes (green/verify.py): 300 blocks with 32 shares each sync in 7.2 s (66 s in v0.17), or 5.2 s from a snapshot. Fast sync: nodes write the ledger every 2,880 blocks as content-addressed chunks, and a new node starts from the newest final snapshot after checking it against the `state_root` in that block's header, then validates every later block. This is trustless relative to the heaviest header chain (Ethereum's snap-sync model), where Bitcoin's assumeutxo trusts a hash shipped with the software. It also removes the need for old job matrices to join the network.
 
 **Evidence:** `test_headers_first_sync_from_several_peers` (headers in rounds, both peers serve blocks, work units checked in parallel), `test_fake_headers_are_caught_before_any_block_is_fetched`, `tests/test_snapshot.py` (a snapshot rebuilds the exact ledger and the chain continues; tampered snapshots refused; a new node joins from a snapshot over the network; a lying snapshot server is banned and sync falls back), `bench/sync_bench.py`.
 
@@ -108,7 +108,7 @@ Pruned nodes (v0.11, green/prune.py): every header but only recent block bodies,
 
 **Pools sell compute (v0.14):** a pool assigns its miners units of open jobs, checks each result with Freivalds' test, commits them in batches and posts the bond; each commit names the miners who computed its units as payees, so consensus pays them when the batch settles (`test_pool_miners_compute_jobs_and_the_batches_pay_them`: the buyer gets correct products, the pool keeps exactly its fee).
 
-**Missing:** the GPU miner reaches ~700 units/s, a small fraction of a modern card's int8 throughput (noise is generated on the CPU, one nonce per call); a native miner with on-GPU noise and batched nonces. Pool miners compute job units on the CPU even when they mine on a GPU; miners cannot yet choose a pool block's transactions (as Stratum V2 allows); results travel to the pool over plain HTTP (256 KiB per unit).
+**Missing:** the GPU miner reaches ~1,300 units/s (v0.18; ~700 before), a small fraction of a modern card's int8 throughput (noise is generated on the CPU, one nonce per call); a native miner with on-GPU noise and batched nonces. Pool miners compute job units on the CPU even when they mine on a GPU; miners cannot yet choose a pool block's transactions (as Stratum V2 allows); results travel to the pool over plain HTTP (256 KiB per unit).
 
 ## 10. Wallets and keys
 
@@ -140,7 +140,7 @@ Since v0.12: a transaction and address index kept consistent through reorgs (`/v
 
 ## 13. Testing and QA
 
-**Today:** 192 tests across consensus, security regressions, addresses, fees, state and storage, the state commitment and snapshots, the P2P protocol, atomicity, networks of live nodes, GPU, WASM, both markets, the agent and its guardian; two fuzz tests with exact accounting invariants; mutation testing proved the fuzz catches injected accounting bugs; a differential test against a reference replay; an 8-node network simulation with a split and a heal (`bench/net_sim.py`, v0.14: blocks reach every node in a median of 0.02 s, the halves converge in 0.6 s with identical state roots); CI configured for Linux, Windows and macOS.
+**Today:** 257 tests across consensus, security regressions, addresses, fees, state and storage, the state commitment and snapshots, the P2P protocol, atomicity, networks of live nodes, GPU, WASM, both markets, the agent and its guardian; two fuzz tests with exact accounting invariants; mutation testing proved the fuzz catches injected accounting bugs; a differential test against a reference replay; an 8-node network simulation with a split and a heal (`bench/net_sim.py`, v0.14: blocks reach every node in a median of 0.02 s, the halves converge in 0.6 s with identical state roots); CI configured for Linux, Windows and macOS.
 
 **Missing:** CI has never run (the code is not on any git host yet); multi-node testnets with tens of nodes; network partition and latency simulation; week-long soak tests; property-based testing at larger scale; conformance tests shared with a second implementation.
 
@@ -166,7 +166,7 @@ Since v0.12: a transaction and address index kept consistent through reorgs (`/v
 
 ## 17. Performance and implementation
 
-**Today:** a Python reference implementation; measured: 1.1–1.5 ms of ledger work per block (state root included), ~0.6 ms of storage per block, 9 ms to verify a block's work unit on one core (about 4 ms each with 8 threads during sync), restart in 0.04 s.
+**Today:** a Python reference implementation; measured: 1.1–1.5 ms of ledger work per block (state root included), ~0.6 ms of storage per block, 2.1 ms to check a work unit on one core (0.75 ms each across 8 threads, ~0.45 ms across 8 worker processes during sync), restart in 0.04 s.
 
 **Missing:** a native node (Rust) implementing SPEC.md, for throughput, memory safety and smaller attack surface; the Python node remains the readable reference and test oracle.
 

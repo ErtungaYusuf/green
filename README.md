@@ -13,6 +13,11 @@ A blockchain prototype where miners do AI work (integer matrix multiplication) i
 
 Production status of every area, with evidence and blockers: [PRODUCTION.md](PRODUCTION.md). How rules change: [UPGRADES.md](UPGRADES.md). Design and known limitations: [DESIGN.md](DESIGN.md). Protocol specification: [SPEC.md](SPEC.md). HTTP API: [API.md](API.md). Security reviews and fixes: [SECURITY.md](SECURITY.md). Release notes: [CHANGELOG.md](CHANGELOG.md).
 
+## What's new in v0.18
+
+- **Work units 4× faster:** mining or checking a unit takes ~2.1 ms on one core instead of ~8.4 ms, and a GPU does ~1,280 per second instead of ~700. The digest is simpler and better mixed, and the products are computed and digested while they are in cache, bit-exact on every machine.
+- **New nodes catch up 9× faster:** since v0.17 every block carries ~32 shares, each a work unit to check. A long sync now checks them in parallel worker processes: 300 such blocks in 7.2 s instead of 66 s.
+
 ## What's new in v0.17
 
 - **Money that neither inflates nor halves:** the 21M GRN supply is fixed and starts in the protocol's reserve; each block pays out a fixed fraction of what is left (a smooth curve, no halving cliffs), and half of every fee flows back in, so rewards never dry up and the supply never grows.
@@ -337,6 +342,7 @@ python -m pytest -q tests
 | `green/tx.py` | Transaction types; job, result and manifest data formats |
 | `green/node.py` | HTTP API, mempool, miner, batch delivery, watchtowers, snapshots |
 | `green/p2p.py` | Encrypted P2P protocol: handshake, relay, address book, headers-first and fast sync, bans |
+| `green/verify.py` | Worker processes that check work units in parallel during a long sync |
 | `green/snapshot.py` | Ledger snapshots: writing, checking against a header's state root, rebuilding |
 | `green/versionbits.py` | Rule changes by miner signalling: deployment states per period |
 | `green/release.py` | Signed releases: SHA256SUMS, maintainer signatures, verification |

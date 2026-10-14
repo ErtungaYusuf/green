@@ -2,6 +2,7 @@
 and what it does to peers that misbehave."""
 
 import json
+import random
 import socket
 import struct
 import threading
@@ -313,6 +314,32 @@ def test_addresses_spread_and_nodes_find_each_other(nodes):
     wait_for(lambda: connected(c, b), timeout=30, what="c to learn about b from a and connect")
 
 
+def test_two_requests_for_one_blob_share_the_answer(nodes, monkeypatch):
+    """A buyer's watchtower and its API client can ask the node's only peer for the
+    same result at once: the second request waits for the first one's answer instead
+    of giving up on the peer (which made the client see a 404)."""
+    genesis = make_genesis(Key.generate().address, "blobs")
+    a = nodes("a", genesis)
+    b = nodes("b", genesis, peers=[a.p2p.address])
+    wait_for(lambda: connected(b, a), what="b to reach a")
+    data = random.randbytes(100_000)
+    h = a.blobs.put(data)
+    monkeypatch.setattr(a, "is_public_blob", lambda blob: blob == h)
+    on_getblob = p2p.P2P._on_getblob
+
+    def slow(self, peer, m):                             # the answer takes a while
+        time.sleep(0.5)
+        return on_getblob(self, peer, m)
+    monkeypatch.setattr(p2p.P2P, "_on_getblob", slow)
+    got = []
+    threads = [threading.Thread(target=lambda: got.append(b.p2p.fetch_blob(h, 1 << 20))) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert got == [data, data]
+
+
 # --- headers-first sync ------------------------------------------------------------------
 
 def test_headers_first_sync_from_several_peers(nodes, tmp_path, monkeypatch):
@@ -344,7 +371,7 @@ def test_headers_first_sync_from_several_peers(nodes, tmp_path, monkeypatch):
         wait_for(lambda: fresh.chain.tip == sources[0].chain.tip, timeout=60, what="initial sync")
         st = fresh.p2p.stats
         assert st["headers_received"] >= 60 and st["work_samples"] >= 4
-        assert st["prechecked"] >= 30                    # most work units were checked in parallel
+        assert st["prechecked"] + st["checked_in_processes"] >= 30   # most work units were checked in parallel
         assert len([v for v in served.values() if v > 0]) == 2, served   # both peers served blocks
         assert fresh.chain.state.root() == sources[0].chain.state.root()
     finally:

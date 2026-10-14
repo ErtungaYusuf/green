@@ -115,6 +115,7 @@ def main():
     ap.add_argument("--steps", type=int, default=300)
     args = ap.parse_args()
     params.INITIAL_TARGET = params.MAX_TARGET              # a block whenever the miner tries
+    params.SHARES_PERCENT = 0                              # (no ticket is a share then: the finder gets it all)
     tmp = tempfile.mkdtemp()
     buyer, miner = Key.generate(), Key.generate()
     node = Node(os.path.join(tmp, "n"), make_genesis(buyer.address, "bench"), port=free_port(),

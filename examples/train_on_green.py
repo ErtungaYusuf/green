@@ -49,7 +49,7 @@ def main():
     params.TARGET_BLOCK_SECONDS = 2
     tmp = tempfile.mkdtemp()
     buyer = Key.generate()
-    genesis = make_genesis(buyer.address, "a model trained by miners")   # the buyer's 1.25 GRN
+    genesis = make_genesis(buyer.address, "a model trained by miners")   # the buyer's ~0.25 GRN
     nodes, providers = [], []
     try:
         for i in range(2):                                    # two miners that sell compute

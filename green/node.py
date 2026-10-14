@@ -108,7 +108,7 @@ class Node:
                  use_gpu: bool = False, p2p_port: int = 0, listen: bool = True, seeds=None,
                  fast_sync: bool = False, p2p_host: str | None = None, no_signal=(), debug=None,
                  prune: bool = False, prune_keep: int = prunemod.PRUNE_KEEP_BLOCKS, dandelion: bool = True,
-                 portmap: bool = False, portmap_gateway: tuple | None = None):
+                 portmap: bool = False, portmap_gateway: tuple | None = None, verify_processes: bool = True):
         self.data_dir = data_dir
         self.port = port
         self.host = host
@@ -129,6 +129,7 @@ class Node:
         self.dandelion = dandelion                # our own transactions take a stem first (p2p.py)
         self.pool = None                          # a green.pool.Pool selling its miners' units through us
         self.portmap = portmap                    # ask the router to forward our P2P port (green/portmap.py)
+        self.verify_processes = verify_processes  # check a long sync's work units in processes (green/verify.py)
         self.portmap_gateway = portmap_gateway    # (host, port); None: the default gateway, port 5351
         self.portmaps: list = []
         self._sell_lock = threading.Lock()        # one thread at a time commits and reveals batches
@@ -402,7 +403,7 @@ class Node:
         if problem is not None:
             return None
         if own:                                      # we just computed it
-            self.chain.verified_shares.add(sid)
+            self.chain.share_verified(sid)
         else:
             try:
                 self.chain.check_share_work(share, job_size)

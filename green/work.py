@@ -12,7 +12,8 @@ and Weinstein, "Proofs of Useful Work from Arbitrary Matrix Multiplication"):
      previous block, the transactions, the miner's address and a nonce.
   2. Low-rank noise E = U V and F = U' V' is derived from the seed.
   3. The miner multiplies A' = A + E by B' = B + F tile by tile. The product of
-     every tile pair (A'_il * B'_lj) is part of the transcript.
+     every tile pair (A'_il * B'_lj) is part of the transcript, which is
+     digested with a per-element nonlinear mix (transcript_digest).
   4. ticket = hash(seed || hash(transcript)); the block is valid when
      ticket < target, exactly like Bitcoin's hash < target.
   5. The useful result is recovered cheaply:
@@ -29,6 +30,9 @@ Delivered results are checked with Freivalds' algorithm over a prime field
 """
 
 import hashlib
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -42,6 +46,11 @@ T = N // BLK
 
 assert N % BLK == 0
 assert RANK >= BLK
+# Tile products are carried in float32 (compute_unit): exact while every partial sum
+# of BLK terms of |A'| * |B'| <= (128 + RANK)^2 stays below 2^24. Today 819,200: a 20x
+# margin, and parameters leaving less than 8x are refused here. (The whole product, N
+# terms, would have under 3x; v0.7 rejected float32 for that.)
+assert BLK * (128 + RANK) ** 2 * 8 <= 2 ** 24
 
 
 def prg(seed: bytes, label: bytes, count: int) -> np.ndarray:
@@ -51,7 +60,7 @@ def prg(seed: bytes, label: bytes, count: int) -> np.ndarray:
 
 def _ternary(seed: bytes, label: bytes, shape: tuple[int, int]) -> np.ndarray:
     count = shape[0] * shape[1]
-    return ((prg(seed, label, count) % 3).astype(np.float64) - 1.0).reshape(shape)
+    return ((prg(seed, label, count) % 3).astype(np.float32) - np.float32(1)).reshape(shape)
 
 
 def noise_factors(seed: bytes):
@@ -75,105 +84,131 @@ def _tiles(m: np.ndarray) -> np.ndarray:
     return m.reshape(T, BLK, T, BLK).transpose(0, 2, 1, 3)
 
 
-def compute_unit(a: np.ndarray, b: np.ndarray, seed: bytes) -> tuple[str, np.ndarray]:
+_scratch = threading.local()       # per-thread buffers: large arrays reused, not reallocated per unit
+
+
+def _buffers() -> dict:
+    b = getattr(_scratch, "b", None)
+    if b is None:
+        b = _scratch.b = {name: np.empty((N, N), np.float32) for name in ("a1", "b1", "e", "p")}
+        b["k"] = np.empty(N * N, np.uint32)
+        b["t"] = np.empty(N * N, np.uint32)
+    return b
+
+
+def compute_unit(a: np.ndarray, b: np.ndarray, seed: bytes, product: bool = True):
     """Do one work unit.
 
-    Returns (transcript_hash_hex, a @ b). Integer values are carried in
-    float64, which is exact while every partial sum stays below 2^53 (here it
-    stays below 2^31), so any BLAS / GPU summation order gives the same bits.
+    Returns (transcript_hash_hex, a @ b), or (transcript_hash_hex, None) with
+    product=False: mining filler and checking someone's work need only the
+    transcript. The deliverable A @ B comes from recover_useful.
+
+    Every value is an integer carried exactly in float32: the noise sums at most
+    RANK terms in {-1, 0, 1}, so |A'|, |B'| <= 128 + RANK = 160, and every partial
+    sum of a tile product stays below BLK * 160^2 = 819,200, far under 2^24,
+    whatever order the BLAS adds in.
     """
     assert a.shape == (N, N) and b.shape == (N, N)
-    af = a.astype(np.float64)
-    bf = b.astype(np.float64)
     u, v, uf, vf = noise_factors(seed)
-    a1 = af + u @ v
-    b1 = bf + uf @ vf
-
-    # products[i, l, j] = A'_il @ B'_lj -- the transcript.
-    products = np.matmul(_tiles(a1)[:, :, None], _tiles(b1)[None, :, :])
-    transcript = transcript_digest(products.astype(np.int32).reshape(-1))
-
-    c1 = products.sum(axis=1).transpose(0, 2, 1, 3).reshape(N, N)
-    c = c1 - (af @ uf) @ vf - u @ (v @ b1)
-    return transcript, np.rint(c).astype(np.int64)
+    buf = _buffers()
+    a1, b1, e = buf["a1"], buf["b1"], buf["e"]
+    np.add(a, np.matmul(u, v, out=e), out=a1)
+    np.add(b, np.matmul(uf, vf, out=e), out=b1)
+    transcript = _unit_digest(a1, b1, buf)
+    if not product:
+        return transcript, None
+    return transcript, recover_useful(a, b, seed)
 
 
-# MurmurHash3-style u32 mixers. Each multiplier is odd, so the per-element mix
-# is a bijection on u32; the lanes are combined with XOR, which is commutative,
-# so the digest is independent of evaluation order -- the CPU computes it in one
-# vectorised pass and the GPU with parallel atomics, bit for bit the same.
-_C1 = np.uint32(0xCC9E2D51)
-_C2 = np.uint32(0x1B873593)
-_C3 = np.uint32(0xE6546B64)
+def _unit_digest(a1: np.ndarray, b1: np.ndarray, buf: dict) -> str:
+    """transcript_digest of the tile-product stream, without ever holding the stream.
+
+    For each l, P_l = A'[:, l] @ B'[l, :] (an N x BLK column block times a BLK x N
+    row block: T BLAS calls instead of T^3 tiny products) holds the products of
+    every tile pair (i, l, j), and is digested in place. In P_l's row-major layout
+    element (R, C), with R = i*BLK + r and C = j*BLK + c, is stream position
+    ((i*T + l)*T + j)*BLK^2 + r*BLK + c = base(R, C) + l*T*BLK^2, and its lane
+    (position mod 8) is C mod 8, so P_l's rows of 8 fall on the lanes in order.
+    The working set (about 1.5 MB) stays in a core's cache: units checked in
+    parallel processes do not fight over memory bandwidth, which materialising
+    the 2 MB stream did (measured: 5x the parallel throughput, 1.5x alone).
+    """
+    p, k, t = buf["p"], buf["k"], buf["t"]
+    acc = buf["e"].view(np.uint32).reshape(-1)        # the noise buffer, free again
+    acc.fill(0)
+    base = _gold_base()
+    with np.errstate(over="ignore"):
+        for l in range(T):
+            np.matmul(a1[:, l * BLK:(l + 1) * BLK], b1[l * BLK:(l + 1) * BLK, :], out=p)
+            np.copyto(k.view(np.int32).reshape(N, N), p, casting="unsafe")
+            np.add(base, np.uint32(l * T * BLK * BLK * int(_GOLDEN) & 0xFFFFFFFF), out=t)
+            np.bitwise_xor(k, t, out=k)
+            _lowbias32(k, t)
+            np.bitwise_xor(acc, k, out=acc)
+    return _lanes_hex(np.bitwise_xor.reduce(acc.reshape(-1, DIGEST_LANES), axis=0))
+
+
+# The digest mixes each transcript value with its position and passes it through
+# lowbias32 (Chris Wellons' 32-bit integer hash: two xorshift-multiply rounds,
+# a bijection on u32 with near-ideal avalanche), then XORs it into one of
+# DIGEST_LANES lanes. XOR is commutative, so the digest does not depend on the
+# order of evaluation: the CPU computes it in a few vectorised passes and the GPU
+# with parallel atomics, bit for bit the same (green/gpu.py).
 _GOLDEN = np.uint32(0x9E3779B9)
-_F1 = np.uint32(0x85EBCA6B)
-_F2 = np.uint32(0xC2B2AE35)
+_M1 = np.uint32(0x7FEB352D)
+_M2 = np.uint32(0x846CA68B)
 DIGEST_LANES = 8
+assert BLK % DIGEST_LANES == 0       # _unit_digest: each row of 8 in P_l falls on the lanes in order
 
 
-def _rotl(x: np.ndarray, r: int) -> np.ndarray:
-    return (x << np.uint32(r)) | (x >> np.uint32(32 - r))
-
-
-def _mix(values_u32: np.ndarray, idx_u32: np.ndarray) -> np.ndarray:
-    k = values_u32 * _C1
-    k = _rotl(k, 15) * _C2
-    hh = (idx_u32 * _GOLDEN) ^ k
-    hh = _rotl(hh, 13) * np.uint32(5) + _C3
-    hh ^= hh >> np.uint32(16)
-    hh *= _F1
-    hh ^= hh >> np.uint32(13)
-    hh *= _F2
-    hh ^= hh >> np.uint32(16)
-    return hh
-
-
-def transcript_digest(products_flat_i32: np.ndarray) -> str:
-    """256-bit commitment to the tile-product stream (see gpu.py for the match).
+def transcript_digest(products_flat_i32: np.ndarray, buffers: dict | None = None) -> str:
+    """256-bit commitment to the tile-product stream: lane[i mod 8] ^= mix(v_i, i) with
+    mix(v, i) = lowbias32(v XOR i * 0x9E3779B9).
 
     Position-dependent nonlinear mixing means the digest cannot be produced
     without every product value -- there is no linear shortcut such as reusing
-    A@B -- so it binds the work exactly as a plain hash of the products would,
-    while staying cheap enough to compute on the mining device.
-
-    This is _mix (the definition) computed in cache-sized chunks with in-place
-    operations, 3.6x faster than the direct form and bit for bit the same
-    (tests/test_work.py checks it against digest_reference).
+    A@B -- so it binds the work exactly as a plain hash of the products would.
+    Computed in cache-sized chunks with in-place operations (tests/test_work.py
+    checks it against digest_reference, the direct form).
     """
     assert products_flat_i32.size % DIGEST_LANES == 0
     values = products_flat_i32.astype(np.uint32, copy=False)
     n = values.size
     gold = _golden_index(n)
     lanes = np.zeros(DIGEST_LANES, dtype=np.uint32)
-    k = np.empty(min(n, _DIGEST_CHUNK), np.uint32)
-    t = np.empty_like(k)
+    buf = buffers or _buffers()
+    k, t = buf["k"], buf["t"]
     with np.errstate(over="ignore"):
-        for start in range(0, n, _DIGEST_CHUNK):
-            m = min(_DIGEST_CHUNK, n - start)
+        for start in range(0, n, k.size):
+            m = min(k.size, n - start)
             kk, tt = k[:m], t[:m]
-            np.multiply(values[start:start + m], _C1, out=kk)
-            _rotl_inplace(kk, tt, 15)
-            np.multiply(kk, _C2, out=kk)
-            np.bitwise_xor(kk, gold[start:start + m], out=kk)
-            _rotl_inplace(kk, tt, 13)
-            np.multiply(kk, np.uint32(5), out=kk)
-            np.add(kk, _C3, out=kk)
-            for shift, mult in ((16, _F1), (13, _F2), (16, None)):
-                np.right_shift(kk, np.uint32(shift), out=tt)
-                np.bitwise_xor(kk, tt, out=kk)
-                if mult is not None:
-                    np.multiply(kk, mult, out=kk)
-            # XOR the chunk's rows together (lane = index % DIGEST_LANES); XOR is
-            # associative and commutative, so folding halves gives the same lanes.
-            rows = kk.reshape(-1, DIGEST_LANES)
-            while rows.shape[0] > 1:
-                if rows.shape[0] % 2:
-                    lanes ^= rows[-1]
-                    rows = rows[:-1]
-                half = rows.shape[0] // 2
-                rows = rows[:half] ^ rows[half:]
-            lanes ^= rows[0]
+            np.bitwise_xor(values[start:start + m], gold[start:start + m], out=kk)
+            _lowbias32(kk, tt)
+            lanes ^= np.bitwise_xor.reduce(kk.reshape(-1, DIGEST_LANES), axis=0)
+    return _lanes_hex(lanes)
+
+
+def _lowbias32(k: np.ndarray, t: np.ndarray) -> None:
+    """k = lowbias32(k) in place (t is scratch of the same size)."""
+    for shift, mult in ((16, _M1), (15, _M2), (16, None)):
+        np.right_shift(k, np.uint32(shift), out=t)
+        np.bitwise_xor(k, t, out=k)
+        if mult is not None:
+            np.multiply(k, mult, out=k)
+
+
+def _lanes_hex(lanes: np.ndarray) -> str:
     return lanes.astype("<u4").tobytes().hex()
+
+
+def _mix(values_u32: np.ndarray, idx_u32: np.ndarray) -> np.ndarray:
+    h = values_u32 ^ (idx_u32 * _GOLDEN)
+    h ^= h >> np.uint32(16)
+    h *= _M1
+    h ^= h >> np.uint32(15)
+    h *= _M2
+    h ^= h >> np.uint32(16)
+    return h
 
 
 def digest_reference(products_flat_i32: np.ndarray) -> str:
@@ -186,8 +221,23 @@ def digest_reference(products_flat_i32: np.ndarray) -> str:
     return lanes.tobytes().hex()
 
 
-_DIGEST_CHUNK = 1 << 16          # 256 KiB per temporary: stays in L2 cache
 _golden_cache: dict[int, np.ndarray] = {}
+_gold_base_cache: list = []
+
+
+def _gold_base() -> np.ndarray:
+    """base(R, C) * GOLDEN over an N x N block, row-major: stream position of
+    P_0's element (R, C) (see _unit_digest), times the golden constant."""
+    if not _gold_base_cache:
+        rows = np.arange(N, dtype=np.uint32)[:, None]
+        cols = np.arange(N, dtype=np.uint32)[None, :]
+        with np.errstate(over="ignore"):
+            pos = ((rows // BLK) * np.uint32(T * T * BLK * BLK) + (cols // BLK) * np.uint32(BLK * BLK)
+                   + (rows % BLK) * np.uint32(BLK) + cols % BLK)
+            g = (pos * _GOLDEN).reshape(-1)
+        g.setflags(write=False)
+        _gold_base_cache.append(g)
+    return _gold_base_cache[0]
 
 
 def _golden_index(n: int) -> np.ndarray:
@@ -200,29 +250,52 @@ def _golden_index(n: int) -> np.ndarray:
     return g
 
 
-def _rotl_inplace(x: np.ndarray, tmp: np.ndarray, r: int) -> None:
-    np.left_shift(x, np.uint32(r), out=tmp)
-    np.right_shift(x, np.uint32(32 - r), out=x)
-    np.bitwise_or(x, tmp, out=x)
-
-
 def ticket_value(seed: bytes, transcript_hex: str) -> int:
     return int.from_bytes(h(seed + bytes.fromhex(transcript_hex)), "big")
 
 
-def recover_useful(a: np.ndarray, b: np.ndarray, seed: bytes) -> np.ndarray:
-    """A @ B via the cheap low-rank correction, without the transcript.
+def recover_useful(a: np.ndarray, b: np.ndarray, seed: bytes = b"") -> np.ndarray:
+    """A @ B, the deliverable. With A and B at hand the BLAS computes it directly
+    (float64 is exact: every sum stays below 2^23) faster than recovering it from
+    the noisy tile products through the low-rank corrections, which give the same
+    integers; `seed` is not needed and kept for callers."""
+    return blas_matmul(a, b, np.int64)
 
-    Identical to the result compute_unit returns, but skips hashing -- used by
-    a miner that already found a ticket and now needs the deliverable value.
-    """
-    af = a.astype(np.float64)
-    bf = b.astype(np.float64)
-    u, v, uf, vf = noise_factors(seed)
-    a1 = af + u @ v
-    b1 = bf + uf @ vf
-    c = a1 @ b1 - (af @ uf) @ vf - u @ (v @ b1)
-    return np.rint(c).astype(np.int64)
+
+PARALLEL_MACS = 1 << 25            # products at least this large are split over the cores
+_matmul_pool: list = []
+
+
+def blas_matmul(a: np.ndarray, b: np.ndarray, dtype=np.float64) -> np.ndarray:
+    """a @ b through the BLAS in float64 (exact for integers while every sum stays below
+    2^53), returned as `dtype`.
+
+    The BLAS runs one thread per call (green/__init__.py: many small products, such as
+    work units, are faster that way), so a large product is split into row blocks
+    computed on every core in threads, which the BLAS lets run in parallel. Measured
+    on 20 cores against a BLAS thread per core: 1024^3 in 10 ms (12), 4096^3 in 1.06 s
+    (1.13); one BLAS thread alone took 35 ms and 5.7 s."""
+    m, k = a.shape
+    n = b.shape[1]
+    rows = m >= n                                  # split the longer side of the result
+    parts = min(os.cpu_count() or 1, max(m, n) // 64) if m * k * n >= PARALLEL_MACS else 1
+    if parts <= 1:
+        return (a.astype(np.float64, copy=False) @ b.astype(np.float64, copy=False)).astype(dtype, copy=False)
+    if not _matmul_pool:
+        _matmul_pool.append(ThreadPoolExecutor(os.cpu_count() or 1, thread_name_prefix="matmul"))
+    out = np.empty((m, n), dtype)
+    edges = [max(m, n) * i // parts for i in range(parts + 1)]
+    af = None if rows else a.astype(np.float64, copy=False)
+    bf = b.astype(np.float64, copy=False) if rows else None
+
+    def block(i: int) -> None:
+        lo, hi = edges[i], edges[i + 1]
+        if rows:
+            out[lo:hi] = a[lo:hi].astype(np.float64, copy=False) @ bf
+        else:
+            out[:, lo:hi] = af @ b[:, lo:hi].astype(np.float64, copy=False)
+    list(_matmul_pool[0].map(block, range(parts)))
+    return out
 
 
 def freivalds_check(a: np.ndarray, b: np.ndarray, c: np.ndarray, seed: bytes,

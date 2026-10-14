@@ -72,14 +72,16 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF, HKDFExpand
 
-from . import params, snapshot, tx as txmod
-from .chain import MAX_JOB_BLOB, InvalidBlock, MissingData, block_hash, share_id, target_of, work_for_target
+from . import params, snapshot, tx as txmod, work
+from .chain import (MAX_JOB_BLOB, InvalidBlock, MissingData, block_hash, seed_of, share_id, target_of,
+                    work_for_target)
 from .crypto import address_of, canonical, hhex, is_hex, merkle_root
 from .crypto import verify as crypto_verify
 from .tx import InvalidTx
+from .verify import ProcessChecker
 
 PROTOCOL_VERSION = 1
-AGENT = "green/0.17.0"
+AGENT = "green/0.18.0"
 
 MAX_OUTBOUND = 8               # outbound connections the node keeps
 BLOCK_RELAY_ONLY = 2           # ...of which relay blocks only
@@ -110,6 +112,7 @@ BLOCKS_PER_PEER = 16
 HEADER_INDEX_MAX = 50_000      # headers held ahead of the chain
 WORK_SAMPLES = 8               # work units recomputed per headers message (plus the last one)
 VERIFY_THREADS = min(8, os.cpu_count() or 2)
+PROCESS_BACKLOG = 32           # downloaded blocks waiting: check work in processes (green/verify.py)
 UNCONNECTING_LIMIT = 8
 BAN_SCORE = 100
 BAN_SECONDS = 24 * 3600
@@ -692,8 +695,10 @@ class P2P:
         # fast sync: None (off), "waiting" (for the header chain), "running", "done", "failed"
         self.snap_state = "waiting" if fast_sync else None
         self.verify_pool = ThreadPoolExecutor(VERIFY_THREADS, thread_name_prefix="verify")
+        blobs_dir = getattr(getattr(node, "blobs", None), "path", None)
+        self.checker = ProcessChecker(blobs_dir) if blobs_dir and getattr(node, "verify_processes", True) else None
         self.stats = {"blocks_relayed": 0, "txs_relayed": 0, "headers_received": 0, "blocks_downloaded": 0,
-                      "work_samples": 0, "prechecked": 0, "banned": 0, "stem_relayed": 0, "stem_fluffed": 0,
+                      "work_samples": 0, "prechecked": 0, "checked_in_processes": 0, "banned": 0, "stem_relayed": 0, "stem_fluffed": 0,
                       "embargo_fired": 0, "cmpct_sent": 0, "cmpct_received": 0, "cmpct_rebuilt": 0,
                       "cmpct_txs_requested": 0, "cmpct_fallbacks": 0}
         for text in peers:
@@ -726,6 +731,8 @@ class P2P:
         for p in self.all_peers():
             p.close("shutting down")
         self.verify_pool.shutdown(wait=False, cancel_futures=True)
+        if self.checker is not None:
+            self.checker.close()
         try:
             self.addrman.save()
             self._save_bans()
@@ -1613,15 +1620,22 @@ class P2P:
             peers.remove(prefer)
             peers.insert(0, prefer)
         for peer in peers[:4]:
-            wait = {"max": max_size, "event": threading.Event(), "data": None}
             with peer.lock:
-                if blob_hash in peer.blob_waits or not peer.alive:
+                if not peer.alive:
                     continue
-                peer.blob_waits[blob_hash] = wait
-            peer.send("getblob", {"hash": blob_hash, "max": max_size})
-            wait["event"].wait(10 + max_size / (2 * 1024 * 1024))
-            with peer.lock:
-                peer.blob_waits.pop(blob_hash, None)
+                # Someone here already asked this peer for it (the watchtower and an API
+                # client fetching one result at once): wait for that answer, do not skip
+                # the peer -- with a single peer, skipping meant failing.
+                wait = peer.blob_waits.get(blob_hash)
+                asked = wait is None
+                if asked:
+                    wait = peer.blob_waits[blob_hash] = {"max": max_size, "event": threading.Event(), "data": None}
+            if asked:
+                peer.send("getblob", {"hash": blob_hash, "max": max_size})
+            wait["event"].wait(10 + wait["max"] / (2 * 1024 * 1024))
+            if asked:
+                with peer.lock:
+                    peer.blob_waits.pop(blob_hash, None)
             data = wait["data"]
             if data is not None and hhex(data) == blob_hash:
                 return data
@@ -1883,7 +1897,7 @@ class P2P:
             if in_index:
                 # Its work unit is checked in the pool right away, in parallel with
                 # other arrivals; the connector thread connects blocks in order.
-                self.downloaded[bh] = (block, peer, self.verify_pool.submit(self._precheck, block))
+                self.downloaded[bh] = (block, peer, self._check_work(block))
                 self.stats["blocks_downloaded"] += 1
         if in_index:
             self._connect_wake.set()
@@ -1946,7 +1960,9 @@ class P2P:
                     return
                 for bh, block, peer, check in batch:
                     try:
-                        check.result()                   # usually done by now
+                        found = check.result()           # usually done by now
+                        if isinstance(found, list):      # transcripts from a worker process
+                            self._apply_transcripts(block, found)
                     except Exception:
                         pass                             # add_block then checks the work itself
                     near_tip = self._height_of(self.best) - block["header"]["height"] <= 2
@@ -1961,6 +1977,29 @@ class P2P:
                     break                            # "retry"/"orphan": the scheduler asks again
         finally:
             self.connect_lock.release()
+
+    def _check_work(self, block: dict):
+        """A future for a downloaded block's work checks: worker processes during a long
+        download (threads top out at ~2x under the interpreter lock), threads otherwise."""
+        if self.checker is not None and len(self.downloaded) >= PROCESS_BACKLOG:
+            try:
+                return self.checker.submit([block["header"]] + list(block.get("shares", [])))
+            except Exception:
+                pass                                 # (closing, or a broken pool): threads instead
+        return self.verify_pool.submit(self._precheck, block)
+
+    def _apply_transcripts(self, block: dict, found: list) -> None:
+        """Record what a worker process recomputed: the block's work unit, then its shares'."""
+        hdr = block["header"]
+        if found and found[0] is not None and self.chain.work_ok(hdr, found[0]):
+            if len(self.chain.prechecked) > 10_000:
+                self.chain.prechecked.clear()
+            self.chain.prechecked.add(block_hash(block))
+            self.stats["checked_in_processes"] += 1
+        for sh, tr in zip(block.get("shares", []), found[1:]):
+            if tr is not None and tr == sh["transcript"] \
+                    and work.ticket_value(seed_of(sh), tr) <= self.chain.share_target(sh):
+                self.chain.share_verified(share_id(sh))
 
     def _precheck(self, block: dict) -> None:
         hdr = block["header"]
@@ -2125,6 +2164,8 @@ class P2P:
             time.sleep(1.0)
             try:
                 self._tick()
+                if self.checker is not None:
+                    self.checker.stop_if_idle()      # worker processes only while a long sync lasts
                 if time.time() - last_save > 300:
                     last_save = time.time()
                     self.addrman.save()
