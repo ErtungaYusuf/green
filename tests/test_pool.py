@@ -145,8 +145,11 @@ def test_a_pool_miner_survives_the_pool_going_away(pool_node):
         assert time.time() < end, "no share accepted"
         time.sleep(0.1)
     pool.stop()                                        # the pool restarts...
-    time.sleep(3)
-    assert t.is_alive() and any("retrying" in m for m in logs)
+    end = time.time() + 20                             # (a refused local connection takes ~2 s on Windows)
+    while not any("retrying" in m for m in logs):
+        assert time.time() < end, "the miner did not notice the pool going away"
+        time.sleep(0.1)
+    assert t.is_alive()
     restarted = Pool(node, operator.address, port=pool.port)
     restarted.start()                                  # ...and the miner carries on with it
     before = miner.shares
