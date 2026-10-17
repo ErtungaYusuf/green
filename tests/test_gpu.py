@@ -44,3 +44,26 @@ def test_ticket_only_path_matches_full_unit():
     tr1, tk1 = miner.ticket(a, b, b"hot")
     tr2, tk2, _ = miner.unit(a, b, b"hot")
     assert tr1 == tr2 and tk1 == tk2
+
+
+def test_batches_in_both_slots_match_the_cpu_try_by_try():
+    """Full and partial batches, two outstanding at once (the miner's pipeline): every
+    try's transcript and ticket are the CPU's, in order."""
+    def tries(tag, count):
+        out = []
+        for i in range(count):
+            seed = b"%s-%d" % (tag, i)
+            a, b = work.filler_inputs(seed)
+            out.append((a, b, seed))
+        return out
+    first, second, third = tries(b"one", miner.batch), tries(b"two", 3), tries(b"three", miner.batch)
+    h1 = miner.submit(first)
+    h2 = miner.submit(second)
+    with pytest.raises(RuntimeError):
+        miner.submit(third)                                   # both slots busy
+    got = miner.collect(h1) + miner.collect(h2)
+    got += miner.collect(miner.submit(third))
+    for (a, b, seed), (transcript, ticket) in zip(first + second + third, got):
+        expect = work.compute_unit(a, b, seed, product=False)[0]
+        assert transcript == expect and ticket == work.ticket_value(seed, expect), seed
+    assert len(got) == 2 * miner.batch + 3

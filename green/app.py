@@ -39,6 +39,7 @@ DEFAULT_PORT = 8600
 CHANNEL_AMOUNT = params.YAPRAK_PER_COIN // 20   # locked with each provider when an account starts buying
 PROVIDERS = 2                                    # channels an account opens, to the cheapest providers
 MAX_BODY = 2 * MAX_DIM * MAX_DIM
+MAX_UNIT = params.UNIT                           # jobs are padded to whole units
 TRAIN_STEPS_MAX = 2000
 PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.html")
 
@@ -59,12 +60,13 @@ class Account:
 
 class App:
     def __init__(self, accounts: list[Account], buyer: str | None = None, host: str = "127.0.0.1",
-                 port: int = DEFAULT_PORT, allow_local: bool = True, log=print):
+                 port: int = DEFAULT_PORT, allow_local: bool = True, log=print, providers: int = PROVIDERS):
         if not accounts:
             raise AppError("no accounts")
         self.accounts = {a.name: a for a in accounts}
         self.buyer = buyer if buyer in self.accounts else accounts[0].name
         self.host, self.port, self.allow_local, self.log = host, port, allow_local, log
+        self.providers = providers
         self.token = secrets.token_hex(16)
         self.jobs: dict[str, dict] = {}
         self.jobs_lock = threading.Lock()
@@ -163,9 +165,9 @@ class App:
         """The account's channels to providers, opened on first use (one block)."""
         with a.lock:
             if a.cluster is None:
-                self.log(f"[app] {a.name}: opening channels to {PROVIDERS} providers "
+                self.log(f"[app] {a.name}: opening channels to up to {self.providers} providers "
                          f"({params.fmt_amount(CHANNEL_AMOUNT)} each; confirmed in the next block)")
-                a.cluster = ComputeCluster.from_market(a.node, a.key, CHANNEL_AMOUNT, count=PROVIDERS,
+                a.cluster = ComputeCluster.from_market(a.node, a.key, CHANNEL_AMOUNT, count=self.providers,
                                                        allow_local=self.allow_local)
             return a.cluster
 
@@ -210,6 +212,24 @@ class App:
                 "cost": self.paid(acct) - paid, "checked": True,
                 "matches_local": bool(np.array_equal(c, local)), "local_seconds": local_s,
                 "sample": c[:2, :4].tolist()}
+
+    def post_job(self, name: str | None, m: int, k: int, n: int, price: int) -> dict:
+        """Post random m x k x n matrices as a job on the on-chain market: miners compute
+        its units as their work and deliver them in batches; the buyer's node checks
+        every result and disputes wrong ones by itself."""
+        acct = self.account(name)
+        rng = np.random.default_rng()
+        a8 = rng.integers(-128, 128, (m, k), dtype=np.int8)
+        b8 = rng.integers(-128, 128, (k, n), dtype=np.int8)
+        pad = lambda x: np.pad(x, [(0, -x.shape[0] % MAX_UNIT), (0, -x.shape[1] % MAX_UNIT)])   # noqa: E731
+        pa, pb = pad(a8), pad(b8)
+        blob = txmod.encode_job(pa, pb)
+        dims = txmod.job_dims_units(pa, pb)
+        if max(dims) > params.MAX_JOB_UNITS_PER_DIM:
+            raise AppError("job too large")
+        job = http_post(f"{acct.node}/blob", blob, raw=True, timeout=60)["hash"]
+        txid = self._submit(acct, "job_post", job=job, dims=dims, price=price)
+        return {"job": job, "txid": txid, "units": dims[0] * dims[1] * dims[2], "escrow": price * dims[0] * dims[1] * dims[2]}
 
     def close(self, name: str | None) -> int:
         """Close the account's channels: the providers claim what was used, the rest comes back."""
@@ -268,7 +288,7 @@ class App:
             with self.jobs_lock:
                 job.update(state="done", result=result)
         except Exception as e:                       # shown to the user, not raised in a thread
-            say(f"Failed: {e}")
+            say(f"Failed: {describe(e)}")
             with self.jobs_lock:
                 job["state"] = "failed"
 
@@ -411,6 +431,16 @@ def _handler(app: App):
             return self._send(200, np.ascontiguousarray(c, dtype="<i4").tobytes(), "application/octet-stream")
 
     return Handler
+
+
+def describe(e: Exception) -> str:
+    """An error as a person should read it: with the node's own explanation for HTTP errors."""
+    if isinstance(e, urllib.error.HTTPError):
+        try:
+            return f"{e.code}: {json.loads(e.read()).get('error', e.reason)}"
+        except (ValueError, OSError, AttributeError):
+            return f"{e.code}: {e.reason}"
+    return f"{type(e).__name__}: {e}"
 
 
 def _reachable(node: str) -> bool:

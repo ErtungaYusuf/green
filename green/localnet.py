@@ -1,15 +1,20 @@
 """A whole network on one computer: five people, each running their own node.
 
-    grn localnet start [--dir localnet] [--gpu NAME]   create it the first time, start every node
-    grn localnet status                                who is who: height, peers, mining, balance
-    grn localnet stop                                  stop every node cleanly
-    grn localnet reset                                 stop, then delete the network
+    grn localnet start [--dir localnet] [--cpu]   create it the first time, start everyone
+    grn localnet status                           who is who: height, peers, mining, balance, buying
+    grn localnet stop                             stop everyone cleanly
+    grn localnet reset                            stop, then delete the network
 
-Each persona is a separate process with its own wallet, data folder, ports and log
-file, talking to the others over the real encrypted P2P protocol, on a network of its
-own (its own genesis block). Nothing is special-cased: these are the nodes anyone
-would run, only every address is 127.0.0.1. The wallets are stored unencrypted --
-this network is for trying things out, and its coins are worth nothing.
+Three miners (alice, bob, dave) mine on the GPU (on the CPU without one, or with --cpu)
+and sell compute; two buyers (carol, erin) keep asking the network for compute: each
+runs a buyer process next to its node that trains small models and buys products
+through payment channels, and posts matrix jobs to the on-chain market.
+
+Each persona's node is a separate process with its own wallet, data folder, ports and
+log file, talking to the others over the real encrypted P2P protocol, on a network of
+its own (its own genesis block). Nothing is special-cased: these are the nodes anyone
+would run, only every address is 127.0.0.1. The wallets are stored unencrypted -- this
+network is for trying things out, and its coins are worth nothing.
 
 `grn app --localnet` opens the app on it: mine, send coins, buy compute.
 """
@@ -28,11 +33,12 @@ from .chain import block_hash, make_genesis
 from .node import http_get, http_post
 
 PERSONAS = [
-    {"name": "alice", "role": "miner who sells compute", "mine": True, "price": 1000},
-    {"name": "bob", "role": "miner who sells compute, dearer", "mine": True, "price": 1500},
-    {"name": "carol", "role": "AI researcher who buys compute", "mine": False, "price": None},
-    {"name": "dave", "role": "small miner, paid through shares", "mine": True, "price": None},
-    {"name": "erin", "role": "full node: validates, relays, watches", "mine": False, "price": None},
+    {"name": "alice", "role": "miner, sells compute", "mine": True, "price": 1000, "buys": False},
+    {"name": "bob", "role": "miner, sells compute (dearer)", "mine": True, "price": 1500, "buys": False},
+    {"name": "carol", "role": "AI researcher: trains models on bought compute", "mine": False, "price": None,
+     "buys": True},
+    {"name": "dave", "role": "miner, sells compute", "mine": True, "price": 1200, "buys": False},
+    {"name": "erin", "role": "startup: buys compute, posts jobs", "mine": False, "price": None, "buys": True},
 ]
 BASE_PORT = 18500           # persona i: API BASE+1+i, P2P BASE+101+i, compute BASE+201+i
 START_SECONDS = 90          # how long `start` waits for every node to answer
@@ -130,6 +136,8 @@ def node_status(net: dict, p: dict, timeout: float = 2.0) -> dict | None:
 
 
 def _command(root: str, net: dict, p: dict, gpu: bool) -> list[str]:
+    """The node of persona `p` (mining on the GPU if `gpu`: a node without a usable GPU
+    says so in its log and mines on the CPU)."""
     cmd = [sys.executable, "-m", "green", "--data", os.path.abspath(p["data"]), "node",
            "--port", str(p["api"]), "--p2p-port", str(p["p2p"]),
            "--genesis", os.path.abspath(os.path.join(root, "genesis.json")), "--report", "30"]
@@ -165,7 +173,7 @@ def _spawn(cmd: list[str], log_path: str) -> subprocess.Popen:
         out.close()
 
 
-def start(root: str, gpu: str | None = None, base_port: int = BASE_PORT, log=print) -> dict:
+def start(root: str, gpu: bool = True, base_port: int = BASE_PORT, log=print) -> dict:
     net = load(root)
     if net is None:
         taken = [base_port + 1 + i for i in range(len(PERSONAS)) if _answers({"api": base_port + 1 + i})]
@@ -181,7 +189,7 @@ def start(root: str, gpu: str | None = None, base_port: int = BASE_PORT, log=pri
         if _answers(p):
             raise LocalnetError(f"{url(p)} is another network's node (another localnet folder?): stop it, or "
                                 f"use --base-port for a network of your own")
-        proc = _spawn(_command(root, net, p, gpu == p["name"]), os.path.join(p["data"], "node.log"))
+        proc = _spawn(_command(root, net, p, gpu and p["mine"]), os.path.join(p["data"], "node.log"))
         started[p["name"]] = proc
         log(f"  {p['name']:6s} starting ({p['role']}), API {url(p)}")
     end = time.time() + START_SECONDS
@@ -200,6 +208,13 @@ def start(root: str, gpu: str | None = None, base_port: int = BASE_PORT, log=pri
         raise LocalnetError(f"no answer from {', '.join(sorted(waiting))} after {START_SECONDS} s; see their node.log")
     pids = _read_pids(root)
     pids.update({name: proc.pid for name, proc in started.items()})
+    for p in net["personas"]:                    # the buyers' processes, next to their nodes
+        key = f"{p['name']}-buyer"
+        if p.get("buys") and not (key in pids and _alive(pids[key])):
+            proc = _spawn([sys.executable, "-m", "green.localnet", "buyer", os.path.abspath(root), p["name"]],
+                          os.path.join(p["data"], "buyer.log"))
+            pids[key] = proc.pid
+            log(f"  {p['name']:6s} starts asking the network for compute (log: {os.path.join(p['data'], 'buyer.log')})")
     with open(_pids_file(root), "w", encoding="utf-8") as f:
         json.dump(pids, f)
     return net
@@ -228,6 +243,12 @@ def status(root: str) -> list[dict]:
                 acct = {}
             row.update(height=st["height"], peers=len(st["peers"]), mining=st["mining"],
                        units_per_second=st["units_per_second"], balance=acct.get("balance"))
+        if p.get("buys"):
+            try:
+                with open(os.path.join(p["data"], "buyer.json"), encoding="utf-8") as f:
+                    row["buying"] = json.load(f)
+            except (FileNotFoundError, ValueError):
+                row["buying"] = None
         rows.append(row)
     return rows
 
@@ -255,7 +276,11 @@ def stop(root: str, log=print) -> None:
         time.sleep(0.5)
     for p in asked:
         log(f"  {p['name']:6s} still running after {STOP_SECONDS} s; stop it by hand (see {p['data']}/node.log)")
-    if not asked and os.path.exists(_pids_file(root)):
+    buyers = [k for k in pids if k.endswith("-buyer")]
+    while buyers and time.time() < end:          # a buyer ends once its node is gone (BUYER_GRACE)
+        buyers = [k for k in buyers if _alive(pids[k])]
+        time.sleep(0.5)
+    if not asked and not buyers and os.path.exists(_pids_file(root)):
         os.remove(_pids_file(root))
 
 
@@ -284,12 +309,131 @@ def reset(root: str, log=print) -> None:
 
 
 def print_status(rows: list[dict], root: str) -> None:
-    print(f"{'persona':8s} {'role':38s} {'height':>6s} {'peers':>5s} {'mining':>6s} {'balance':>16s}  node")
+    print(f"{'persona':8s} {'role':38s} {'height':>6s} {'peers':>5s} {'mining':>8s} {'balance':>16s}  node")
     for r in rows:
         if not r["running"]:
-            print(f"{r['name']:8s} {r['role']:38s} {'-':>6s} {'-':>5s} {'-':>6s} {'(stopped)':>16s}  {r['url']}")
+            print(f"{r['name']:8s} {r['role']:38s} {'-':>6s} {'-':>5s} {'-':>8s} {'(stopped)':>16s}  {r['url']}")
             continue
         bal = params.fmt_amount(r["balance"]) if r["balance"] is not None else "?"
+        mining = f"{r['units_per_second']:.0f}/s" if r["mining"] else "off"
         print(f"{r['name']:8s} {r['role']:38s} {r['height']:>6d} {r['peers']:>5d} "
-              f"{'on' if r['mining'] else 'off':>6s} {bal:>16s}  {r['url']}")
-    print(f"\nLogs: {os.path.join(root, '<persona>', 'node.log')}.  App: grn app --localnet {root}")
+              f"{mining:>8s} {bal:>16s}  {r['url']}")
+    buyers = [r for r in rows if "buying" in r]
+    if buyers:
+        print("\nCompute bought:")
+        for r in buyers:
+            b = r["buying"]
+            print(f"  {r['name']:6s} " + ("nothing yet" if not b else
+                  f"{b['products']} products, {b['trainings']} models trained, {b['jobs']} jobs posted, "
+                  f"paid {params.fmt_amount(b['paid'])}" + (f"; last: {b['last']}" if b.get("last") else "")))
+    print(f"\nLogs: {os.path.join(root, '<persona>', 'node.log')} and buyer.log.  App: grn app --localnet {root}")
+
+
+# --- the buyers ------------------------------------------------------------------------
+
+BUYER_GRACE = 15            # a buyer process ends once its node has been gone this long
+LOW_BALANCE = params.YAPRAK_PER_COIN // 2      # below this a buyer buys coins from a miner...
+COINS_BOUGHT = 3 * params.YAPRAK_PER_COIN      # ...this many
+JOB_PRICE = params.YAPRAK_PER_COIN // 500      # per unit, for jobs posted on chain
+
+
+def run_buyer(root: str, name: str) -> None:
+    """A compute buyer's life (its own process, started by `start`). When its balance
+    runs low it buys coins from the richest miner (on this test network, a transfer the
+    miner signs). Otherwise, every 10-30 s, it asks the network for compute: trains a
+    small model (every product bought from the miners through payment channels and
+    checked), buys a few products, or posts a matrix job to the on-chain market."""
+    import random
+
+    from . import app as appmod
+    net = load(root)
+    me = next(p for p in net["personas"] if p["name"] == name)
+    accounts, _ = appmod.localnet_accounts(root)
+    app = appmod.App(accounts, buyer=name, providers=3, log=_say)
+    stats_path = os.path.join(me["data"], "buyer.json")
+    try:
+        with open(stats_path, encoding="utf-8") as f:
+            stats = json.load(f)
+    except (FileNotFoundError, ValueError):
+        stats = {"products": 0, "trainings": 0, "jobs": 0, "paid": 0, "coins_bought": 0, "last": ""}
+    rng = random.Random()
+    gone = None
+    _say(f"{name} starts buying compute on the network")
+    while True:
+        if not _answers(me):
+            gone = gone or time.time()
+            if time.time() - gone > BUYER_GRACE:
+                _say(f"{name}'s node is gone; stopping")
+                try:
+                    app.close(name)
+                except (OSError, ValueError):
+                    pass
+                return
+            time.sleep(1)
+            continue
+        gone = None
+        try:
+            _buy_once(app, me, net, stats, rng)
+        except Exception as e:                   # keep going: the network is allowed to be busy
+            _say(f"could not buy this time: {appmod.describe(e)}")
+            time.sleep(10)
+        with open(stats_path + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(stats, f)
+        os.replace(stats_path + ".tmp", stats_path)
+        time.sleep(rng.uniform(10, 30))
+
+
+def _buy_once(app, me: dict, net: dict, stats: dict, rng) -> None:
+    name = me["name"]
+    balance = http_get(f"{url(me)}/account/{me['address']}", timeout=10)["pending_balance"]
+    if balance < LOW_BALANCE:
+        miners = [(http_get(f"{url(p)}/account/{p['address']}", timeout=10)["pending_balance"], p["name"])
+                  for p in net["personas"] if p["mine"] and _answers(p)]
+        rich = [m for m in sorted(miners, reverse=True) if m[0] > 4 * COINS_BOUGHT]
+        if not rich:
+            _say(f"{params.fmt_amount(balance)} left and no miner has coins to sell yet; waiting")
+            return
+        app.send(rich[0][1], name, str(COINS_BOUGHT / params.YAPRAK_PER_COIN))
+        stats["coins_bought"] += COINS_BOUGHT
+        stats["last"] = f"bought {params.fmt_amount(COINS_BOUGHT)} from {rich[0][1]}"
+        _say(stats["last"] + " (a transfer on this test network)")
+        return
+    if not http_get(f"{url(me)}/providers", timeout=10):
+        _say("no compute on offer yet (providers advertise once they hold 0.1 GRN); waiting")
+        return
+    paid0 = app.paid(app.account(name))
+    roll = rng.random()
+    if roll < 0.4:
+        steps = rng.choice([50, 100, 200])
+        job = {"id": "buyer", "kind": "train", "account": name, "steps": steps, "state": "running",
+               "lines": [], "started": time.time()}
+        app._train(job, app.account(name))
+        if job["state"] != "done":
+            raise RuntimeError(job["lines"][-1] if job["lines"] else "training failed")
+        r = job["result"]
+        stats["trainings"] += 1
+        stats["products"] += r["products"]
+        stats["last"] = f"trained a digit model ({steps} steps, {r['products']} products, accuracy {r['accuracy']:.2f})"
+    elif roll < 0.8:
+        count, size = rng.randint(3, 8), rng.choice([256, 512, 1024])
+        for _ in range(count):
+            app.product(name, size, size, size)
+        stats["products"] += count
+        stats["last"] = f"bought {count} products of {size}x{size}x{size}"
+    else:
+        r = app.post_job(name, 512, 512, 512, JOB_PRICE)
+        stats["jobs"] += 1
+        stats["last"] = f"posted job {r['job'][:12]} on chain ({r['units']} units, escrow {params.fmt_amount(r['escrow'])})"
+    stats["paid"] += app.paid(app.account(name)) - paid0
+    _say(stats["last"])
+
+
+def _say(text: str) -> None:
+    print(f"[{time.strftime('%H:%M:%S')}] {text}", flush=True)
+
+
+if __name__ == "__main__":                        # python -m green.localnet buyer <root> <name>
+    if len(sys.argv) == 4 and sys.argv[1] == "buyer":
+        run_buyer(sys.argv[2], sys.argv[3])
+    else:
+        sys.exit("usage: python -m green.localnet buyer <root> <name>   (started by grn localnet start)")

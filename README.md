@@ -16,7 +16,7 @@ Production status of every area, with evidence and blockers: [PRODUCTION.md](PRO
 
 ## Try it: a whole network on your computer
 
-Five people, each running their own node, on a network of their own: alice and bob mine and sell compute, carol is an AI researcher who buys it, dave is a small miner paid through shares, erin runs a full node.
+Five people, each running their own node, on a network of their own: alice, bob and dave mine on the GPU (on the CPU without one, or with `--cpu`) and sell compute; carol, an AI researcher, and erin, a startup, keep asking the network for compute: next to each of their nodes a buyer process trains small models and buys products through payment channels, and posts matrix jobs to the on-chain market. `grn localnet status` shows what they have bought.
 
 ```bash
 grn localnet start      # create the network the first time, start the five nodes
@@ -33,7 +33,12 @@ req = urllib.request.Request("http://127.0.0.1:8600/v1/matmul", a.tobytes() + b.
 c = np.frombuffer(urllib.request.urlopen(req).read(), "<i4").reshape(512, 512)    # computed by the network
 ```
 
-`grn localnet status` shows who is who, `grn localnet stop` stops every node cleanly, `grn localnet reset` deletes the network. The nodes are ordinary nodes (their logs are in `localnet/<name>/node.log`); every command below works on them with `--data localnet/<name> --node http://127.0.0.1:1850N` (alice is 18501, erin 18505). Their wallets are unencrypted: the local network is for trying things, its coins are worth nothing.
+`grn localnet status` shows who is who, `grn localnet stop` stops every node cleanly, `grn localnet reset` deletes the network. The nodes are ordinary nodes (their logs are in `localnet/<name>/node.log`); every command below works on them with `--data localnet/<name> --node http://127.0.0.1:1850N` (alice is 18501, erin 18505; the buyers' logs are `localnet/<name>/buyer.log`). Their wallets are unencrypted: the local network is for trying things, its coins are worth nothing.
+
+## What's new in v0.20
+
+- **GPU mining that keeps the GPU busy:** a mining node does ~800 units/s on an RX 9070 XT instead of 358 (batches, a pipeline, a faster kernel, and the slow bookkeeping around each try removed); CPU mining uses several cores (398 instead of 137).
+- **A local network with buyers:** the miners mine on the GPU, and two buyers keep the network busy with real compute demand: training, products and on-chain jobs.
 
 ## What's new in v0.19
 

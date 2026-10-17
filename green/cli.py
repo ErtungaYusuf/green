@@ -603,10 +603,8 @@ def cmd_localnet(args):
     from . import localnet
     try:
         if args.action == "start":
-            if args.gpu and args.gpu not in {p["name"] for p in localnet.PERSONAS if p["mine"]}:
-                raise CliError("--gpu names a miner: alice, bob or dave")
             print(f"Local network in {args.dir}:")
-            localnet.start(args.dir, gpu=args.gpu, base_port=args.base_port)
+            localnet.start(args.dir, gpu=not args.cpu, base_port=args.base_port)
             print()
             localnet.print_status(localnet.status(args.dir), args.dir)
         elif args.action == "status":
@@ -1115,7 +1113,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="start: create it the first time and start every node; status: who is who; "
                         "stop: stop every node cleanly; reset: stop and delete it")
     s.add_argument("--dir", default="localnet", help="folder of the local network (default: localnet)")
-    s.add_argument("--gpu", metavar="PERSONA", help="this miner (alice, bob or dave) mines on the GPU")
+    s.add_argument("--cpu", action="store_true", help="the miners mine on the CPU (default: the GPU, if there is one)")
     s.add_argument("--base-port", type=int, default=18500,
                    help="ports used: base+1.. (API), base+101.. (P2P), base+201.. (compute); default 18500")
     s.set_defaults(fn=cmd_localnet)

@@ -103,7 +103,7 @@ def test_buyer_watchtower_catches_a_cheating_miner(tmp_path, monkeypatch):
     buyer, cheat = Key.generate(), Key.generate()
     node = Node(str(tmp_path / "b"), make_genesis(buyer.address, "buyer"), port=free_port(),
                 miner_key=buyer, log=lambda m: None)
-    node._choose_work = lambda: {"job": None, "unit": None}     # leave the job to the cheater
+    node._choose_work = lambda busy: {"job": None, "unit": None}   # leave the job to the cheater
     node.start(mine=True)
     try:
         wait_for(lambda: node.chain.state.balance(buyer.address) > 5 * params.YAPRAK_PER_COIN, what="reward")
@@ -216,7 +216,7 @@ def test_miner_does_not_recommit_units_waiting_in_the_mempool(tmp_path):
     node._flush_batches()
     assert [t["type"] for t in node.mempool.values()] == ["job_commit"]
     assert {(job_id, "0,0,0"), (job_id, "0,0,1")} <= node._busy_units()
-    assert node._choose_work() == {"job": None, "unit": None}       # nothing left to sell: filler work
+    assert node._choose_work(node._busy_units()) == {"job": None, "unit": None}   # nothing left to sell: filler work
 
 
 def test_node_works_a_wasm_task_end_to_end(tmp_path, monkeypatch):

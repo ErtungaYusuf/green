@@ -2,6 +2,21 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## 0.20.0
+
+**Mining that keeps the GPU busy**
+- A mining node fed its GPU one nonce at a time and waited for each, and around every try it checked the whole share pool, often rebuilt its block template, and counted the unit by rebuilding a list of the last 30 seconds of units (the faster the miner, the slower each count). Measured in a mining node on an RX 9070 XT: 358 units/s, where the GPU alone does several thousand.
+- Now the miner works in batches of 16 tries: the GPU digests one batch while the next is prepared (SHAKE-256 inputs and noise, in three threads), with two sets of GPU buffers; the template is rebuilt when the tip or the mempool changes, and for new shares at most once a second; the unit counter is constant time. The GPU kernel loads each pair of tiles into workgroup memory with coalesced reads and folds the 1,024 mixed products in a tree, instead of 1,024 atomic writes to 8 addresses. Bit for bit the same transcripts (tests compare every try of full and partial batches with the CPU; the node still checks its GPU against the CPU at start).
+- Measured: one mining node 358 → ~800 units/s on the GPU; three GPU miners of the local network ~630 units/s each, sharing one card. CPU mining also uses the threads: 137 → 398 units/s. The rest is preparing inputs in Python (SHAKE-256 holds the interpreter lock); generating them on the GPU is the next step.
+
+**The local network: miners and buyers**
+- Three miners (alice, bob, dave) mine on the GPU by default (`--cpu` to use the CPU; a node without a usable GPU says so and mines on the CPU) and sell compute; two buyers (carol, erin) each run a buyer process next to their node that keeps asking the network for compute: it buys coins from the richest miner when it runs low, then trains small models and buys products through payment channels, and posts matrix jobs to the on-chain market. `grn localnet status` shows what they bought. In a 45-minute run: 65,000 products, about 100 models trained (93% test accuracy at 200 steps) and 54 jobs posted, for about 1 GRN.
+- The app can post on-chain jobs (`App.post_job`) and open channels to more providers; errors in the app and the buyers' logs carry the node's own explanation.
+
+**Also**
+- A miner no longer mines blocks its peers would refuse as from the future: when blocks come many per second (each must be later than the median of the last 11) the chain's clock runs ahead of real time, and past MAX_FUTURE_SECONDS the miner now waits instead of churning out rejected blocks. Found when the faster miner stalled a test's chain.
+- 265 tests. Consensus is unchanged.
+
 ## 0.19.1
 
 - Verification workers start with `spawn` on every platform. On Linux, Python before 3.14 forks by default, copying a node whose other threads may hold locks the child would wait on forever.

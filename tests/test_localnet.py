@@ -49,10 +49,11 @@ def test_five_people_start_a_network_buy_and_sell_and_stop(tmp_path):
 
         def settled():
             rows = localnet.status(root)
-            heights = {row.get("height") for row in rows}
+            if not all(row["running"] and row["peers"] >= 3 for row in rows):
+                return False
+            heights = [row["height"] for row in rows]          # (miners keep moving the tip: close is enough)
             offers = http_get(f"{localnet.url(carol)}/providers", timeout=5)
-            return (all(row["running"] and row["peers"] >= 3 for row in rows) and len(heights) == 1
-                    and min(heights) >= 5 and len(offers) == 2)
+            return max(heights) - min(heights) <= 2 and min(heights) >= 5 and len(offers) == 3
         while not settled():
             assert time.time() < end, localnet.status(root)
             time.sleep(1)
@@ -60,14 +61,27 @@ def test_five_people_start_a_network_buy_and_sell_and_stop(tmp_path):
         assert rows["carol"]["balance"] > 0 and not rows["carol"]["mining"]      # the genesis reward is hers
         assert rows["alice"]["mining"] and rows["erin"]["peers"] >= 3
         assert grn("localnet", "start", "--dir", root, "--base-port", str(base)).returncode == 0   # already running
+
+        def bought():                            # the buyers' processes act: coins first, then compute
+            rows = localnet.status(root)
+            return any(r.get("buying") and (r["buying"]["coins_bought"] or r["buying"]["products"]) for r in rows)
+        end = time.time() + 150
+        while not bought():
+            assert time.time() < end, localnet.status(root)
+            time.sleep(2)
     finally:
         r = grn("localnet", "stop", "--dir", root)
     assert r.returncode == 0, r.stdout + r.stderr
     assert not any(row["running"] for row in localnet.status(root))
-    for p in net["personas"]:                    # each node shut down cleanly
+    for p in net["personas"]:                    # each node shut down cleanly, each buyer after it
         with open(os.path.join(p["data"], "node.log"), encoding="utf-8", errors="replace") as f:
             log = f.read()
         assert "Stopped." in log and "Traceback" not in log, (p["name"], log[-2000:])
+        if p["buys"]:
+            with open(os.path.join(p["data"], "buyer.log"), encoding="utf-8", errors="replace") as f:
+                log = f.read()
+            assert "node is gone; stopping" in log and "Traceback" not in log, (p["name"], log[-2000:])
+    assert not os.path.exists(os.path.join(root, "pids.json"))        # every process was seen to exit
 
 
 def test_reset_deletes_only_a_local_network(tmp_path):

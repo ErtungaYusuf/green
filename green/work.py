@@ -58,9 +58,11 @@ def prg(seed: bytes, label: bytes, count: int) -> np.ndarray:
     return np.frombuffer(hashlib.shake_256(seed + label).digest(count), dtype=np.uint8)
 
 
+_TERNARY = (np.arange(256) % 3 - 1).astype(np.float32)      # byte -> (byte mod 3) - 1
+
+
 def _ternary(seed: bytes, label: bytes, shape: tuple[int, int]) -> np.ndarray:
-    count = shape[0] * shape[1]
-    return ((prg(seed, label, count) % 3).astype(np.float32) - np.float32(1)).reshape(shape)
+    return _TERNARY[prg(seed, label, shape[0] * shape[1])].reshape(shape)
 
 
 def noise_factors(seed: bytes):

@@ -2,7 +2,7 @@
 
 Where Green stands on every aspect a production cryptocurrency needs, what backs each claim, and what is still missing. "Done" means implemented, tested and measured in this repository; it does not mean audited, battle-tested or ready to carry real value. Nothing here is ready for real money until the items marked **blocker** are done.
 
-Status as of v0.19 (October 2026). 264 automated tests; seventeen internal security reviews (SECURITY.md).
+Status as of v0.20 (October 2026). 265 automated tests; seventeen internal security reviews (SECURITY.md).
 
 ## Summary
 
@@ -20,7 +20,7 @@ Status as of v0.19 (October 2026). 264 automated tests; seventeen internal secur
 | 10. Wallets and keys | Done for a testnet (recovery phrases, encrypted files, checksummed addresses, multisig) | hardware wallets, a registered coin type |
 | 11. APIs and developer tools | Done for a testnet (versioned API, fee estimates, long-poll, Python SDK) | SDKs in other languages, explorer API |
 | 12. Operations | Done for a testnet (config file, logs, systemd, metrics and alerts, runbook) | — |
-| 13. Testing and QA | Partial (264 tests, fuzz, mutation testing, 8-node simulation) | multi-node testnet, soak tests |
+| 13. Testing and QA | Partial (265 tests, fuzz, mutation testing, 8-node simulation) | multi-node testnet, soak tests |
 | 14. Security assurance | Partial (internal reviews only) | **blocker**: independent audit, bug bounty |
 | 15. Upgrades and governance | Done (version-bits activation, signed releases, published process) | reproducible builds |
 | 16. Privacy | Partial (transaction origin: Dandelion++; data and amounts public) | — (documented) |
@@ -102,13 +102,13 @@ Pruned nodes (v0.11, green/prune.py): every header but only recent block bodies,
 
 ## 9. Mining software
 
-**Today:** CPU and GPU (WebGPU/Vulkan) miners, bit-exact (v0.18: ~480 units/s on one CPU core, ~1,300 on an RX 9070 XT); miners pick the best-paying open units and deliver them in batches.
+**Today:** CPU and GPU (WebGPU/Vulkan) miners, bit-exact; a mining node does ~800 units/s on an RX 9070 XT and ~400 on the CPU (v0.20: batched, pipelined, threaded); miners pick the best-paying open units and deliver them in batches.
 
 **Non-custodial pools (v0.13):** a block can pay up to 32 payees by weight, so a pool's blocks pay its miners directly; `green/pool.py` has the pool server (PPLNS templates, every share's work recomputed, bad shares refused and their senders paused) and a pool miner (`tests/test_pool.py`).
 
 **Pools sell compute (v0.14):** a pool assigns its miners units of open jobs, checks each result with Freivalds' test, commits them in batches and posts the bond; each commit names the miners who computed its units as payees, so consensus pays them when the batch settles (`test_pool_miners_compute_jobs_and_the_batches_pay_them`: the buyer gets correct products, the pool keeps exactly its fee).
 
-**Missing:** the GPU miner reaches ~1,300 units/s (v0.18; ~700 before), a small fraction of a modern card's int8 throughput (noise is generated on the CPU, one nonce per call); a native miner with on-GPU noise and batched nonces. Pool miners compute job units on the CPU even when they mine on a GPU; miners cannot yet choose a pool block's transactions (as Stratum V2 allows); results travel to the pool over plain HTTP (256 KiB per unit).
+**Missing:** a mining node feeds its GPU ~800 units/s (v0.20), a small fraction of a modern card's int8 throughput, held back by preparing the SHAKE-256 inputs and noise on the CPU in Python; those generated on the GPU, or a native miner. Pool miners compute job units on the CPU even when they mine on a GPU; miners cannot yet choose a pool block's transactions (as Stratum V2 allows); results travel to the pool over plain HTTP (256 KiB per unit).
 
 ## 10. Wallets and keys
 
@@ -140,7 +140,7 @@ Since v0.12: a transaction and address index kept consistent through reorgs (`/v
 
 ## 13. Testing and QA
 
-**Today:** 264 tests across consensus, security regressions, addresses, fees, state and storage, the state commitment and snapshots, the P2P protocol, atomicity, networks of live nodes, GPU, WASM, both markets, the agent and its guardian; two fuzz tests with exact accounting invariants; mutation testing proved the fuzz catches injected accounting bugs; a differential test against a reference replay; an 8-node network simulation with a split and a heal (`bench/net_sim.py`, v0.14: blocks reach every node in a median of 0.02 s, the halves converge in 0.6 s with identical state roots); CI configured for Linux, Windows and macOS.
+**Today:** 265 tests across consensus, security regressions, addresses, fees, state and storage, the state commitment and snapshots, the P2P protocol, atomicity, networks of live nodes, GPU, WASM, both markets, the agent and its guardian; two fuzz tests with exact accounting invariants; mutation testing proved the fuzz catches injected accounting bugs; a differential test against a reference replay; an 8-node network simulation with a split and a heal (`bench/net_sim.py`, v0.14: blocks reach every node in a median of 0.02 s, the halves converge in 0.6 s with identical state roots); CI configured for Linux, Windows and macOS.
 
 **Since v0.19** CI runs on GitHub (a private repository for now): every push is tested on Linux, Windows and macOS with Python 3.12 to 3.14, plus a Docker smoke test; the first run (3.12 and 3.13) passed everywhere.
 

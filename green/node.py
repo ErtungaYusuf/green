@@ -26,11 +26,13 @@ import random
 import threading
 import time
 import urllib.request
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import params, tx as txmod, work
-from .chain import (BlobStore, Chain, InvalidBlock, MissingData, block_hash, fee_rate, seed_of, share_id, solve,
+from .chain import (BlobStore, Chain, InvalidBlock, MissingData, block_hash, fee_rate, seed_of, share_id,
                     target_of,
                     work_inputs)
 from .crypto import Key, hhex, merkle_proof, merkle_root
@@ -57,6 +59,8 @@ MAX_BUMP_FEE = 1000 * params.MIN_TX_FEE    # ...up to this (0.1 GRN), so a fee s
 BUMP_SECONDS = 5.0
 MAX_SHARE_POOL = 4096         # shares waiting to be included
 TEMPLATE_SECONDS = 5          # the miner rebuilds its block template at least this often
+MINING_THREADS = max(1, min(4, (os.cpu_count() or 2) - 1))   # threads that prepare (CPU: compute) tries
+SHARE_TEMPLATE_SECONDS = 1    # ...and for new shares at most this often
 MAX_MANIFEST_BYTES = txmod.HASH_BYTES * params.MAX_BATCH_UNITS
 RESPONSES_PER_ROUND = 32      # disputes answered per loop; the rest wait for mempool room
 MAX_WAITERS = 16              # API clients long-polling for the next block at once
@@ -129,6 +133,12 @@ def http_post(url: str, body, timeout: float = 5.0, raw: bool = False):
         return json.loads(_read_limited(r, MAX_RESPONSE_BYTES))
 
 
+def _cpu_try(tr: dict) -> tuple[str, int]:
+    """A try's transcript and ticket on the CPU (runs in the miner's threads)."""
+    transcript = work.compute_unit(tr["a"], tr["b"], tr["seed"], product=False)[0]
+    return transcript, work.ticket_value(tr["seed"], transcript)
+
+
 class Node:
     def __init__(self, data_dir: str, genesis: dict, port: int = params.DEFAULT_PORT,
                  host: str = "127.0.0.1", peers=(), miner_key: Key | None = None, log=print,
@@ -176,13 +186,14 @@ class Node:
         self._warned_bond = False
         self.stats = {"units": 0, "useful_units": 0, "blocks_found": 0, "shares_found": 0, "batches_committed": 0,
                       "results_revealed": 0, "tasks_done": 0, "frauds_caught": 0, "started": time.time()}
-        self._recent_unit_times: list[float] = []
+        self._recent_unit_times: deque = deque()
         self._task_inflight: dict[str, dict] = {}
         self._own_waiting: dict[tuple, int] = {}   # (sender, nonce) of our pending protocol tx -> height first seen
         self.share_pool: dict[str, dict] = {}      # share id -> share (SPEC.md §3.5), for our templates
         self._share_cache: tuple = (None, -1, [])  # (tip, pool version, candidates)
         self._share_version = 0
-        self._template = None                      # (key, made, header, txs, shares): reused while nothing changed
+        self._template = None                      # (key, made, header, txs, shares, share version)
+        self._inflight_units = set()               # job units being tried right now (not yet buffered)
         self._task_unrunnable: set[str] = set()
         self.running = True
 
@@ -609,10 +620,10 @@ class Node:
             busy |= self.pool.assigned_keys()        # handed to pool miners
         return busy
 
-    def _choose_work(self) -> dict:
-        """Prefer the best-paying unit we can commit to; fall back to filler work."""
+    def _choose_work(self, busy: set) -> dict:
+        """Prefer the best-paying unit we can commit to; fall back to filler work. `busy`:
+        (job, unit key) pairs not to pick; the chosen one is added to it."""
         state = self.chain.state
-        busy = self._busy_units()
         best_price, options = 0, []
         for job_id, job in state.jobs.items():
             if job["price"] < best_price or not self._my_bond_ok(job):
@@ -626,54 +637,117 @@ class Node:
         if not options:
             return {"job": None, "unit": None}
         job_id, unit = random.choice(options)
+        busy.add((job_id, txmod.unit_key(unit)))
         return {"job": job_id, "unit": unit}
 
     def _mine_loop(self) -> None:
+        """Try nonces, in batches: on the GPU a batch is submitted before the previous
+        one is collected, so the CPU prepares the next inputs while the GPU works."""
         addr = self.miner_key.address
         self.log(f"Mining started. Reward address: {addr}")
-        while self.running:
-            if not self.mining:
-                time.sleep(0.2)
+        if self.gpu is not None:
+            self.gpu.discard()                       # (a restart after an error)
+        self._inflight_units = set()
+        pending = None                               # a GPU batch in flight: (tries, handle)
+        # Tries are prepared (SHAKE-256 inputs, noise) and, on the CPU, computed in a few
+        # threads: hashing and numpy release the interpreter lock (measured: 0.85 ms of
+        # preparation per try alone, 0.41 ms each across 3 threads).
+        pool = ThreadPoolExecutor(MINING_THREADS, thread_name_prefix="mine")
+        try:
+            while self.running:
+                if not self.mining:
+                    if pending is not None:
+                        self._finish_tries(pending[0], self.gpu.collect(pending[1]))
+                        pending = None
+                    time.sleep(0.2)
+                    continue
+                tries = self._next_tries(self.gpu.batch if self.gpu is not None else MINING_THREADS, pool)
+                if not tries:
+                    continue                         # (_next_tries waited)
+                if self.gpu is None:
+                    self._finish_tries(tries, list(pool.map(_cpu_try, tries)))
+                    continue
+                handle = self.gpu.submit_prepared([(tr["a1"], tr["b1"], tr["seed"]) for tr in tries])
+                if pending is not None:
+                    self._finish_tries(pending[0], self.gpu.collect(pending[1]))
+                pending = (tries, handle)
+        finally:
+            pool.shutdown(wait=False)
+
+    def _next_tries(self, count: int, pool: ThreadPoolExecutor) -> list[dict]:
+        """`count` tries on the current block template, each with its own work unit and
+        nonce and its inputs ready. The template (transactions, shares, state root) is
+        rebuilt when the tip or the mempool changes, at least every TEMPLATE_SECONDS, and
+        for new shares at most every SHARE_TEMPLATE_SECONDS: checking the share pool and
+        building a template for every try cost more than the try itself."""
+        addr = self.miner_key.address
+        self._process_batches()
+        with self.lock:
+            key = (self.chain.tip, id(self.mempool), len(self.mempool))
+            t, now = self._template, time.time()
+            if t is None or t[0] != key or now - t[1] > TEMPLATE_SECONDS \
+                    or (t[5] != self._share_version and now - t[1] > SHARE_TEMPLATE_SECONDS):
+                version = self._share_version
+                shares = self.share_candidates()
+                base, txs, _ = self.chain.build_template(addr, list(self.mempool.values()),
+                                                         signal_skip=self.no_signal, shares=shares)
+                t = self._template = (key, now, base, txs, shares, version)
+            _, _, base, txs, shares, _ = t
+            if base["time"] > time.time() + params.MAX_FUTURE_SECONDS - 5:
+                # The chain's clock (each block after the median of the last 11) ran ahead of
+                # ours, as it does when blocks come many per second: a block now would be
+                # refused as from the future, so wait for the clock instead of mining it.
+                self._template = None
+                time.sleep(0.5)
+                return []
+            tip = self.chain.tip
+            busy = self._busy_units() | self._inflight_units
+            headers = []
+            for _ in range(count):
+                header = dict(base, work=self._choose_work(busy), nonce=random.getrandbits(48))
+                if header["work"]["job"] is not None:
+                    self._inflight_units.add((header["work"]["job"], txmod.unit_key(header["work"]["unit"])))
+                headers.append(header)
+        tries = []
+        for header, inputs in zip(headers, pool.map(self._prepare_try, headers)):
+            if isinstance(inputs, Exception):
+                self.log(f"[warning] could not do the work unit: {inputs}")
+                self._release_unit(header["work"])
                 continue
-            self._process_batches()
-            shares = self.share_candidates()
+            tries.append({"header": header, "tip": tip, "txs": txs, "shares": shares, **inputs})
+        if not tries:
+            time.sleep(1)                            # the work's data is missing: give it time to arrive
+        return tries
+
+    def _prepare_try(self, header: dict):
+        """A try's seed and inputs (and A', B' for the GPU), or the error that stops it."""
+        seed = seed_of(header)
+        try:
+            a, b = work_inputs(header, seed, self.blobs, self._job_size(header["work"]))
+        except (MissingData, InvalidBlock, InvalidTx) as e:
+            return e
+        out = {"seed": seed, "a": a, "b": b}
+        if self.gpu is not None:
+            out["a1"], out["b1"] = self.gpu.factors(a, b, seed)
+        return out
+
+    def _release_unit(self, work_item: dict) -> None:
+        if work_item["job"] is not None:
             with self.lock:
-                # The template (transactions, shares, state root) does not depend on the work
-                # unit or the nonce: it is rebuilt only when the tip, the mempool or the shares
-                # change, or every TEMPLATE_SECONDS, not for every try.
-                key = (self.chain.tip, id(self.mempool), len(self.mempool), self._share_version)
-                t = self._template
-                if t is None or t[0] != key or time.time() - t[1] > TEMPLATE_SECONDS:
-                    base, txs, _ = self.chain.build_template(addr, list(self.mempool.values()),
-                                                             signal_skip=self.no_signal, shares=shares)
-                    t = self._template = (key, time.time(), base, txs, shares)
-                _, _, base, txs, shares = t
-                header = dict(base)
-                header["work"] = self._choose_work()
-                header["nonce"] = random.getrandbits(48)
-                tip = self.chain.tip
-            work_item = header["work"]
-            seed = seed_of(header)
-            try:
-                a, b = work_inputs(header, seed, self.blobs, self._job_size(work_item))
-            except (MissingData, InvalidBlock, InvalidTx) as e:
-                self.log(f"[warning] could not do the work unit: {e}")
-                time.sleep(1)
-                continue
-            if self.gpu is not None:
-                transcript, ticket = self.gpu.ticket(a, b, seed)
-            else:
-                transcript, ticket, _ = solve(header, self.blobs)
+                self._inflight_units.discard((work_item["job"], txmod.unit_key(work_item["unit"])))
+
+    def _finish_tries(self, tries: list, results: list) -> None:
+        """What each try's ticket won: a share, a block, and for a job's unit a result to sell."""
+        for tr, (transcript, ticket) in zip(tries, results):
+            header, work_item = tr["header"], tr["header"]["work"]
             is_useful = work_item["job"] is not None
             self._count_unit(is_useful)
-
             # Delivery is separate from the lottery: results are collected into
             # batches (one commit + one reveal for up to MAX_BATCH_UNITS units),
             # and only a bounded number are in flight; the rest are just tickets.
             if is_useful and self._should_commit():
-                self._buffer_result(work_item, work.recover_useful(a, b, seed))
-            self._flush_batches()
-
+                self._buffer_result(work_item, work.recover_useful(tr["a"], tr["b"], tr["seed"]))
+            self._release_unit(work_item)            # (now in the buffer, or not sold)
             if target_of(header) < ticket <= self.chain.share_target(header):
                 # Not a block, but a share: paid from the reserve when a block includes it.
                 try:
@@ -683,9 +757,9 @@ class Node:
                     pass
             if ticket <= target_of(header):
                 header["transcript"] = transcript
-                block = {"header": header, "txs": txs, **({"shares": shares} if shares else {})}
+                block = {"header": header, "txs": tr["txs"], **({"shares": tr["shares"]} if tr["shares"] else {})}
                 with self.lock:
-                    stale = self.chain.tip != tip
+                    stale = self.chain.tip != tr["tip"]
                 if stale:
                     continue
                 try:
@@ -695,9 +769,10 @@ class Node:
                     continue
                 if status == "added":
                     self.stats["blocks_found"] += 1
-                    kind = "useful work" if header["work"]["job"] else "filler work"
+                    kind = "useful work" if work_item["job"] else "filler work"
                     self.log(f"*** BLOCK FOUND #{header['height']}  {block_hash(block)[:16]}...  "
-                             f"({kind}, {len(txs)} txs, {len(shares)} shares)")
+                             f"({kind}, {len(tr['txs'])} txs, {len(tr['shares'])} shares)")
+        self._flush_batches()
 
     def _job_size(self, work_item: dict) -> int:
         if work_item["job"] is None:
@@ -1131,8 +1206,10 @@ class Node:
             self.stats["units"] += 1
             if useful:
                 self.stats["useful_units"] += 1
-            self._recent_unit_times.append(now)
-            self._recent_unit_times = [t for t in self._recent_unit_times if now - t < 30]
+            times = self._recent_unit_times          # the last 30 s, oldest first (rebuilding the list
+            times.append(now)                        # for every unit cost O(units per 30 s) each)
+            while now - times[0] >= 30:
+                times.popleft()
 
     def units_per_second(self) -> float:
         times = self._recent_unit_times
