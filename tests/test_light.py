@@ -9,7 +9,7 @@ from green import chain as chainmod
 from green.chain import BlobStore, Chain, InvalidBlock, make_genesis
 from green.crypto import Key, merkle_verify
 from green.light import LightClient
-from green.node import Node, http_get
+from green.node import Node, http_get, http_post
 from green.store import Store
 from green.tx import txid
 from helpers import T0, add, mine, tx
@@ -72,6 +72,14 @@ def test_explorer_endpoints(served):
     assert len(h["items"]) == 5 and h["items"][0]["height"] > h["items"][-1]["height"] and h["next"] is not None
     more = http_get(f"{node.url}/v1/address/{keys[1].address}/history?limit=50&before={h['next']}")
     assert len(h["items"]) + len(more["items"]) == 15                 # every other payment went to keys[1]
+    # A payment still waiting is listed with the role it will have once confirmed.
+    with node.lock:
+        node._rebuild_pending()                  # (the fixture built its blocks behind the node's back)
+    waiting = tx(node.chain, keys[0], "transfer", to=keys[2].address, amount=7)
+    http_post(f"{node.url}/tx", waiting)
+    assert http_get(f"{node.url}/v1/address/{keys[2].address}/history")["pending"] == \
+        [{"txid": txid(waiting), "type": "transfer", "role": "recipient"}]
+    assert http_get(f"{node.url}/v1/address/{keys[0].address}/history")["pending"][0]["role"] == "sender"
     p = http_get(f"{node.url}/v1/proof/tx/{txid(pays[10])}")
     assert merkle_verify(p["txid"], p["index"], p["count"], p["proof"], p["header"]["tx_root"])
     assert [x["height"] for x in http_get(f"{node.url}/v1/headers?from=5&count=3")] == [5, 6, 7]

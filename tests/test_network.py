@@ -84,7 +84,9 @@ def test_two_nodes_sync_and_sell_compute(network):
     assert job["escrow"] == 0
     assert n1.stats["useful_units"] >= 2
 
-    # Both nodes agree on the chain.
+    # Both nodes agree on the chain, once it stops moving: with every ticket a block, the
+    # miner finds one every few milliseconds, and two tips equal at one instant is luck.
+    n1.mining = False
     wait_for(lambda: n1.chain.tip == n2.chain.tip, what="same tip")
 
 

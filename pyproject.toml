@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "green-grn"
-version = "0.18.0"
+version = "0.19.0"
 description = "Green (GRN): a blockchain secured by proof of useful work (AI matrix multiplication)"
 readme = "README.md"
 license = "MIT"
@@ -28,7 +28,7 @@ grn = "green.cli:main"
 packages = ["green"]
 
 [tool.setuptools.package-data]
-green = ["bip39_english.txt"]
+green = ["bip39_english.txt", "app.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,4 +1,4 @@
-# Green node HTTP API (v0.18)
+# Green node HTTP API (v0.19)
 
 Every node serves this API on its port (default 8545, `127.0.0.1` unless started with `--host`). Requests and responses are JSON unless noted. Amounts are integers in yaprak (1 GRN = 10^8 yaprak). Errors come back as `{"error": "..."}` with status 400 (bad request or invalid transaction), 403 (admin endpoint called remotely), 404 (unknown), 409 (data the node does not have yet), 413 (too large) or 500.
 
@@ -48,12 +48,26 @@ Transactions are built and signed client side: `green.tx.make_tx(key, chain_id, 
 
 | Method and path | Returns |
 |---|---|
-| `GET /peers` | the connected peers: `addr` (socket address), `listen` (its P2P address, if it listens), `id` (node key), `inbound`, `block_only`, `agent`, `height`, `ping_ms`, `session` (first 16 hex digits of the session id, to compare out of band), `connected` (seconds), `bytes_in`, `bytes_out`, `score` (misbehaviour points; 100 is a ban) |
+| `GET /peers` | the connected peers: `addr` (socket address), `listen` (its P2P address, if it listens), `id` (node key), `inbound`, `block_only`, `agent`, `height` (the highest block it has sent or announced to us), `ping_ms`, `session` (first 16 hex digits of the session id, to compare out of band), `connected` (seconds), `bytes_in`, `bytes_out`, `score` (misbehaviour points; 100 is a ban) |
 
 ## Admin (only from the node's own machine)
+
+An admin request must come from the node's machine, carry the header `X-Green-Client: 1`, and name the machine in `Host` (`127.0.0.1`, `localhost` or `::1`, with any port); otherwise the answer is 403. A web page open in a browser on the same machine can reach the loopback address too, but it cannot add that header to a cross-site request (it would need a CORS preflight, which the node never grants), and a DNS-rebinding page sends its own name as `Host`. Green's own tools (`grn`, `green.node.http_post`) send the header.
 
 | Method and path | Use |
 |---|---|
 | `POST /blob` | raw body: store data (job matrices, a WASM program or input) before posting the transaction that needs it; returns `{"hash": ...}` |
 | `POST /peers` | `{"addr": "host:port"}` or `{"addr": "<node id>@host:port"}`: keep a P2P connection to that node (with an id, it must present that key). Returns `{"added": bool}` |
 | `POST /mining` | `{"on": true \| false}`: switch mining |
+| `POST /shutdown` | `{}`: stop the node cleanly (as `grn stop` does); a provider first claims what buyers owe it. Returns `{"stopping": true}` |
+
+## The app's compute proxy (`grn app`)
+
+Not part of the node: `grn app` serves it on `127.0.0.1:8600`. It buys each product on the network through the selected account's payment channels (opened on first use, to the cheapest providers), checks it with Freivalds' test, and answers in the providers' wire format.
+
+| Method and path | Use |
+|---|---|
+| `POST /v1/matmul` | headers `X-Shape: m,k,n` (each 1..4096) and optionally `X-Account: <name>`; body A (m·k int8, row-major) then B (k·n int8). Returns m·n little-endian int32. 400 if the body does not match the shape exactly, 502 if no provider could do it |
+| `GET /v1/status` | `{"proxy": {"products", "macs", "seconds", "errors"}, "buyer"}` |
+
+The app's own page uses `/api/*` endpoints that need the page's token (`X-App-Token`); every request must name this machine in `Host`.

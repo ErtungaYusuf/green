@@ -7,11 +7,39 @@ A blockchain prototype where miners do AI work (integer matrix multiplication) i
 - Every work unit is both a real result delivered to a buyer and a ticket in the block lottery.
 - A whole job is delivered with **two transactions** and settled **optimistically**: validators only see a 32-byte Merkle root, the buyer checks every unit with Freivalds (0.4 ms per unit, error <= 2^-124), and a wrong or withheld unit costs the miner the bond of its whole batch.
 - A separate **WASM compute market** covers every other kind of computation: the buyer publishes a deterministic program, workers run it, and the result is verified by re-execution.
-- **GPU miner** (WebGPU/Vulkan): ~12–17× faster than the CPU on AMD/NVIDIA/Intel GPUs.
+- **GPU miner** (WebGPU/Vulkan) on AMD/NVIDIA/Intel GPUs: ~1,300 work units per second on an RX 9070 XT, against ~480 on one CPU core.
+- **Instant compute through payment channels:** anyone can pay miners to multiply matrices or train a model, product by product, each result checked on arrival.
 - Nodes talk over an **encrypted, authenticated peer-to-peer protocol**; every block header **commits to the whole ledger**, so a new node can start from a verified snapshot.
 - Everything runs on this computer. By default a node listens only on `127.0.0.1`.
 
 Production status of every area, with evidence and blockers: [PRODUCTION.md](PRODUCTION.md). How rules change: [UPGRADES.md](UPGRADES.md). Design and known limitations: [DESIGN.md](DESIGN.md). Protocol specification: [SPEC.md](SPEC.md). HTTP API: [API.md](API.md). Security reviews and fixes: [SECURITY.md](SECURITY.md). Release notes: [CHANGELOG.md](CHANGELOG.md).
+
+## Try it: a whole network on your computer
+
+Five people, each running their own node, on a network of their own: alice and bob mine and sell compute, carol is an AI researcher who buys it, dave is a small miner paid through shares, erin runs a full node.
+
+```bash
+grn localnet start      # create the network the first time, start the five nodes
+grn app --localnet      # the app opens in your browser
+```
+
+In the app you can turn mining on and off for anyone, send coins between them, buy a matrix product from the miners (paid through payment channels, checked on arrival), and train a small neural network whose every product is bought from the miners. Other programs on your computer can use the network through the app's **compute proxy**, like a local matrix multiplier:
+
+```python
+import numpy as np, urllib.request
+a = np.random.randint(-128, 128, (512, 512), dtype=np.int8)
+b = np.random.randint(-128, 128, (512, 512), dtype=np.int8)
+req = urllib.request.Request("http://127.0.0.1:8600/v1/matmul", a.tobytes() + b.tobytes(), {"X-Shape": "512,512,512"})
+c = np.frombuffer(urllib.request.urlopen(req).read(), "<i4").reshape(512, 512)    # computed by the network
+```
+
+`grn localnet status` shows who is who, `grn localnet stop` stops every node cleanly, `grn localnet reset` deletes the network. The nodes are ordinary nodes (their logs are in `localnet/<name>/node.log`); every command below works on them with `--data localnet/<name> --node http://127.0.0.1:1850N` (alice is 18501, erin 18505). Their wallets are unencrypted: the local network is for trying things, its coins are worth nothing.
+
+## What's new in v0.19
+
+- **A network on your computer** (`grn localnet`) and **the app** (`grn app`): mine, send, buy compute and train a model from a browser, and a compute proxy for other programs.
+- **Clean stops:** `grn stop`, and the node now shuts down cleanly on SIGTERM too (`systemctl stop`, `docker stop`): providers collect what buyers owe before going away.
+- **Admin endpoints closed to web pages:** a page open in a browser on the node's computer could call them; they now need a header browsers cannot send cross-site and a local Host name.
 
 ## What's new in v0.18
 
@@ -103,17 +131,15 @@ This is a consensus change: networks started with an earlier version are not com
 
 ## Setup
 
-```powershell
-cd "C:\Users\Yusuf Ocak\green"
-.\.venv\Scripts\Activate.ps1
-```
+Python 3.11 or newer. Install Green into a virtual environment; this also installs the `grn` command (a shortcut for `python -m green`):
 
-If `.venv` is missing, recreate it and install Green into it (this also installs the `grn` command, a shortcut for `python -m green`):
-
-```powershell
+```bash
+git clone <this repository> green && cd green
 python -m venv .venv
-.\.venv\Scripts\python -m pip install -e ".[dev,gpu]"
+.venv/bin/pip install -e ".[dev,gpu]"          # Windows: .venv\Scripts\pip install -e ".[dev,gpu]"
 ```
+
+Then activate it (`source .venv/bin/activate`; on Windows `.venv\Scripts\Activate.ps1`).
 
 `wgpu` (the `gpu` extra) is optional; without it Green mines on the CPU. `wasmtime` is required and pinned, because WASM adjudication is part of consensus.
 
@@ -310,7 +336,7 @@ The heart of the vision: autonomous AIs can live on the network on their own. Th
 The first node prints its P2P address when it starts (`P2P: 127.0.0.1:8546 -- other nodes connect with --peer <id>@127.0.0.1:8546`). Start a second one with its own ports:
 
 ```bash
-python -m green --data data2 node --port 8547 --p2p-port 8548 --peer 127.0.0.1:8546 --genesis data\genesis.json --mine
+python -m green --data data2 node --port 8547 --p2p-port 8548 --peer 127.0.0.1:8546 --genesis data/genesis.json --mine
 ```
 
 The two nodes set up an encrypted connection and sync the chain. With `--peer <id>@host:port` a node also checks the other's key, so nothing in between can pose as it. `python -m green peers` lists the connections (with session ids you can compare on both ends).
@@ -325,7 +351,7 @@ To be reachable by other computers while keeping the API private, listen on all 
 python -m pytest -q tests
 ```
 
-249 tests: consensus, difficulty, guarded accounts, security regressions, addresses, the fee market, the state engine and storage (restarts, crashes, reorgs across base moves, a differential check against full copies), the state commitment, snapshots and fast sync, rule changes by version bits, signed releases, multisignature accounts, pruning, the transaction index and the light client, non-custodial pools, recovery phrases, Dandelion++ and compact blocks, compute channels and training, port mapping, the reserve and shares, transaction atomicity, the P2P protocol (encryption on the wire, identity pinning, relay, headers-first sync, and what happens to peers that lie or flood), the network (watchtowers, dispute answers and reorgs included), the GPU (if present), the WASM sandbox, both compute markets, neural-network inference and the autonomous agent. Two fuzz tests check conservation of money, the exact escrow of every job, the dispute backlog and transaction atomicity at every block, and every block any test builds checks its incremental state root against a full recomputation; mutation testing confirmed they catch injected accounting bugs. CI runs the suite on Linux, Windows and macOS ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
+264 tests: consensus, difficulty, guarded accounts, security regressions, addresses, the fee market, the state engine and storage (restarts, crashes, reorgs across base moves, a differential check against full copies), the state commitment, snapshots and fast sync, rule changes by version bits, signed releases, multisignature accounts, pruning, the transaction index and the light client, non-custodial pools, recovery phrases, Dandelion++ and compact blocks, compute channels and training, port mapping, the reserve and shares, transaction atomicity, the P2P protocol (encryption on the wire, identity pinning, relay, headers-first sync, and what happens to peers that lie or flood), the network (watchtowers, dispute answers and reorgs included), the GPU (if present), the WASM sandbox, both compute markets, neural-network inference, the autonomous agent, the app and its compute proxy, and a local network of five node processes started and stopped as a user does it. Two fuzz tests check conservation of money, the exact escrow of every job, the dispute backlog and transaction atomicity at every block, and every block any test builds checks its incremental state root against a full recomputation; mutation testing confirmed they catch injected accounting bugs. CI runs the suite on Linux, Windows and macOS ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
 ## Project layout
 
@@ -343,6 +369,8 @@ python -m pytest -q tests
 | `green/node.py` | HTTP API, mempool, miner, batch delivery, watchtowers, snapshots |
 | `green/p2p.py` | Encrypted P2P protocol: handshake, relay, address book, headers-first and fast sync, bans |
 | `green/verify.py` | Worker processes that check work units in parallel during a long sync |
+| `green/localnet.py` | A network of five people on one computer (`grn localnet`) |
+| `green/app.py`, `green/app.html` | The app in the browser and its compute proxy (`grn app`) |
 | `green/snapshot.py` | Ledger snapshots: writing, checking against a header's state root, rebuilding |
 | `green/versionbits.py` | Rule changes by miner signalling: deployment states per period |
 | `green/release.py` | Signed releases: SHA256SUMS, maintainer signatures, verification |

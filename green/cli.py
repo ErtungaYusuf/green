@@ -6,7 +6,9 @@ import json
 import logging
 import logging.handlers
 import os
+import signal
 import sys
+import threading
 import time
 import tomllib
 import urllib.error
@@ -373,22 +375,27 @@ def cmd_node(args):
     if node.p2p.listen:
         log(f"P2P: {node.p2p.address}  -- other nodes connect with --peer {node.p2p.full_address}")
     log(f"Height {node.chain.height}, mining: {'on' if args.mine else 'off'}")
+    stop = node.shutdown_requested               # set by POST /shutdown (`grn stop`) or a signal
+    for name in ("SIGTERM", "SIGBREAK"):         # SIGBREAK: Ctrl+Break, or a launcher's stop on Windows
+        if hasattr(signal, name) and threading.current_thread() is threading.main_thread():
+            signal.signal(getattr(signal, name), lambda *_: stop.set())
     try:
-        while True:
-            time.sleep(args.report)
+        while not stop.wait(args.report):
             st = node.status()
             acct = node.account(key.address)
             log(f"height {st['height']} | {st['units_per_second']:.1f} units/s | "
                 f"~{st['units_per_block']:.0f} units per block | peers {len(st['peers'])} | "
                 f"mempool {st['mempool']} | balance {params.fmt_amount(acct['balance'])}")
     except KeyboardInterrupt:
-        log("Shutting down...")
-        if pool is not None:
-            pool.stop()
-        if provider is not None:
-            provider.claim_due(force=True)       # collect what is owed before going away
-            provider.stop()
-        node.stop()
+        pass
+    log("Shutting down...")
+    if pool is not None:
+        pool.stop()
+    if provider is not None:
+        provider.claim_due(force=True)           # collect what is owed before going away
+        provider.stop()
+    node.stop()
+    log("Stopped.")
 
 
 def setup_logging(level: str, path: str | None) -> logging.Logger:
@@ -512,7 +519,7 @@ def cmd_providers(args):
 def cmd_fee(args):
     est = api_get(args, f"/v1/fee?blocks={args.blocks}")
     print(f"To be included within {est['blocks']} block(s): {est['fee_rate']} yaprak per byte "
-          f"(a transfer: {params.fmt_amount(est['transfer_fee'])} GRN; based on {est['basis']}, "
+          f"(a transfer: {params.fmt_amount(est['transfer_fee'])}; based on {est['basis']}, "
           f"{est['mempool']} transactions waiting)")
 
 
@@ -560,6 +567,56 @@ def cmd_send(args):
 def cmd_mine(args):
     res = api_post(args, "/mining", {"on": args.state == "on"})
     print(f"Mining {'on' if res['mining'] else 'off'}")
+
+
+def cmd_stop(args):
+    api_post(args, "/shutdown", {})
+    print(f"The node at {args.node} is stopping.")
+
+
+def cmd_app(args):
+    from . import app as appmod
+    try:
+        if args.localnet:
+            accounts, buyer = appmod.localnet_accounts(args.localnet)
+        else:
+            key = require_wallet(args.data)
+            accounts, buyer = [appmod.Account("me", "this wallet", key, args.node, args.data)], "me"
+        a = appmod.App(accounts, buyer=buyer, port=args.port, allow_local=bool(args.localnet))
+        a.start()
+    except (appmod.AppError, OSError) as e:
+        raise CliError(f"cannot start the app: {e}") from None
+    print(f"Green app: {a.url}   (compute proxy: POST {a.url}/v1/matmul)")
+    print("Ctrl+C to stop; open channels are closed on the way out.")
+    if not args.no_browser:
+        import webbrowser
+        webbrowser.open(a.url)
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        print("Closing channels...")
+        a.stop()
+
+
+def cmd_localnet(args):
+    from . import localnet
+    try:
+        if args.action == "start":
+            if args.gpu and args.gpu not in {p["name"] for p in localnet.PERSONAS if p["mine"]}:
+                raise CliError("--gpu names a miner: alice, bob or dave")
+            print(f"Local network in {args.dir}:")
+            localnet.start(args.dir, gpu=args.gpu, base_port=args.base_port)
+            print()
+            localnet.print_status(localnet.status(args.dir), args.dir)
+        elif args.action == "status":
+            localnet.print_status(localnet.status(args.dir), args.dir)
+        elif args.action == "stop":
+            localnet.stop(args.dir)
+        else:
+            localnet.reset(args.dir)
+    except localnet.LocalnetError as e:
+        raise CliError(str(e)) from None
 
 
 def cmd_job_submit(args):
@@ -1042,6 +1099,26 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("mine", help="turn mining on/off on a running node")
     s.add_argument("state", choices=["on", "off"])
     s.set_defaults(fn=cmd_mine)
+
+    s = sub.add_parser("stop", help="stop a running node cleanly (it collects what buyers owe it first)")
+    s.set_defaults(fn=cmd_stop)
+
+    s = sub.add_parser("app", help="the app: mine, send coins, buy compute, and a compute proxy (in a browser)")
+    s.add_argument("--localnet", nargs="?", const="localnet", metavar="DIR",
+                   help="use the five people of a local network (default folder: localnet)")
+    s.add_argument("--port", type=int, default=8600, help="port of the app on this computer (default 8600)")
+    s.add_argument("--no-browser", action="store_true", help="do not open a browser")
+    s.set_defaults(fn=cmd_app)
+
+    s = sub.add_parser("localnet", help="a network of five people on this computer, to try everything out")
+    s.add_argument("action", choices=["start", "status", "stop", "reset"],
+                   help="start: create it the first time and start every node; status: who is who; "
+                        "stop: stop every node cleanly; reset: stop and delete it")
+    s.add_argument("--dir", default="localnet", help="folder of the local network (default: localnet)")
+    s.add_argument("--gpu", metavar="PERSONA", help="this miner (alice, bob or dave) mines on the GPU")
+    s.add_argument("--base-port", type=int, default=18500,
+                   help="ports used: base+1.. (API), base+101.. (P2P), base+201.. (compute); default 18500")
+    s.set_defaults(fn=cmd_localnet)
 
     ms = sub.add_parser("multisig", help="k-of-n accounts").add_subparsers(dest="ms_cmd", required=True)
     s = ms.add_parser("address", help="the address of a k-of-n account")

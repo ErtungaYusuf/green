@@ -2,7 +2,7 @@
 
 Where Green stands on every aspect a production cryptocurrency needs, what backs each claim, and what is still missing. "Done" means implemented, tested and measured in this repository; it does not mean audited, battle-tested or ready to carry real value. Nothing here is ready for real money until the items marked **blocker** are done.
 
-Status as of v0.18 (October 2026). 257 automated tests; sixteen internal security reviews (SECURITY.md).
+Status as of v0.19 (October 2026). 264 automated tests; seventeen internal security reviews (SECURITY.md).
 
 ## Summary
 
@@ -20,7 +20,7 @@ Status as of v0.18 (October 2026). 257 automated tests; sixteen internal securit
 | 10. Wallets and keys | Done for a testnet (recovery phrases, encrypted files, checksummed addresses, multisig) | hardware wallets, a registered coin type |
 | 11. APIs and developer tools | Done for a testnet (versioned API, fee estimates, long-poll, Python SDK) | SDKs in other languages, explorer API |
 | 12. Operations | Done for a testnet (config file, logs, systemd, metrics and alerts, runbook) | — |
-| 13. Testing and QA | Partial (257 tests, fuzz, mutation testing, 8-node simulation) | multi-node testnet, soak tests |
+| 13. Testing and QA | Partial (264 tests, fuzz, mutation testing, 8-node simulation) | multi-node testnet, soak tests |
 | 14. Security assurance | Partial (internal reviews only) | **blocker**: independent audit, bug bounty |
 | 15. Upgrades and governance | Done (version-bits activation, signed releases, published process) | reproducible builds |
 | 16. Privacy | Partial (transaction origin: Dandelion++; data and amounts public) | — (documented) |
@@ -102,7 +102,7 @@ Pruned nodes (v0.11, green/prune.py): every header but only recent block bodies,
 
 ## 9. Mining software
 
-**Today:** CPU and GPU (WebGPU/Vulkan) miners, bit-exact, ~12–17× GPU speed-up; miners pick the best-paying open units and deliver them in batches.
+**Today:** CPU and GPU (WebGPU/Vulkan) miners, bit-exact (v0.18: ~480 units/s on one CPU core, ~1,300 on an RX 9070 XT); miners pick the best-paying open units and deliver them in batches.
 
 **Non-custodial pools (v0.13):** a block can pay up to 32 payees by weight, so a pool's blocks pay its miners directly; `green/pool.py` has the pool server (PPLNS templates, every share's work recomputed, bad shares refused and their senders paused) and a pool miner (`tests/test_pool.py`).
 
@@ -122,7 +122,7 @@ Since v0.12 a wallet can track an address's history and verify its payments as a
 
 ## 11. APIs and developer tools
 
-**Today (v0.10):** every HTTP endpoint documented in [API.md](API.md) under a stable `/v1` prefix; fee estimates from the mempool and recent blocks (`GET /v1/fee`, used by the command line); long-polling for new blocks (`GET /v1/wait`), used by the SDKs; a Python SDK for buying compute (`green.nn.MatmulClient`), autonomous agents (`green.agent`) and multisig (`green.tx`); a command line covering every transaction type.
+**Today (v0.19):** `grn app`, a local app in the browser (mine, send, buy compute, train a model) with a compute proxy that other programs call like a local matrix multiplier; `grn localnet`, a network of five nodes on one computer to try everything. **Since v0.10:** every HTTP endpoint documented in [API.md](API.md) under a stable `/v1` prefix; fee estimates from the mempool and recent blocks (`GET /v1/fee`, used by the command line); long-polling for new blocks (`GET /v1/wait`), used by the SDKs; a Python SDK for buying compute (`green.nn.MatmulClient`), autonomous agents (`green.agent`) and multisig (`green.tx`); a command line covering every transaction type.
 
 **Evidence:** `tests/test_api.py` (the versioned paths, the fee estimate against a full mempool, long-poll wake-up, timeout and waiter cap).
 
@@ -132,7 +132,7 @@ Since v0.12: a transaction and address index kept consistent through reorgs (`/v
 
 ## 12. Operations
 
-**Today (v0.10):** a config file (`green.toml`, strictly checked), log levels and a rotated log file, a hardened systemd unit that passes the wallet password as a systemd credential, Prometheus metrics with alert rules (supply audit, peers, stalls, sync, warnings, ban storms), a runbook ([OPERATIONS.md](OPERATIONS.md): settings, firewall, service, monitoring, backup and restore, upgrades, troubleshooting), a Docker image (built and smoke-tested by CI; not built on the development machine because Docker was not running there), and an installable `grn` command.
+**Today (v0.10):** clean stops with `grn stop` or SIGTERM (v0.19), a config file (`green.toml`, strictly checked), log levels and a rotated log file, a hardened systemd unit that passes the wallet password as a systemd credential, Prometheus metrics with alert rules (supply audit, peers, stalls, sync, warnings, ban storms), a runbook ([OPERATIONS.md](OPERATIONS.md): settings, firewall, service, monitoring, backup and restore, upgrades, troubleshooting), a Docker image (built and smoke-tested by CI; not built on the development machine because Docker was not running there), and an installable `grn` command.
 
 **Evidence:** `tests/test_api.py` (config file precedence and refusal of bad settings, the password file, the log file, the supply-audit metric).
 
@@ -140,13 +140,13 @@ Since v0.12: a transaction and address index kept consistent through reorgs (`/v
 
 ## 13. Testing and QA
 
-**Today:** 257 tests across consensus, security regressions, addresses, fees, state and storage, the state commitment and snapshots, the P2P protocol, atomicity, networks of live nodes, GPU, WASM, both markets, the agent and its guardian; two fuzz tests with exact accounting invariants; mutation testing proved the fuzz catches injected accounting bugs; a differential test against a reference replay; an 8-node network simulation with a split and a heal (`bench/net_sim.py`, v0.14: blocks reach every node in a median of 0.02 s, the halves converge in 0.6 s with identical state roots); CI configured for Linux, Windows and macOS.
+**Today:** 264 tests across consensus, security regressions, addresses, fees, state and storage, the state commitment and snapshots, the P2P protocol, atomicity, networks of live nodes, GPU, WASM, both markets, the agent and its guardian; two fuzz tests with exact accounting invariants; mutation testing proved the fuzz catches injected accounting bugs; a differential test against a reference replay; an 8-node network simulation with a split and a heal (`bench/net_sim.py`, v0.14: blocks reach every node in a median of 0.02 s, the halves converge in 0.6 s with identical state roots); CI configured for Linux, Windows and macOS.
 
 **Missing:** CI has never run (the code is not on any git host yet); multi-node testnets with tens of nodes; network partition and latency simulation; week-long soak tests; property-based testing at larger scale; conformance tests shared with a second implementation.
 
 ## 14. Security assurance — blocker
 
-**Today:** eleven internal reviews with every finding fixed and a regression test for each (SECURITY.md: S1–S19, W1–W9, V1–V6, X1–X6, Y1–Y6, Z1–Z3, P1–P10, U1–U3, M1–M3, O1–O4, R1–R3, L1–L2, K1–K3), including bugs found in this project's own earlier fixes.
+**Today:** seventeen internal reviews with every finding fixed and, where it can be tested, a regression test checked to fail without its fix (SECURITY.md), including bugs found in this project's own earlier fixes and by running a network of five nodes (v0.19).
 
 **Missing:** an independent professional audit of consensus, cryptography and the dispute games; a public bug bounty; a responsible-disclosure policy; formal analysis of the economic games (disputes, delivery, guards).
 

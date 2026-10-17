@@ -81,7 +81,7 @@ from .tx import InvalidTx
 from .verify import ProcessChecker
 
 PROTOCOL_VERSION = 1
-AGENT = "green/0.18.0"
+AGENT = "green/0.19.0"
 
 MAX_OUTBOUND = 8               # outbound connections the node keeps
 BLOCK_RELAY_ONLY = 2           # ...of which relay blocks only
@@ -114,6 +114,8 @@ WORK_SAMPLES = 8               # work units recomputed per headers message (plus
 VERIFY_THREADS = min(8, os.cpu_count() or 2)
 PROCESS_BACKLOG = 32           # downloaded blocks waiting: check work in processes (green/verify.py)
 UNCONNECTING_LIMIT = 8
+FAST_SYNC_PEERS = 2            # a fast sync picks its snapshot once this many peers are connected...
+FAST_SYNC_GRACE = 10.0         # ...or this many seconds after starting
 BAN_SCORE = 100
 BAN_SECONDS = 24 * 3600
 ADDR_RATE = 0.1                # addresses accepted per second per peer, after a burst of MAX_ADDR
@@ -694,6 +696,7 @@ class P2P:
         self._connect_wake = threading.Event()
         # fast sync: None (off), "waiting" (for the header chain), "running", "done", "failed"
         self.snap_state = "waiting" if fast_sync else None
+        self.started = time.time()
         self.verify_pool = ThreadPoolExecutor(VERIFY_THREADS, thread_name_prefix="verify")
         blobs_dir = getattr(getattr(node, "blobs", None), "path", None)
         self.checker = ProcessChecker(blobs_dir) if blobs_dir and getattr(node, "verify_processes", True) else None
@@ -1925,6 +1928,7 @@ class P2P:
         if status == "added":
             with self.node.lock:
                 peer.best_work = max(peer.best_work, self._work_of(block_hash(block)))
+                peer.best_height = max(peer.best_height, block["header"]["height"])   # (shown by `grn peers`)
         return status
 
     def _connector(self) -> None:
@@ -2078,6 +2082,8 @@ class P2P:
     def _maybe_fast_sync(self) -> None:
         if self.snap_state != "waiting" or not self._headers_settled():
             return
+        if len([p for p in self.all_peers() if p.alive]) < FAST_SYNC_PEERS                 and time.time() - self.started < FAST_SYNC_GRACE:
+            return                                   # a peer still connecting may be the one with a snapshot
         if self._height_of(self.best) < params.SNAPSHOT_INTERVAL + params.MAX_REORG_DEPTH:
             self.snap_state = "failed"               # too young a chain for any final snapshot
             self.log("[sync] no snapshot can exist yet; syncing from genesis")

@@ -8,3 +8,5 @@ data*/
 build/
 *.egg-info/
 dist/
+localnet/
+.claude/

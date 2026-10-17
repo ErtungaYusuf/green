@@ -64,10 +64,37 @@ MAX_WAIT_SECONDS = 60
 FEE_RECENT_BLOCKS = 6         # blocks the fee estimate looks back at
 MAINTENANCE_SECONDS = 30      # how often a pruned node prunes and collects unused blobs
 LOOPBACK = {"127.0.0.1", "::1"}
+# Admin requests must come from this machine AND carry this header AND name this machine
+# in Host. A web page open in a browser here can reach the loopback address too, but it
+# cannot add a custom header to a cross-site request without a CORS preflight (which we
+# never grant), and a DNS-rebinding page sends its own name as Host.
+CLIENT_HEADER = "X-Green-Client"
+LOCAL_HOST_NAMES = {"127.0.0.1", "localhost", "::1"}
+
+
+def names_this_machine(host: str | None) -> bool:
+    """Whether a Host header (with or without a port) is a loopback address or localhost."""
+    h = (host or "").strip().lower()
+    if h.startswith("["):                        # [::1]:8545
+        h = h[1:h.find("]")] if "]" in h else ""
+    elif h.count(":") == 1:                      # 127.0.0.1:8545
+        h = h.split(":")[0]
+    return h in LOCAL_HOST_NAMES
 
 
 class TooLarge(ValueError):
     pass
+
+
+def tx_role(t: dict, addr: str) -> str | None:
+    """How an address takes part in a transaction, named as the address index names it
+    once the transaction is in a block (chain.py): sender, recipient, account, guardian."""
+    if txmod.sender(t) == addr:
+        return "sender"
+    for field in ("to", "account", "guardian"):
+        if t.get(field) == addr:
+            return "recipient" if field == "to" else field
+    return None
 
 
 def _read_limited(resp, limit: int) -> bytes:
@@ -96,7 +123,7 @@ def wait_for_block(base_url: str, tip: str | None, timeout: float) -> str | None
 
 def http_post(url: str, body, timeout: float = 5.0, raw: bool = False):
     data = body if raw else json.dumps(body).encode()
-    headers = {"Content-Type": "application/octet-stream" if raw else "application/json"}
+    headers = {"Content-Type": "application/octet-stream" if raw else "application/json", CLIENT_HEADER: "1"}
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(_read_limited(r, MAX_RESPONSE_BYTES))
@@ -140,6 +167,7 @@ class Node:
         self.mining = False
         self.work_tasks = True                    # take paid WASM tasks while mining
         self.watch = True                         # check revealed task results, challenge frauds
+        self.shutdown_requested = threading.Event()   # POST /shutdown; whoever runs the node stops it
         self._checked: dict[tuple, bool] = {}     # (task, output) -> our local verdict
         self.batch_buf: dict[str, dict] = {}      # job -> {"units", "results", "started"}: computed, not committed
         self.my_batches: dict[str, dict] = {}     # batch id -> {"job", "count", "root", "manifest"}: committed by us
@@ -1238,9 +1266,8 @@ class Node:
         with self.lock:
             rows = self.store.address_history(addr, limit, before)
             mine = [(tid, e["tx"]) for tid, e in self.p2p.stempool.items() if e["local"]]    # still on a stem
-            pending = [{"txid": tid, "type": t["type"], "role": "sender" if txmod.sender(t) == addr else "named"}
-                       for tid, t in list(self.mempool.items()) + mine
-                       if txmod.sender(t) == addr or addr in (t.get("to"), t.get("account"), t.get("guardian"))]
+            pending = [{"txid": tid, "type": t["type"], "role": tx_role(t, addr)}
+                       for tid, t in list(self.mempool.items()) + mine if tx_role(t, addr)]
         items = [{"height": h, "position": pos, "role": role, "type": kind,
                   ("block" if role == "miner" else "txid"): ref} for h, pos, ref, role, kind in rows]
         return {"address": addr, "pending": pending, "items": items,
@@ -1628,13 +1655,13 @@ def make_handler(node: Node):
                 self._send(500, {"error": "internal error"})
 
         def _admin(self):
-            if not self._local():
+            if not (self._local() and self.headers.get(CLIENT_HEADER) and names_this_machine(self.headers.get("Host"))):
                 # Read a small unread body first: closing a socket with unread data sends
                 # a TCP reset, and the client would see that instead of the 403.
                 raw = self.headers.get("Content-Length", "0").strip()
                 if not getattr(self, "_consumed", False) and raw.isdigit() and int(raw) <= 64 * 1024:
                     self.rfile.read(int(raw))
-                raise PermissionError("admin endpoint: only available from this machine")
+                raise PermissionError(f"admin endpoint: only from this machine, with an {CLIENT_HEADER} header")
 
         def _post(self):
             parts = _route(urlparse(self.path).path)
@@ -1653,6 +1680,10 @@ def make_handler(node: Node):
                     return self._send(400, {"error": "node has no wallet"})
                 node.mining = bool(body["on"])
                 return self._send(200, {"mining": node.mining})
+            if parts == ["shutdown"]:
+                self._admin()
+                node.shutdown_requested.set()            # the process running the node stops it (cli.py)
+                return self._send(200, {"stopping": True})
             return self._send(404, {"error": "not found"})
 
     return Handler

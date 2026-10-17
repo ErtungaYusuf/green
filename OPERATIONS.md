@@ -85,6 +85,8 @@ journalctl -u green -f
 
 For other setups: the node reads the password from the file named by `GREEN_WALLET_PASSWORD_FILE` (preferred) or from `GREEN_WALLET_PASSWORD`.
 
+**Stopping:** `grn stop`, Ctrl+C, or SIGTERM (`systemctl stop green`, `docker stop`) all run the same clean shutdown: a node that sells compute first claims what buyers owe it, then the store closes. Give it the unit's `TimeoutStopSec` (60 s).
+
 ## Monitoring
 
 - `grn status`: height, peers, sync progress, warnings.

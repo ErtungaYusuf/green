@@ -2,6 +2,32 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## 0.19.0
+
+**A network on your computer, and an app to use it**
+- `grn localnet start | status | stop | reset`: five people, each running their own node as a separate process, with their own wallet, data folder, ports and log, on a network of their own: alice and bob mine and sell compute, carol buys it (she mined the genesis block, so she can start at once), dave is a small miner paid through shares, erin runs a full node. Nothing is special-cased; they talk over the real encrypted P2P protocol. `stop` asks every node to shut down and waits until each has exited; it never kills a process by a remembered id, which could belong to something else by then. `reset` deletes only a folder that holds a local network.
+- `grn app` (`--localnet` for the five people): a page in the browser to turn mining on and off for anyone, send coins, buy a matrix product from the miners (paid through payment channels opened on first use, checked with Freivalds' test, compared with the same product computed locally) and train a small network whose every product is bought from the miners. Measured on the local network: a 1024³ product in 47 ms split over two providers, channels opened in 1.2 s; 200 training steps (1,000 products) in 1.4 s for 0.0125 GRN, 93% test accuracy.
+- The app's **compute proxy**: `POST /v1/matmul` with `X-Shape: m,k,n` and A, B as int8 returns the int32 product, bought on the network, checked and paid by the app (API.md). Other programs use the network like a local matrix multiplier.
+
+**Stopping cleanly**
+- `grn stop` (admin `POST /shutdown`), and the node now shuts down cleanly on SIGTERM and Ctrl+Break as well as Ctrl+C. Until now `systemctl stop` and `docker stop` ended it without its shutdown: a provider did not claim what buyers owed it until the next start.
+
+**Security**
+- Admin endpoints (mining switch, peers, blob upload, shutdown) only checked that the caller was on the node's machine, and a web page open in a browser there is: it could add peers of its choosing (an eclipse attack) or switch mining off. They now also need an `X-Green-Client` header, which a page cannot send cross-site without a CORS preflight, and a Host naming the machine, which a DNS-rebinding page does not. Green's own tools send the header.
+- Seventeenth security review (SECURITY.md, A1–A6).
+
+**Found by running the five nodes**
+- `grn peers` showed each peer's height from the handshake (0 or 2 on a chain at 512); it now follows the blocks each peer sends.
+- A transaction still waiting showed its recipient as "named"; it now has the role it will have once confirmed (recipient, account, guardian).
+- `grn fee` printed "GRN GRN".
+- Starting a local network on ports another one uses said only that a node exited; it now says which port and why, before creating anything.
+- A node in fast sync chose its snapshot from the peers connected at the moment its headers settled; a peer that offered one but connected a moment later was missed, and the node replayed history from genesis instead. It now waits for a second peer, or 10 seconds. (Found as a rare failure of the lying-snapshot test in a full run.)
+- A network test waited for two tips to be equal while one node kept finding a block every few milliseconds (v0.18 made it four times faster), which only luck could satisfy; it now stops mining first.
+
+**Also**
+- The README starts with the local network and the app; its setup no longer assumes one particular computer.
+- 264 tests (the app, the local network started and stopped as a user does it, the admin guards). Consensus is unchanged from v0.18.
+
 ## 0.18.0
 
 **Work units 4× faster**

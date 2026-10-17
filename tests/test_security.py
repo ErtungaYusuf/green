@@ -434,6 +434,30 @@ def test_S12_admin_endpoints_refuse_remote_callers(node, monkeypatch):
     assert not node.mining
 
 
+def test_S12b_web_pages_in_a_local_browser_cannot_use_admin_endpoints(node):
+    """A browser on this machine is a local caller too. A page from another site cannot
+    add a custom header without a CORS preflight, and a DNS-rebinding page sends its
+    own name as Host: admin requests need the client header and a local Host."""
+    def post(path, headers):
+        req = urllib.request.Request(node.url + path, data=json.dumps({"on": True, "addr": "1.2.3.4:5"}).encode(),
+                                     headers={"Content-Type": "text/plain", **headers}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            return e.code
+    for path in ("/mining", "/peers", "/shutdown"):
+        assert post(path, {}) == 403                                          # a simple cross-site request
+        assert post(path, {nodemod.CLIENT_HEADER: "1", "Host": "evil.example:8545"}) == 403   # DNS rebinding
+    assert not node.mining and not node.shutdown_requested.is_set()
+    assert post("/mining", {nodemod.CLIENT_HEADER: "1"}) == 200 and node.mining
+    assert http_post(node.url + "/shutdown", {}) == {"stopping": True} and node.shutdown_requested.is_set()
+    for host in ("127.0.0.1:8545", "localhost", "[::1]:8545", "::1"):
+        assert nodemod.names_this_machine(host), host
+    for host in ("evil.example", "127.0.0.1.evil.example:80", "", None, "[::1", "localhost.evil:1"):
+        assert not nodemod.names_this_machine(host), host
+
+
 def test_S13_committed_results_are_not_served_before_reveal(node):
     c = np.ones((256, 256), dtype=np.int64)
     secret = node.blobs.put(txmod.encode_result(c))
