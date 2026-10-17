@@ -25,7 +25,7 @@ Status as of v0.19 (October 2026). 264 automated tests; seventeen internal secur
 | 15. Upgrades and governance | Done (version-bits activation, signed releases, published process) | reproducible builds |
 | 16. Privacy | Partial (transaction origin: Dandelion++; data and amounts public) | — (documented) |
 | 17. Performance and implementation | Partial (Python reference) | native node for scale |
-| 18. Source control and releases | Partial (git, tagged versions; not published, CI not yet run) | **blocker**: public repository, CI, signed tags |
+| 18. Source control and releases | Partial (git, tagged versions, private GitHub repository, CI passing) | **blocker**: public repository, signed tags |
 | 19. Economics and launch | Partial (supply set; no launch plan) | fair-launch plan, public testnet |
 | 20. Legal and compliance | **Missing** | **blocker** |
 | 21. Ecosystem | **Missing** (no explorer, exchanges, website) | — |
@@ -142,7 +142,9 @@ Since v0.12: a transaction and address index kept consistent through reorgs (`/v
 
 **Today:** 264 tests across consensus, security regressions, addresses, fees, state and storage, the state commitment and snapshots, the P2P protocol, atomicity, networks of live nodes, GPU, WASM, both markets, the agent and its guardian; two fuzz tests with exact accounting invariants; mutation testing proved the fuzz catches injected accounting bugs; a differential test against a reference replay; an 8-node network simulation with a split and a heal (`bench/net_sim.py`, v0.14: blocks reach every node in a median of 0.02 s, the halves converge in 0.6 s with identical state roots); CI configured for Linux, Windows and macOS.
 
-**Missing:** CI has never run (the code is not on any git host yet); multi-node testnets with tens of nodes; network partition and latency simulation; week-long soak tests; property-based testing at larger scale; conformance tests shared with a second implementation.
+**Since v0.19** CI runs on GitHub (a private repository for now): every push is tested on Linux, Windows and macOS with Python 3.12 to 3.14, plus a Docker smoke test; the first run (3.12 and 3.13) passed everywhere.
+
+**Missing:** multi-node testnets with tens of nodes; network partition and latency simulation; week-long soak tests; property-based testing at larger scale; conformance tests shared with a second implementation.
 
 ## 14. Security assurance — blocker
 
@@ -172,9 +174,9 @@ Since v0.12: a transaction and address index kept consistent through reorgs (`/v
 
 ## 18. Source control and releases — blocker
 
-**Today (v0.14):** the repository is under git; v0.13.0 is the first commit and every version is tagged. The CI workflow (Linux, Windows and macOS, Python 3.12 and 3.13, plus a Docker smoke test) is in `.github/workflows/`.
+**Today (v0.19):** the repository is under git with every version tagged (v0.13.0 is the first commit), pushed to a private GitHub repository where CI tests every push (Linux, Windows and macOS, Python 3.12 to 3.14, plus a Docker smoke test) and has passed.
 
-**Missing:** a public repository with a protected main branch, CI actually running on it, signed tags and reviewed merges.
+**Missing:** making the repository public, with a protected main branch, signed tags and reviewed merges.
 
 ## 19. Economics and launch
 

@@ -2,6 +2,11 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## 0.19.1
+
+- Verification workers start with `spawn` on every platform. On Linux, Python before 3.14 forks by default, copying a node whose other threads may hold locks the child would wait on forever.
+- CI runs on GitHub (a private repository for now); its first run passed on Linux, Windows and macOS with Python 3.12 and 3.13 and the Docker smoke test. Python 3.14 joins the matrix, and the workflow uses the current versions of the checkout and setup-python actions.
+
 ## 0.19.0
 
 **A network on your computer, and an app to use it**

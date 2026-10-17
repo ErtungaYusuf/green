@@ -9,6 +9,7 @@ it has been idle for a while. The processes only recompute transcripts; every
 decision stays with the node.
 """
 
+import multiprocessing
 import os
 import threading
 import time
@@ -32,7 +33,9 @@ def start_pool(workers: int) -> ProcessPoolExecutor:
         saved = {k: os.environ.get(k) for k in WORKER_ENV}
         os.environ.update(WORKER_ENV)
         try:
-            pool = ProcessPoolExecutor(workers)
+            # spawn everywhere: fork (Linux's default before Python 3.14) copies a process
+            # whose other threads may hold locks the child then waits on forever.
+            pool = ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("spawn"))
             for _ in range(workers):
                 pool.submit(time.sleep, 0.2)
         finally:
