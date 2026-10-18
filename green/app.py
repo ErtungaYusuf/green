@@ -31,6 +31,7 @@ import numpy as np
 
 from . import params, tx as txmod, work
 from .compute import MAX_DIM, ComputeCluster, PaymentRequired, ProviderError, WrongResult
+from .private import MODES, PrivateCompute
 from .crypto import Key, is_address
 from .node import BoundedServer, http_get, http_post, names_this_machine
 from .train import MLP, digits, train
@@ -60,13 +61,16 @@ class Account:
 
 class App:
     def __init__(self, accounts: list[Account], buyer: str | None = None, host: str = "127.0.0.1",
-                 port: int = DEFAULT_PORT, allow_local: bool = True, log=print, providers: int = PROVIDERS):
+                 port: int = DEFAULT_PORT, allow_local: bool = True, log=print, providers: int = PROVIDERS,
+                 relay: bool = True, privacy: str = "split"):
         if not accounts:
             raise AppError("no accounts")
         self.accounts = {a.name: a for a in accounts}
         self.buyer = buyer if buyer in self.accounts else accounts[0].name
         self.host, self.port, self.allow_local, self.log = host, port, allow_local, log
         self.providers = providers
+        self.relay = relay                        # requests sealed and carried by a peer (green/sealed.py)
+        self.privacy = privacy                    # default data hiding: "split" or "secret" (green/private.py)
         self.token = secrets.token_hex(16)
         self.jobs: dict[str, dict] = {}
         self.jobs_lock = threading.Lock()
@@ -168,7 +172,7 @@ class App:
                 self.log(f"[app] {a.name}: opening channels to up to {self.providers} providers "
                          f"({params.fmt_amount(CHANNEL_AMOUNT)} each; confirmed in the next block)")
                 a.cluster = ComputeCluster.from_market(a.node, a.key, CHANNEL_AMOUNT, count=self.providers,
-                                                       allow_local=self.allow_local)
+                                                       allow_local=self.allow_local, relay=self.relay)
             return a.cluster
 
     @staticmethod
@@ -177,20 +181,24 @@ class App:
         cl = a.cluster
         return a.spent + (cl.owed if cl is not None else 0)
 
-    def matmul(self, name: str | None, a8: np.ndarray, b8: np.ndarray) -> np.ndarray:
-        """a8 @ b8 bought on the network; a spent or ended channel is replaced once."""
+    def matmul(self, name: str | None, a8: np.ndarray, b8: np.ndarray, privacy: str | None = None) -> np.ndarray:
+        """a8 @ b8 bought on the network, its data hidden as `privacy` says (default: the
+        app's); a spent or ended channel is replaced once."""
         acct = self.account(name)
+        mode = privacy or self.privacy
+        if mode not in MODES + ("none",):
+            raise AppError(f"privacy must be one of {', '.join(MODES)} or none")
         for attempt in (1, 2):
             cl = self.cluster(acct)
             try:
-                return cl.matmul(a8, b8)
+                return cl.matmul(a8, b8) if mode == "none" else PrivateCompute(cl).matmul(a8, b8, mode)
             except (PaymentRequired, ProviderError) as e:
                 if attempt == 2:
                     raise AppError(f"no provider could do it: {e}") from None
                 self.log(f"[app] {acct.name}: {e}; opening new channels")
                 self.close(acct.name)
 
-    def product(self, name: str | None, m: int, k: int, n: int) -> dict:
+    def product(self, name: str | None, m: int, k: int, n: int, privacy: str | None = None) -> dict:
         if not all(1 <= d <= MAX_DIM for d in (m, k, n)):
             raise AppError(f"dimensions must be 1..{MAX_DIM}")
         acct = self.account(name)
@@ -203,12 +211,13 @@ class App:
         setup = time.perf_counter() - t
         paid = self.paid(acct)
         t = time.perf_counter()
-        c = self.matmul(name, a8, b8)
+        c = self.matmul(name, a8, b8, privacy)
         took = time.perf_counter() - t
         t = time.perf_counter()
         local = work.blas_matmul(a8, b8, np.int64)            # the same product on this machine, to compare
         local_s = time.perf_counter() - t
-        return {"account": acct.name, "shape": [m, k, n], "seconds": took, "setup_seconds": setup if opened else 0,
+        return {"account": acct.name, "shape": [m, k, n], "privacy": privacy or self.privacy, "relayed": self.relay,
+                "seconds": took, "setup_seconds": setup if opened else 0,
                 "cost": self.paid(acct) - paid, "checked": True,
                 "matches_local": bool(np.array_equal(c, local)), "local_seconds": local_s,
                 "sample": c[:2, :4].tolist()}
@@ -381,7 +390,7 @@ def _handler(app: App):
                     return self._send(200, {"txid": app.send(body["from"], body["to"], body["amount"])})
                 if path == "/api/product":
                     return self._send(200, app.product(body.get("account"), int(body["m"]), int(body["k"]),
-                                                       int(body["n"])))
+                                                       int(body["n"]), body.get("privacy")))
                 if path == "/api/train":
                     return self._send(200, {"job": app.start_training(body.get("account"), body.get("steps", 200))})
                 if path == "/api/close":
@@ -419,7 +428,7 @@ def _handler(app: App):
             b8 = np.frombuffer(body, np.int8, k * n, offset=m * k).reshape(k, n)
             t = time.perf_counter()
             try:
-                c = app.matmul(self.headers.get("X-Account"), a8, b8)
+                c = app.matmul(self.headers.get("X-Account"), a8, b8, self.headers.get("X-Privacy"))
             except Exception as e:
                 with app.proxy_lock:
                     app.proxy["errors"] += 1

@@ -31,7 +31,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import params, tx as txmod, work
+from . import params, sealed, tx as txmod, work
 from .chain import (BlobStore, Chain, InvalidBlock, MissingData, block_hash, fee_rate, seed_of, share_id,
                     target_of,
                     work_inputs)
@@ -156,7 +156,10 @@ class Node:
         # other version it could judge a task challenge differently and fork.
         from . import wasm
         wasm.check_engine()
+        self._gpu_lock = threading.Lock()
         self.gpu = self._init_gpu() if use_gpu else None
+        self._gpu_checked = self.gpu                 # the GPU that passed its check (set_gpu)
+        self.intensity = 100                      # percent of the time the miner works (GPU/CPU get the rest)
         self.lock = threading.RLock()
         self.tip_changed = threading.Condition(self.lock)   # wakes API clients waiting for a block
         self._waiters = 0
@@ -211,6 +214,18 @@ class Node:
 
     # --- persistence ---
 
+    def set_gpu(self, on: bool) -> None:
+        """Mine on the GPU (checked against the CPU first) or on the CPU, from the next batch.
+        The checked GPU is kept: switching back uses it without a second check, and the
+        miner thread stays its only user (the GPU miner is not thread-safe)."""
+        with self._gpu_lock:
+            if on and self.gpu is None:
+                if self._gpu_checked is None:
+                    self._gpu_checked = self._init_gpu()
+                self.gpu = self._gpu_checked
+            elif not on:
+                self.gpu = None
+
     def _init_gpu(self):
         """Load the GPU miner, but only trust it if it matches the CPU bit for bit.
 
@@ -218,7 +233,10 @@ class Node:
         other node rejects, so a mismatch disables it rather than risking that.
         """
         from . import gpu
-        miner = gpu.get_miner()
+        try:
+            miner = gpu.GPUMiner()                   # this node's own (a shared one is not thread-safe)
+        except Exception:
+            miner = None
         if miner is None:
             self.log("[gpu] no suitable GPU/driver found; mining on the CPU")
             return None
@@ -609,13 +627,15 @@ class Node:
         return self._pending.balance(self.miner_key.address) >= need
 
     def _busy_units(self) -> set:
-        """(job, unit_key) pairs not to pick: in a mempool commit, or computed and waiting in our buffer."""
+        """(job, unit_key) pairs not to pick: in a mempool commit, computed and waiting in our
+        buffer, being tried by our own miner right now, or handed to pool miners."""
         jobs = self.chain.state.jobs
         busy = {(t["job"], txmod.unit_key(u)) for t in self.mempool.values()
                 if t["type"] == "job_commit" and t["job"] in jobs
                 for u in txmod.bitmap_units(t["units"], jobs[t["job"]]["dims"]) or []}
         for job_id, buf in self.batch_buf.items():
             busy.update((job_id, txmod.unit_key(u)) for u in buf["units"])
+        busy |= self._inflight_units                 # (the miner's batches are in flight a moment)
         if self.pool is not None:
             busy |= self.pool.assigned_keys()        # handed to pool miners
         return busy
@@ -655,22 +675,26 @@ class Node:
         pool = ThreadPoolExecutor(MINING_THREADS, thread_name_prefix="mine")
         try:
             while self.running:
+                gpu = self.gpu                       # (it can be switched on or off while we run)
+                if pending is not None and (not self.mining or pending[2] is not gpu):
+                    self._finish_tries(pending[0], pending[2].collect(pending[1]))
+                    pending = None
                 if not self.mining:
-                    if pending is not None:
-                        self._finish_tries(pending[0], self.gpu.collect(pending[1]))
-                        pending = None
                     time.sleep(0.2)
                     continue
-                tries = self._next_tries(self.gpu.batch if self.gpu is not None else MINING_THREADS, pool)
+                started = time.perf_counter()
+                tries = self._next_tries(gpu.batch if gpu is not None else MINING_THREADS, pool)
                 if not tries:
                     continue                         # (_next_tries waited)
-                if self.gpu is None:
+                if gpu is None:
                     self._finish_tries(tries, list(pool.map(_cpu_try, tries)))
-                    continue
-                handle = self.gpu.submit_prepared([(tr["a1"], tr["b1"], tr["seed"]) for tr in tries])
-                if pending is not None:
-                    self._finish_tries(pending[0], self.gpu.collect(pending[1]))
-                pending = (tries, handle)
+                else:
+                    handle = gpu.submit_prepared([(tr["a1"], tr["b1"], tr["seed"]) for tr in tries])
+                    if pending is not None:
+                        self._finish_tries(pending[0], gpu.collect(pending[1]))
+                    pending = (tries, handle, gpu)
+                if self.intensity < 100:             # rest, so the hardware works intensity% of the time
+                    time.sleep((time.perf_counter() - started) * (100 - self.intensity) / self.intensity)
         finally:
             pool.shutdown(wait=False)
 
@@ -701,7 +725,7 @@ class Node:
                 time.sleep(0.5)
                 return []
             tip = self.chain.tip
-            busy = self._busy_units() | self._inflight_units
+            busy = self._busy_units()
             headers = []
             for _ in range(count):
                 header = dict(base, work=self._choose_work(busy), nonce=random.getrandbits(48))
@@ -793,6 +817,8 @@ class Node:
         with self.lock:
             buf = self.batch_buf.setdefault(work_item["job"], {"units": [], "results": [], "by": [],
                                                                "started": time.time()})
+            if list(work_item["unit"]) in [list(u) for u in buf["units"]]:
+                return                               # computed twice: a batch may hold a unit only once
             buf["units"].append(work_item["unit"])
             buf["results"].append(blob)
             buf["by"].append(by)
@@ -1232,6 +1258,7 @@ class Node:
                 "p2p": self.p2p.status(),
                 "mempool": len(self.mempool),
                 "mining": self.mining, "miner": self.miner_key.address if self.miner_key else None,
+                "gpu": self.gpu.name if self.gpu is not None else None, "intensity": self.intensity,
                 "units_per_second": round(self.units_per_second(), 2), "stats": dict(self.stats),
                 "warnings": self.warnings(),
                 "pruned": self.prune, "first_block": self.chain.first_block,
@@ -1745,6 +1772,14 @@ def make_handler(node: Node):
             if parts == ["blob"]:
                 self._admin()
                 return self._send(200, {"hash": node.blobs.put(self._body(MAX_BLOB_BYTES))})
+            if parts == ["relay"]:
+                # A sealed request (green/sealed.py) for provider X-Relay-To, carried by a peer.
+                self._admin()
+                data = self._body(sealed.MAX_SEALED)
+                try:
+                    return self._send(200, node.p2p.relay(self.headers.get("X-Relay-To", ""), data), raw=True)
+                except OSError as e:
+                    return self._send(503, {"error": str(e)})
             body = json.loads(self._body(MAX_JSON_BYTES) or b"null")
             if parts == ["tx"]:
                 return self._send(200, {"txid": node.submit_tx(body)})
@@ -1755,8 +1790,17 @@ def make_handler(node: Node):
                 self._admin()
                 if not node.miner_key:
                     return self._send(400, {"error": "node has no wallet"})
-                node.mining = bool(body["on"])
-                return self._send(200, {"mining": node.mining})
+                if "intensity" in body:
+                    level = body["intensity"]
+                    if not isinstance(level, int) or isinstance(level, bool) or not 1 <= level <= 100:
+                        return self._send(400, {"error": "intensity is a percentage, 1..100"})
+                    node.intensity = level
+                if "gpu" in body:
+                    node.set_gpu(bool(body["gpu"]))
+                if "on" in body:
+                    node.mining = bool(body["on"])
+                return self._send(200, {"mining": node.mining, "intensity": node.intensity,
+                                        "gpu": node.gpu.name if node.gpu is not None else None})
             if parts == ["shutdown"]:
                 self._admin()
                 node.shutdown_requested.set()            # the process running the node stops it (cli.py)

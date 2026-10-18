@@ -74,7 +74,8 @@ code { font-family: var(--mono); font-size: 12.5px; }
     <section class="panel">
       <h2>Buy compute</h2>
       <p class="hint">A random int8 product computed by the miners, paid through payment channels, and checked here
-        with Freivalds' test. The first purchase opens the channels (one block).</p>
+        with Freivalds' test. Requests are sealed and carried by a peer: providers never learn who asks. The first
+        purchase opens the channels (one block).</p>
       <div class="row">
         <label for="buyer">Buyer</label><select id="buyer"></select>
         <label for="size">Size</label>
@@ -84,6 +85,12 @@ code { font-family: var(--mono); font-size: 12.5px; }
           <option value="1024,1024,1024" selected>1024 x 1024 x 1024</option>
           <option value="2048,2048,2048">2048 x 2048 x 2048</option>
           <option value="128,4096,4096">128 x 4096 x 4096</option>
+        </select>
+        <label for="privacy">Privacy</label>
+        <select id="privacy">
+          <option value="split" selected>split: no miner sees the whole problem</option>
+          <option value="secret">secret: miners see only random shares (12x compute)</option>
+          <option value="none">none</option>
         </select>
         <button id="buy">Run</button>
         <button class="ghost" id="close" title="The providers claim what was used; the rest comes back">Close channels</button>
@@ -245,10 +252,10 @@ $("buyer").onchange = () => act(() => post("/api/buyer", { account: $("buyer").v
 $("buy").onclick = async () => {
   const [m, k, n] = $("size").value.split(",").map(Number), out = $("buyout"), btn = $("buy");
   btn.disabled = true; out.className = "out"; out.textContent = "Buying... (the first purchase waits one block for the channels)";
-  const r = await act(() => post("/api/product", { account: $("buyer").value, m, k, n }), out);
+  const r = await act(() => post("/api/product", { account: $("buyer").value, m, k, n, privacy: $("privacy").value }), out);
   btn.disabled = false;
   if (r) out.textContent =
-    `${r.shape.join(" x ")} computed by the network in ${(r.seconds * 1000).toFixed(0)} ms` +
+    `${r.shape.join(" x ")} computed by the network in ${(r.seconds * 1000).toFixed(0)} ms (privacy: ${r.privacy}${r.relayed ? ", sealed through a peer" : ""})` +
     (r.setup_seconds ? ` (+ ${r.setup_seconds.toFixed(1)} s to open the channels)` : "") +
     `\ncost ${grn(r.cost)}, checked with Freivalds' test` +
     (r.matches_local === null ? "" : `, equal to the local product: ${r.matches_local ? "yes" : "NO"} (local: ${(r.local_seconds * 1000).toFixed(0)} ms)`) +

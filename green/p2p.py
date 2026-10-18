@@ -62,8 +62,11 @@ import socket
 import struct
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse
 
 from cryptography.exceptions import InvalidSignature, InvalidTag
 from cryptography.hazmat.primitives import hashes, serialization
@@ -72,7 +75,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF, HKDFExpand
 
-from . import params, snapshot, tx as txmod, work
+from . import params, sealed, snapshot, tx as txmod, work
 from .chain import (MAX_JOB_BLOB, InvalidBlock, MissingData, block_hash, seed_of, share_id, target_of,
                     work_for_target)
 from .crypto import address_of, canonical, hhex, is_hex, merkle_root
@@ -81,7 +84,7 @@ from .tx import InvalidTx
 from .verify import ProcessChecker
 
 PROTOCOL_VERSION = 1
-AGENT = "green/0.20.0"
+AGENT = "green/0.21.0"
 
 MAX_OUTBOUND = 8               # outbound connections the node keeps
 BLOCK_RELAY_ONLY = 2           # ...of which relay blocks only
@@ -137,11 +140,16 @@ OFFER_TTL = 3600               # an offer older than this is dropped; providers 
 OFFER_MIN_BALANCE = 10_000_000  # yaprak a provider must hold for its offer to be relayed (0.1 GRN)
 OFFERS_PER_MESSAGE = 100
 OFFER_RATE = 0.2               # offers accepted per second per peer, after a burst of MAX_OFFERS
-FEATURES = ["dtx", "cmpct", "offers", "shares"]   # optional messages this node understands
+FEATURES = ["dtx", "cmpct", "offers", "shares", "relay"]   # optional messages this node understands
+RELAY_SLOTS = 8                # sealed requests this node carries for others at once (green/sealed.py)...
+RELAY_PER_PEER = 2             # ...for any one peer
+RELAY_BYTES_PER_MINUTE = 256 * 1024 * 1024
+RELAY_SECONDS = 150
 
 CMDS = ["version", "ping", "pong", "getaddr", "addr", "inv", "getdata", "notfound", "tx", "block",
         "getheaders", "headers", "getblob", "blob", "noblob", "getmempool", "getsnapinfo", "snapinfo",
-        "dtx", "cmpct", "getblocktxn", "blocktxn", "offers", "share"]
+        "dtx", "cmpct", "getblocktxn", "blocktxn", "offers", "share", "relay", "relayed"]
+BINARY = {"blob", "relay", "relayed"}          # raw payloads, not JSON
 CODE = {name: i + 1 for i, name in enumerate(CMDS)}
 NAME = {i: name for name, i in CODE.items()}
 
@@ -468,12 +476,15 @@ def offer_bytes(chain_id: str, offer: dict) -> bytes:
 
 
 OFFER_FIELDS = {"provider", "pub", "url", "price", "max_dim", "credit", "time", "sig"}
+# "kx": the provider's X25519 key for sealed requests (green/sealed.py), since v0.21
 
 
 def offer_problem(chain_id: str, offer, now: float) -> str | None:
     """Why `offer` is not a valid signed offer (None if it is). Balance is checked separately."""
-    if not isinstance(offer, dict) or set(offer) != OFFER_FIELDS:
+    if not isinstance(offer, dict) or set(offer) not in (OFFER_FIELDS, OFFER_FIELDS | {"kx"}):
         return "bad fields"
+    if "kx" in offer and not is_hex(offer["kx"], 64):
+        return "bad key"
     url = offer["url"]
     hostport = parse_address(url.split("://", 1)[1].split("/")[0]) if isinstance(url, str) and "://" in url else None
     if not (len(url) <= 200 and url.split("://")[0] in ("http", "https") and hostport is not None):
@@ -496,7 +507,7 @@ def offer_problem(chain_id: str, offer, now: float) -> str | None:
 
 
 def encode(cmd: str, payload) -> bytes:
-    if cmd == "blob":
+    if cmd in BINARY:
         return bytes([CODE[cmd]]) + payload
     return bytes([CODE[cmd]]) + canonical(payload)
 
@@ -518,6 +529,9 @@ class Peer:
         self.features: set = set()                   # optional messages they understand (FEATURES)
         self.best_height = 0
         self.best_work = 0
+        self.relay_budget = float(RELAY_BYTES_PER_MINUTE)   # sealed requests we carry for them
+        self.relay_time = time.time()
+        self.relays_inflight = 0
         self.first_block = 0                         # lowest height it has block bodies for
         self.snap_offers: list | None = None         # its answer to getsnapinfo
         self.known = BoundedSet(KNOWN_INV)
@@ -683,6 +697,8 @@ class P2P:
         # compute offers (green/compute.py): provider address -> signed offer (guarded by self.lock)
         self.offers: OrderedDict[str, dict] = OrderedDict()
         self.offers_waiting: OrderedDict[str, dict] = OrderedDict()   # valid, but not funded on our chain yet
+        self.relay_waits: dict[bytes, dict] = {}     # sealed requests of ours a peer is carrying
+        self._relay_slots = threading.BoundedSemaphore(RELAY_SLOTS)
         # compact blocks waiting for missing transactions (guarded by node.lock)
         self.partial: dict[str, dict] = {}         # hash -> {"header", "txs", "missing", "peer", "time"}
         # headers-first sync (guarded by node.lock)
@@ -1094,6 +1110,10 @@ class P2P:
         here, everything else goes to the worker threads in arrival order."""
         if cmd == "blob":
             return self._on_blob(peer, payload)
+        if cmd == "relay":
+            return self._on_relay(peer, payload)
+        if cmd == "relayed":
+            return self._on_relayed(peer, payload)
         if cmd in ("ping", "pong", "noblob"):
             return self._dispatch(peer, cmd, json.loads(payload))
         with peer.lock:
@@ -1664,6 +1684,105 @@ class P2P:
         if wait is None:
             raise Misbehaving(BAN_SCORE, "sent data nobody asked for")
         wait["data"] = data
+        wait["event"].set()
+
+    # -- carrying sealed requests (green/sealed.py) --
+
+    def relay(self, to: str, data: bytes, timeout: float = RELAY_SECONDS) -> bytes:
+        """Have a random peer carry a sealed request to provider `to`; its sealed answer.
+        The provider sees the peer's address, the peer sees ours and the provider's
+        address but not the request; never sent from this node itself."""
+        peers = [p for p in self.all_peers() if p.alive and "relay" in p.features]
+        if not peers:
+            raise OSError("no peer can carry the request")
+        peer = random.choice(peers)
+        rid = os.urandom(8)
+        wait = {"event": threading.Event(), "data": b"", "ok": False, "peer": peer}
+        with self.lock:
+            self.relay_waits[rid] = wait
+        try:
+            to_b = to.encode("ascii")
+            peer.send("relay", rid + bytes([len(to_b)]) + to_b + data)
+            end = time.time() + timeout
+            while not wait["event"].wait(1.0):
+                if not peer.alive or time.time() > end:
+                    raise OSError("the peer carrying the request went away" if not peer.alive
+                                  else "no answer from the provider in time")
+        finally:
+            with self.lock:
+                self.relay_waits.pop(rid, None)
+        if not wait["ok"]:
+            raise OSError(f"the request was not carried: {wait['data'].decode(errors='replace')[:200]}")
+        return wait["data"]
+
+    def _on_relay(self, peer: Peer, payload: bytes) -> None:
+        """A peer asks us to carry a sealed request to a provider on offer (reader thread:
+        checks only; the request itself goes out on a thread of its own)."""
+        if len(payload) < 10 or 9 + payload[8] > len(payload):
+            raise Misbehaving(20, "malformed relay")
+        rid, n = payload[:8], payload[8]
+        to, data = payload[9:9 + n].decode("ascii", "replace"), payload[9 + n:]
+        if len(data) > sealed.MAX_SEALED:
+            raise Misbehaving(20, "oversized relay")
+
+        def refuse(why: str) -> None:
+            peer.send("relayed", rid + b"\x01" + why.encode())
+        now = time.time()
+        with peer.lock:
+            peer.relay_budget = min(float(RELAY_BYTES_PER_MINUTE),
+                                    peer.relay_budget + (now - peer.relay_time) * RELAY_BYTES_PER_MINUTE / 60)
+            peer.relay_time = now
+            if peer.relays_inflight >= RELAY_PER_PEER or len(data) > peer.relay_budget:
+                return refuse("busy")
+            peer.relay_budget -= len(data)
+            peer.relays_inflight += 1
+        offer = next((o for o in self.offer_list() if o["provider"] == to), None)
+        why = None
+        if offer is None:
+            why = "no such provider on offer"
+        else:
+            if not gossip_ok(urlparse(offer["url"]).hostname or "", peer.host):
+                why = "that provider is not reachable from here"   # no carrying into our own network
+        if why is None and not self._relay_slots.acquire(blocking=False):
+            why = "busy"
+        if why is not None:
+            with peer.lock:
+                peer.relays_inflight -= 1
+            return refuse(why)
+        threading.Thread(target=self._carry, args=(peer, rid, offer["url"], data), daemon=True,
+                         name="relay").start()
+
+    def _carry(self, peer: Peer, rid: bytes, url: str, data: bytes) -> None:
+        try:
+            req = urllib.request.Request(url.rstrip("/") + "/sealed", data=data, method="POST",
+                                         headers={"Content-Type": "application/octet-stream"})
+            with urllib.request.urlopen(req, timeout=RELAY_SECONDS - 10) as r:
+                out = r.read(sealed.MAX_SEALED + 1)
+            if len(out) > sealed.MAX_SEALED:
+                raise ValueError("answer too large")
+            self.stats["relayed"] = self.stats.get("relayed", 0) + 1
+            reply = rid + b"\x00" + out
+        except urllib.error.HTTPError as e:
+            reply = rid + b"\x01" + f"the provider answered {e.code}".encode()
+        except (OSError, ValueError):
+            reply = rid + b"\x01" + b"the provider could not be reached"
+        finally:
+            self._relay_slots.release()
+            with peer.lock:
+                peer.relays_inflight -= 1
+        try:
+            peer.send("relayed", reply)
+        except OSError:
+            pass
+
+    def _on_relayed(self, peer: Peer, payload: bytes) -> None:
+        if len(payload) < 9:
+            raise Misbehaving(20, "malformed relayed")
+        with self.lock:
+            wait = self.relay_waits.get(payload[:8])
+        if wait is None or wait["peer"] is not peer:
+            return                                   # late (we gave up), or not for us
+        wait["ok"], wait["data"] = payload[8] == 0, payload[9:]
         wait["event"].set()
 
     def _on_noblob(self, peer: Peer, m: dict) -> None:

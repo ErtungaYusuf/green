@@ -135,7 +135,7 @@ def node_status(net: dict, p: dict, timeout: float = 2.0) -> dict | None:
     return st if st.get("genesis") == net["genesis"] else None
 
 
-def _command(root: str, net: dict, p: dict, gpu: bool) -> list[str]:
+def _command(root: str, net: dict, p: dict, gpu: bool, intensity: int = 100) -> list[str]:
     """The node of persona `p` (mining on the GPU if `gpu`: a node without a usable GPU
     says so in its log and mines on the CPU)."""
     cmd = [sys.executable, "-m", "green", "--data", os.path.abspath(p["data"]), "node",
@@ -145,7 +145,7 @@ def _command(root: str, net: dict, p: dict, gpu: bool) -> list[str]:
         if other is not p:
             cmd += ["--peer", f"127.0.0.1:{other['p2p']}"]
     if p["mine"]:
-        cmd.append("--mine")
+        cmd += ["--mine", "--intensity", str(intensity)]
     if gpu:
         cmd.append("--gpu")
     if p["compute"]:
@@ -173,7 +173,7 @@ def _spawn(cmd: list[str], log_path: str) -> subprocess.Popen:
         out.close()
 
 
-def start(root: str, gpu: bool = True, base_port: int = BASE_PORT, log=print) -> dict:
+def start(root: str, gpu: bool = True, base_port: int = BASE_PORT, log=print, intensity: int = 50) -> dict:
     net = load(root)
     if net is None:
         taken = [base_port + 1 + i for i in range(len(PERSONAS)) if _answers({"api": base_port + 1 + i})]
@@ -189,7 +189,7 @@ def start(root: str, gpu: bool = True, base_port: int = BASE_PORT, log=print) ->
         if _answers(p):
             raise LocalnetError(f"{url(p)} is another network's node (another localnet folder?): stop it, or "
                                 f"use --base-port for a network of your own")
-        proc = _spawn(_command(root, net, p, gpu and p["mine"]), os.path.join(p["data"], "node.log"))
+        proc = _spawn(_command(root, net, p, gpu and p["mine"], intensity), os.path.join(p["data"], "node.log"))
         started[p["name"]] = proc
         log(f"  {p['name']:6s} starting ({p['role']}), API {url(p)}")
     end = time.time() + START_SECONDS
@@ -416,10 +416,12 @@ def _buy_once(app, me: dict, net: dict, stats: dict, rng) -> None:
         stats["last"] = f"trained a digit model ({steps} steps, {r['products']} products, accuracy {r['accuracy']:.2f})"
     elif roll < 0.8:
         count, size = rng.randint(3, 8), rng.choice([256, 512, 1024])
+        privacy = rng.choice(["split", "split", "secret"])
+        size = min(size, 512) if privacy == "secret" else size     # (secret sharing costs 12x)
         for _ in range(count):
-            app.product(name, size, size, size)
+            app.product(name, size, size, size, privacy)
         stats["products"] += count
-        stats["last"] = f"bought {count} products of {size}x{size}x{size}"
+        stats["last"] = f"bought {count} products of {size}x{size}x{size} ({privacy}, sealed through a peer)"
     else:
         r = app.post_job(name, 512, 512, 512, JOB_PRICE)
         stats["jobs"] += 1

@@ -35,6 +35,11 @@ c = np.frombuffer(urllib.request.urlopen(req).read(), "<i4").reshape(512, 512)  
 
 `grn localnet status` shows who is who, `grn localnet stop` stops every node cleanly, `grn localnet reset` deletes the network. The nodes are ordinary nodes (their logs are in `localnet/<name>/node.log`); every command below works on them with `--data localnet/<name> --node http://127.0.0.1:1850N` (alice is 18501, erin 18505; the buyers' logs are `localnet/<name>/buyer.log`). Their wallets are unencrypted: the local network is for trying things, its coins are worth nothing.
 
+## What's new in v0.21
+
+- **Anonymous compute:** requests are sealed to the provider and carried by a random peer, so providers never learn who is asking and only the buyer can read the result; the data is shuffled and spread over providers (split) or secret-shared so each provider sees only random numbers (secret). The app does this by default.
+- **Mining intensity:** miners can work a set percentage of the time and switch GPU/CPU while running; the local network's GPU miners run at 50%.
+
 ## What's new in v0.20
 
 - **GPU mining that keeps the GPU busy:** a mining node does ~800 units/s on an RX 9070 XT instead of 358 (batches, a pipeline, a faster kernel, and the slow bookkeeping around each try removed); CPU mining uses several cores (398 instead of 137).

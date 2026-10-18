@@ -40,13 +40,14 @@ import socket
 import threading
 import time
 import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
 import numpy as np
 
-from . import params, tx as txmod, work
+from . import params, sealed, tx as txmod, work
 from .crypto import Key, is_hex, verify
 from .node import BoundedServer, http_get, http_post
 from .chain import MissingData
@@ -101,6 +102,28 @@ def price_of(m: int, k: int, n: int, unit_price: int) -> int:
 
 
 SOUNDNESS_BITS = 120               # a wrong product passes verify_product with probability below 2^-120
+MOD_MAX = 1 << 20                  # moduli of modular products (green/private.py): k * (p-1)^2 < 2^53
+
+
+def product_bytes(shape: tuple, modulus: int | None) -> int:
+    """The body of a product request: A then B, int8 (or int32 for a modular product)."""
+    m, k, n = shape
+    return (m * k + k * n) * (1 if modulus is None else 4)
+
+
+def verify_product_mod(a: np.ndarray, b: np.ndarray, c: np.ndarray, p: int) -> bool:
+    """Is c == a @ b (mod p)? Freivalds' test in Z_p with random columns of entries in
+    [0, 2^10): a wrong row passes one column with probability at most 2^-10, so 12
+    columns give 2^-120. Every sum stays below 2^53 for k <= 4096 and p <= 2^20."""
+    m, k = a.shape
+    if b.shape[0] != k or c.shape != (m, b.shape[1]) or not 2 <= p <= MOD_MAX or k * (p - 1) ** 2 >= 2 ** 53:
+        return False
+    if c.min(initial=0) < 0 or c.max(initial=0) >= p:
+        return False
+    rng = np.random.default_rng(int.from_bytes(os.urandom(32), "big"))
+    r = rng.integers(0, 1 << 10, size=(b.shape[1], -(-SOUNDNESS_BITS // 10))).astype(np.float64)
+    br = np.mod(work.blas_matmul(b, r), p)
+    return bool(np.array_equal(np.mod(work.blas_matmul(a, br), p), np.mod(work.blas_matmul(c, r), p)))
 
 
 def verify_product(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> bool:
@@ -159,6 +182,7 @@ class Provider:
         self.stats = {"products": 0, "units": 0, "refused": 0, "claims": 0, "closed": 0}
         self.server = None
         self.running = False
+        self.kx = sealed.provider_key(key.secret_hex())   # buyers seal requests to this (green/sealed.py)
 
     # -- books --
 
@@ -196,12 +220,13 @@ class Provider:
 
     def offer(self) -> dict:
         return {"provider": self.address, "price": self.price, "max_dim": self.max_dim, "credit": self.credit,
-                "chain": self.node.chain.chain_id}
+                "chain": self.node.chain.chain_id, "kx": sealed.public_hex(self.kx)}
 
     def signed_offer(self) -> dict:
         """Our offer, signed, for the network's provider list (p2p.py, GET /providers)."""
         offer = {"provider": self.address, "pub": self.key.pub_hex, "url": self.url, "price": self.price,
-                 "max_dim": self.max_dim, "credit": self.credit, "time": int(time.time())}
+                 "max_dim": self.max_dim, "credit": self.credit, "time": int(time.time()),
+                 "kx": sealed.public_hex(self.kx)}
         from .p2p import offer_bytes
         offer["sig"] = self.key.sign(offer_bytes(self.node.chain.chain_id, offer))
         return offer
@@ -293,6 +318,70 @@ class Provider:
             self.stats["products"] += 1
             self.stats["units"] += price_of(m, k, n, 1)
         return c.tobytes()
+
+    def compute_mod(self, shape: tuple, modulus: int, body: bytes) -> bytes:
+        """(A @ B) mod p for int32 A, B with entries in [0, p): the products of shares in
+        green/private.py. float64 is exact while k * (p-1)^2 < 2^53."""
+        m, k, n = shape
+        if not 2 <= modulus <= MOD_MAX or k * (modulus - 1) ** 2 >= 2 ** 53:
+            raise ValueError("modulus too large for an exact product")
+        if len(body) != product_bytes(shape, modulus):
+            raise ValueError("the body is not A and B of that shape")
+        a = np.frombuffer(body, dtype="<i4", count=m * k).reshape(m, k)
+        b = np.frombuffer(body, dtype="<i4", count=k * n, offset=4 * m * k).reshape(k, n)
+        if min(a.min(initial=0), b.min(initial=0)) < 0 or max(a.max(initial=0), b.max(initial=0)) >= modulus:
+            raise ValueError("entries must be in [0, modulus)")
+        with self.slots:
+            c = np.mod(work.blas_matmul(a, b), modulus).astype("<i4")
+        with self.lock:
+            self.stats["products"] += 1
+            self.stats["units"] += price_of(m, k, n, 1)
+        return c.tobytes()
+
+    def serve_sealed(self, data: bytes) -> bytes:
+        """Answer a sealed request (green/sealed.py) with a sealed answer. Raises SealError
+        if it cannot be opened; everything else, refusals included, goes in the answer."""
+        header, body, key = sealed.open_request(self.kx, data)
+        path, h = header.get("path"), header.get("headers") or {}
+        status, extra, out = 200, {}, b""
+        try:
+            if not isinstance(h, dict) or not all(isinstance(v, str) for v in h.values()):
+                raise ValueError("bad headers")
+            if path in ("/matmul", "/matmul_mod"):
+                modulus = int(h.get("X-Modulus", "")) if path == "/matmul_mod" else None
+                shape = tuple(int(x) for x in h.get("X-Shape", "").split(","))
+                if len(shape) != 3 or len(body) != product_bytes(shape, modulus):
+                    raise ValueError("X-Shape must be m,k,n and the body A and B of that shape")
+                cid, total = h.get("X-Channel", ""), h.get("X-Voucher-Total")
+                ticket, owed = self.admit(cid, shape, int(total) if total else None, h.get("X-Voucher"))
+                try:
+                    out = self.compute(shape, body) if modulus is None else self.compute_mod(shape, modulus, body)
+                except BaseException:
+                    self.release(cid, ticket)
+                    raise
+                extra = {"X-Owed": str(owed)}
+            elif path == "/voucher":
+                m = json.loads(body)
+                ch = self._channel(m["channel"]) if m.get("channel") else None
+                if ch is None:
+                    raise LookupError("no channel given")
+                out = json.dumps({"vouched": self.take_voucher(m["channel"], ch, m.get("total"), m.get("voucher"))}).encode()
+            elif path == "/close":
+                m = json.loads(body)
+                out = json.dumps(self.close(m.get("channel", ""), m.get("total"), m.get("voucher"))).encode()
+            else:
+                status, out = 404, b'{"error": "not found"}'
+        except PaymentRequired as e:
+            status, out = 402, json.dumps({"error": str(e)}).encode()
+        except LookupError as e:
+            status, out = 404, json.dumps({"error": str(e)}).encode()
+        except ChannelEnding as e:
+            status, out = 409, json.dumps({"error": str(e)}).encode()
+        except (ValueError, KeyError, TypeError) as e:
+            status, out = 400, json.dumps({"error": str(e)}).encode()
+        except Exception:
+            status, out = 500, b'{"error": "internal error"}'
+        return sealed.seal_answer(key, {"status": status, "headers": extra}, out)
 
     def matmul(self, cid: str, shape: tuple, body: bytes, total=None, sig=None) -> tuple[bytes, int]:
         """admit + compute, for callers that already hold the body."""
@@ -428,6 +517,23 @@ class Provider:
         self._save()
 
 
+def relay_post(node_url: str, provider: str, data: bytes, timeout: float = 300) -> bytes:
+    """Hand a sealed request to our own node, which has a peer carry it (POST /relay)."""
+    from .node import CLIENT_HEADER
+    req = urllib.request.Request(f"{node_url.rstrip('/')}/relay", data=data, method="POST",
+                                 headers={"Content-Type": "application/octet-stream", CLIENT_HEADER: "1",
+                                          "X-Relay-To": provider})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read(sealed.MAX_SEALED + 1)
+    except urllib.error.HTTPError as e:
+        try:
+            reason = json.loads(e.read()).get("error", e.reason)
+        except (ValueError, OSError):
+            reason = e.reason
+        raise OSError(f"relay failed: {reason}") from None
+
+
 def _handler(provider: Provider):
     max_body = 2 * provider.max_dim * provider.max_dim
 
@@ -508,10 +614,18 @@ def _handler(provider: Provider):
         def do_POST(self):
             path = urlparse(self.path).path
             raw = self.headers.get("Content-Length", "")
-            if not raw.isdigit() or int(raw) > max_body:
+            limit = {"/matmul_mod": 4 * max_body, "/sealed": sealed.MAX_SEALED}.get(path, max_body)
+            if not raw.isdigit() or int(raw) > limit:
                 return self._refuse(413, "too large")
             if path == "/matmul":
                 return self._matmul(int(raw))
+            if path == "/matmul_mod":
+                return self._matmul(int(raw), modular=True)
+            if path == "/sealed":
+                try:
+                    return self._send(200, provider.serve_sealed(self.rfile.read(int(raw))))
+                except sealed.SealError as e:
+                    return self._send(400, {"error": str(e)})
             if int(raw) > 4096:
                 return self._refuse(413, "too large")
             body = self.rfile.read(int(raw))
@@ -521,13 +635,15 @@ def _handler(provider: Provider):
                 return self._guard(lambda: self._close(body))
             return self._send(404, {"error": "not found"})
 
-        def _matmul(self, length: int):
+        def _matmul(self, length: int, modular: bool = False):
             cid = self.headers.get("X-Channel", "")
             admitted = []
+            modulus = []
 
             def check():
                 shape = tuple(int(x) for x in self.headers.get("X-Shape", "").split(","))
-                if len(shape) != 3 or length != shape[0] * shape[1] + shape[1] * shape[2]:
+                modulus.append(int(self.headers.get("X-Modulus", "")) if modular else None)
+                if len(shape) != 3 or length != product_bytes(shape, modulus[0]):
                     raise ValueError("X-Shape must be m,k,n and the body A and B of that shape")
                 total = self.headers.get("X-Voucher-Total")
                 admitted.append((shape,) + provider.admit(cid, shape, int(total) if total else None,
@@ -538,7 +654,7 @@ def _handler(provider: Provider):
             shape, ticket, owed = admitted[0]
             try:
                 body = self.rfile.read(length)
-                c = provider.compute(shape, body)
+                c = provider.compute(shape, body) if modulus[0] is None else provider.compute_mod(shape, modulus[0], body)
             except BaseException:
                 provider.release(cid, ticket)
                 self.close_connection = True
@@ -564,12 +680,26 @@ def _handler(provider: Provider):
 class ComputeChannel:
     """A buyer's channel to one provider: open it, then call matmul like numpy."""
 
-    def __init__(self, provider_url: str, key: Key, node_url: str, timeout: float = 300):
+    def __init__(self, provider_url: str, key: Key, node_url: str, timeout: float = 300, offer: dict | None = None,
+                 relay: bool = False):
+        """With relay=True every request is sealed to the provider (green/sealed.py) and
+        carried by a random peer of our node (p2p.py): the provider never sees where it
+        comes from, the peer never sees what it is. The offer then comes from the
+        network's signed list, so we never contact the provider directly either."""
         self.url = provider_url.rstrip("/")
         self.node = node_url.rstrip("/")
         self.key = key
         self.timeout = timeout
-        self.offer = http_get(f"{self.url}/offer", timeout=30)
+        self.relay = relay
+        if offer is None:
+            if relay:
+                raise ValueError("a relayed channel needs the provider's signed offer from the network")
+            offer = http_get(f"{self.url}/offer", timeout=30)
+        elif "chain" not in offer:
+            offer = dict(offer, chain=http_get(f"{self.node}/status", timeout=30)["genesis"])
+        if relay and not is_hex(offer.get("kx"), 64):
+            raise ProviderError("this provider cannot take sealed requests")
+        self.offer = offer
         self.chain_id = None
         self.cid = None
         self.amount = 0
@@ -651,31 +781,84 @@ class ComputeChannel:
             conn = self.local.conn = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=self.timeout)
         return conn
 
-    def _post(self, body: bytes, headers: dict) -> bytes:
+    def _exchange(self, path: str, headers: dict, body: bytes) -> tuple[int, bytes]:
+        """One request: (status, answer). Sealed and relayed, or straight to the provider."""
+        if self.relay:
+            req, key = sealed.seal_request(self.offer["kx"], {"path": path, "headers": headers}, body)
+            data = relay_post(self.node, self.offer["provider"], req, timeout=self.timeout)
+            try:
+                header, out = sealed.open_answer(key, data)
+            except sealed.SealError as e:
+                raise ProviderError(str(e)) from None
+            return int(header.get("status", 500)), out
+        conn = self._connection()
+        try:
+            conn.request("POST", path, body=body, headers=headers)
+            r = conn.getresponse()
+            return r.status, r.read(16 * MAX_DIM * MAX_DIM + 1)
+        except (OSError, http.client.HTTPException):
+            conn.close()
+            self.local.conn = None
+            raise
+
+    def _post(self, body: bytes, headers: dict, path: str = "/matmul") -> bytes:
         end = time.time() + 60
         retried = False
         while True:
-            conn = self._connection()
             try:
-                conn.request("POST", "/matmul", body=body, headers=headers)
-                r = conn.getresponse()
-                data = r.read(4 * MAX_DIM * MAX_DIM + 1)
+                status, data = self._exchange(path, headers, body)
             except (OSError, http.client.HTTPException) as e:
-                conn.close()
-                self.local.conn = None
                 if retried:
                     raise ProviderError(f"cannot reach the provider: {e}") from None
                 retried = True                    # a kept-alive connection the provider closed: once more
                 continue
-            if r.status == 200:
+            if status == 200:
                 return data
             reason = data.decode(errors="replace")
-            if r.status == 404 and time.time() < end:     # the provider's node has not seen the channel yet
+            if status == 404 and time.time() < end:     # the provider's node has not seen the channel yet
                 time.sleep(0.5)
                 continue
-            if r.status == 402:
+            if status == 402:
                 raise PaymentRequired(reason)
-            raise ProviderError(f"provider answered {r.status}: {reason}")
+            raise ProviderError(f"provider answered {status}: {reason}")
+
+    def _call(self, path: str, obj: dict) -> dict:
+        """A small JSON request (voucher, close)."""
+        if not self.relay:
+            return http_post(f"{self.url}{path}", obj, timeout=30)
+        status, out = self._exchange(path, {"Content-Type": "application/json"}, json.dumps(obj).encode())
+        if status != 200:
+            raise ProviderError(f"provider answered {status}: {out.decode(errors='replace')}")
+        return json.loads(out)
+
+    def matmul_mod(self, a: np.ndarray, b: np.ndarray, p: int) -> np.ndarray:
+        """(a @ b) mod p for entries in [0, p), computed by the provider and checked here."""
+        if self.bad:
+            raise WrongResult("this provider returned a wrong result before")
+        a = np.ascontiguousarray(a, dtype="<i4")
+        b = np.ascontiguousarray(b, dtype="<i4")
+        (m, k), (k2, n) = a.shape, b.shape
+        if k != k2:
+            raise ValueError("inner dimensions differ")
+        started = time.time()
+        headers = {"X-Channel": self.cid, "X-Shape": f"{m},{k},{n}", "X-Modulus": str(p),
+                   "Content-Type": "application/octet-stream", **self.voucher_headers()}
+        data = self._post(a.tobytes() + b.tobytes(), headers, "/matmul_mod")
+        if len(data) != 4 * m * n:
+            self.bad = True
+            raise WrongResult("the provider's answer has the wrong size")
+        c = np.frombuffer(data, dtype="<i4").reshape(m, n).astype(np.int64)
+        checked = time.time()
+        if not verify_product_mod(a, b, c, p):
+            self.bad = True
+            raise WrongResult("the provider's modular product failed Freivalds' test; it is not paid for it")
+        with self.lock:
+            self.owed += price_of(m, k, n, self.offer["price"])
+            self.stats["products"] += 1
+            self.stats["macs"] += m * k * n
+            self.stats["seconds"] += time.time() - started
+            self.stats["verify_seconds"] += time.time() - checked
+        return c
 
     def matmul_many(self, pairs: list) -> list[np.ndarray]:
         """Several independent products at once (each on its own connection, at most the
@@ -702,9 +885,9 @@ class ComputeChannel:
         body = {"channel": self.cid, "total": total,
                 "voucher": txmod.sign_voucher(self.key, self.chain_id, self.cid, total) if total else None}
         try:
-            http_post(f"{self.url}/close", body, timeout=30)
+            self._call("/close", body)
             return True
-        except urllib.error.HTTPError:
+        except (urllib.error.HTTPError, ProviderError):
             self.settle()
             return False
 
@@ -713,9 +896,8 @@ class ComputeChannel:
         with self.lock:
             total = self.owed
         if total:
-            http_post(f"{self.url}/voucher", {"channel": self.cid, "total": total,
-                                              "voucher": txmod.sign_voucher(self.key, self.chain_id, self.cid, total)},
-                      timeout=30)
+            self._call("/voucher", {"channel": self.cid, "total": total,
+                                    "voucher": txmod.sign_voucher(self.key, self.chain_id, self.cid, total)})
         return total
 
 
@@ -774,18 +956,22 @@ class ComputeCluster:
 
     @classmethod
     def from_market(cls, node_url: str, key: Key, amount_each: int, count: int = 3, max_price: int | None = None,
-                    blocks: int = 4 * params.MIN_CHANNEL_BLOCKS, allow_local: bool = False) -> "ComputeCluster":
+                    blocks: int = 4 * params.MIN_CHANNEL_BLOCKS, allow_local: bool = False,
+                    relay: bool = False) -> "ComputeCluster":
         """Find providers on the network (GET /providers on our node), take the `count`
-        cheapest, and open a channel of `amount_each` to each."""
+        cheapest, and open a channel of `amount_each` to each (relay: every request sealed
+        and carried by a peer; see ComputeChannel)."""
         offers = http_get(f"{node_url.rstrip('/')}/providers", timeout=30)
         picked = []
         for o in offers:
             host = urlparse(o["url"]).hostname or ""
             if (max_price is not None and o["price"] > max_price) or (not allow_local and _private(host)):
                 continue
+            if relay and not is_hex(o.get("kx"), 64):
+                continue                          # an older provider: no sealed requests
             try:
-                ch = ComputeChannel(o["url"], key, node_url)
-            except (OSError, ValueError):
+                ch = ComputeChannel(o["url"], key, node_url, offer=o if relay else None, relay=relay)
+            except (OSError, ValueError, ProviderError):
                 continue                          # unreachable: try the next one
             if ch.offer.get("provider") != o["provider"]:
                 continue                          # the URL answers for someone else

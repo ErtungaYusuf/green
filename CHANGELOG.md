@@ -2,6 +2,21 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## 0.21.0
+
+**Anonymous compute**
+- Sealed requests (`green/sealed.py`): providers advertise an X25519 key in their signed offers; every request is sealed to it with a fresh key pair (HKDF-SHA256, ChaCha20-Poly1305) and its answer comes back under the same key, so only the buyer can read the result.
+- Carried by a peer (`relay`/`relayed`, P2P messages 25 and 26; `POST /relay` on the buyer's node): the provider never learns where a request comes from, the peer carrying it never learns what it is, and the buyer's node never contacts the provider. A node carries requests only to providers on offer, within per-peer limits.
+- Data hidden from the providers (`green/private.py`), per request: *split* (secret row and column shuffles, a grid of tiles over the providers: nobody sees the whole problem; same cost) or *secret* (replicated secret sharing mod two primes over three providers: each sees only uniformly random shares; 12 times the compute). Providers serve exact modular products (`POST /matmul_mod`) and buyers check them with Freivalds' test mod p.
+- The app uses all of it by default (sealed through a peer, split), with a privacy selector and `X-Privacy` on the compute proxy; the local network's buyers use split and secret.
+
+**Mining**
+- `--intensity PERCENT` and `POST /mining {"intensity", "gpu"}`: a miner works that percent of the time, and switches between GPU and CPU while running; `grn mine on --intensity 50 --gpu on`. The local network runs its three GPU miners at 50% by default.
+
+**Also**
+- Fixed, from v0.20's pipelined miner: units its batches were trying were not counted as busy, so a node that ran a pool could hand the same unit to a pool miner; the two results then collided in one batch, which the chain refused. In-flight units are busy now, and a batch never takes a unit twice. And the GPU check on switching to the GPU ran on the GPU object the miner thread was using (it is not thread-safe); each node now keeps its own checked GPU.
+- Eighteenth security review (SECURITY.md, B1-B5). 270 tests. Consensus is unchanged; the P2P protocol gains two optional messages and offers an optional field, which older nodes ignore or refuse to relay.
+
 ## 0.20.0
 
 **Mining that keeps the GPU busy**

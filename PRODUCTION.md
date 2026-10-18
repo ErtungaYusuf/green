@@ -2,7 +2,7 @@
 
 Where Green stands on every aspect a production cryptocurrency needs, what backs each claim, and what is still missing. "Done" means implemented, tested and measured in this repository; it does not mean audited, battle-tested or ready to carry real value. Nothing here is ready for real money until the items marked **blocker** are done.
 
-Status as of v0.20 (October 2026). 265 automated tests; seventeen internal security reviews (SECURITY.md).
+Status as of v0.21 (October 2026). 270 automated tests; eighteen internal security reviews (SECURITY.md).
 
 ## Summary
 
@@ -20,10 +20,10 @@ Status as of v0.20 (October 2026). 265 automated tests; seventeen internal secur
 | 10. Wallets and keys | Done for a testnet (recovery phrases, encrypted files, checksummed addresses, multisig) | hardware wallets, a registered coin type |
 | 11. APIs and developer tools | Done for a testnet (versioned API, fee estimates, long-poll, Python SDK) | SDKs in other languages, explorer API |
 | 12. Operations | Done for a testnet (config file, logs, systemd, metrics and alerts, runbook) | — |
-| 13. Testing and QA | Partial (265 tests, fuzz, mutation testing, 8-node simulation) | multi-node testnet, soak tests |
+| 13. Testing and QA | Partial (270 tests, fuzz, mutation testing, 8-node simulation) | multi-node testnet, soak tests |
 | 14. Security assurance | Partial (internal reviews only) | **blocker**: independent audit, bug bounty |
 | 15. Upgrades and governance | Done (version-bits activation, signed releases, published process) | reproducible builds |
-| 16. Privacy | Partial (transaction origin: Dandelion++; data and amounts public) | — (documented) |
+| 16. Privacy | Partial (transaction origin: Dandelion++; compute requests sealed and relayed, data split or secret-shared; amounts public) | private payments |
 | 17. Performance and implementation | Partial (Python reference) | native node for scale |
 | 18. Source control and releases | Partial (git, tagged versions, private GitHub repository, CI passing) | **blocker**: public repository, signed tags |
 | 19. Economics and launch | Partial (supply set; no launch plan) | fair-launch plan, public testnet |
@@ -140,7 +140,7 @@ Since v0.12: a transaction and address index kept consistent through reorgs (`/v
 
 ## 13. Testing and QA
 
-**Today:** 265 tests across consensus, security regressions, addresses, fees, state and storage, the state commitment and snapshots, the P2P protocol, atomicity, networks of live nodes, GPU, WASM, both markets, the agent and its guardian; two fuzz tests with exact accounting invariants; mutation testing proved the fuzz catches injected accounting bugs; a differential test against a reference replay; an 8-node network simulation with a split and a heal (`bench/net_sim.py`, v0.14: blocks reach every node in a median of 0.02 s, the halves converge in 0.6 s with identical state roots); CI configured for Linux, Windows and macOS.
+**Today:** 270 tests across consensus, security regressions, addresses, fees, state and storage, the state commitment and snapshots, the P2P protocol, atomicity, networks of live nodes, GPU, WASM, both markets, the agent and its guardian; two fuzz tests with exact accounting invariants; mutation testing proved the fuzz catches injected accounting bugs; a differential test against a reference replay; an 8-node network simulation with a split and a heal (`bench/net_sim.py`, v0.14: blocks reach every node in a median of 0.02 s, the halves converge in 0.6 s with identical state roots); CI configured for Linux, Windows and macOS.
 
 **Since v0.19** CI runs on GitHub (a private repository for now): every push is tested on Linux, Windows and macOS with Python 3.12 to 3.14, plus a Docker smoke test; the first run (3.12 and 3.13) passed everywhere.
 

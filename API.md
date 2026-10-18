@@ -1,4 +1,4 @@
-# Green node HTTP API (v0.20)
+# Green node HTTP API (v0.21)
 
 Every node serves this API on its port (default 8545, `127.0.0.1` unless started with `--host`). Requests and responses are JSON unless noted. Amounts are integers in yaprak (1 GRN = 10^8 yaprak). Errors come back as `{"error": "..."}` with status 400 (bad request or invalid transaction), 403 (admin endpoint called remotely), 404 (unknown), 409 (data the node does not have yet), 413 (too large) or 500.
 
@@ -58,7 +58,8 @@ An admin request must come from the node's machine, carry the header `X-Green-Cl
 |---|---|
 | `POST /blob` | raw body: store data (job matrices, a WASM program or input) before posting the transaction that needs it; returns `{"hash": ...}` |
 | `POST /peers` | `{"addr": "host:port"}` or `{"addr": "<node id>@host:port"}`: keep a P2P connection to that node (with an id, it must present that key). Returns `{"added": bool}` |
-| `POST /mining` | `{"on": true \| false}`: switch mining |
+| `POST /mining` | any of `{"on": bool, "intensity": 1..100, "gpu": bool}`: switch mining, mine that percent of the time, mine on the GPU (checked against the CPU first) or the CPU. Returns `{"mining", "intensity", "gpu"}` (the GPU's name or null) |
+| `POST /relay` | header `X-Relay-To: <provider address>`, raw body: a sealed request (SPEC.md §12); a random peer carries it to that provider and the sealed answer comes back raw (503 if no peer could) |
 | `POST /shutdown` | `{}`: stop the node cleanly (as `grn stop` does); a provider first claims what buyers owe it. Returns `{"stopping": true}` |
 
 ## The app's compute proxy (`grn app`)
@@ -67,7 +68,7 @@ Not part of the node: `grn app` serves it on `127.0.0.1:8600`. It buys each prod
 
 | Method and path | Use |
 |---|---|
-| `POST /v1/matmul` | headers `X-Shape: m,k,n` (each 1..4096) and optionally `X-Account: <name>`; body A (m·k int8, row-major) then B (k·n int8). Returns m·n little-endian int32. 400 if the body does not match the shape exactly, 502 if no provider could do it |
+| `POST /v1/matmul` | headers `X-Shape: m,k,n` (each 1..4096) and optionally `X-Account: <name>` and `X-Privacy: split \| secret \| none` (default split; see SECURITY.md B4); body A (m·k int8, row-major) then B (k·n int8). Returns m·n little-endian int32. 400 if the body does not match the shape exactly, 502 if no provider could do it |
 | `GET /v1/status` | `{"proxy": {"products", "macs", "seconds", "errors"}, "buyer"}` |
 
 The app's own page uses `/api/*` endpoints that need the page's token (`X-App-Token`); every request must name this machine in `Host`.

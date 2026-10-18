@@ -353,6 +353,9 @@ def cmd_node(args):
                 use_gpu=args.gpu, p2p_port=args.p2p_port, listen=not args.no_listen, fast_sync=args.fast_sync,
                 p2p_host=args.p2p_host, no_signal=args.no_signal, prune=args.prune, prune_keep=args.prune_keep,
                 dandelion=not args.no_dandelion, portmap=args.portmap)
+    if not 1 <= args.intensity <= 100:
+        raise CliError("--intensity is a percentage, 1..100")
+    node.intensity = args.intensity
     node.start(mine=args.mine)
     pool = None
     if args.pool_port is not None:
@@ -419,7 +422,7 @@ CONFIG_KEYS = {"port": int, "host": str, "p2p_port": int, "p2p_host": str, "peer
                "report": (int, float), "log_level": str, "log_file": str, "prune": bool, "prune_keep": int,
                "pool_port": int, "pool_host": str, "pool_fee": int, "no_dandelion": bool,
                "provide_port": int, "provide_host": str, "provide_url": str, "provide_price": int,
-               "portmap": bool}
+               "portmap": bool, "intensity": int}
 
 
 def load_config(data: str) -> dict:
@@ -565,8 +568,14 @@ def cmd_send(args):
 
 
 def cmd_mine(args):
-    res = api_post(args, "/mining", {"on": args.state == "on"})
-    print(f"Mining {'on' if res['mining'] else 'off'}")
+    body = {"on": args.state == "on"}
+    if args.intensity is not None:
+        body["intensity"] = args.intensity
+    if args.gpu is not None:
+        body["gpu"] = args.gpu == "on"
+    res = api_post(args, "/mining", body)
+    print(f"Mining {'on' if res['mining'] else 'off'}, {res.get('intensity', 100)}% of the time, "
+          f"on the {res['gpu'] or 'CPU'}")
 
 
 def cmd_stop(args):
@@ -604,7 +613,7 @@ def cmd_localnet(args):
     try:
         if args.action == "start":
             print(f"Local network in {args.dir}:")
-            localnet.start(args.dir, gpu=not args.cpu, base_port=args.base_port)
+            localnet.start(args.dir, gpu=not args.cpu, base_port=args.base_port, intensity=args.intensity)
             print()
             localnet.print_status(localnet.status(args.dir), args.dir)
         elif args.action == "status":
@@ -1037,6 +1046,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--genesis", help="genesis.json of an existing network")
     s.add_argument("--mine", action="store_true", help="start mining")
     s.add_argument("--gpu", action="store_true", help="mine on the GPU (WebGPU/Vulkan)")
+    s.add_argument("--intensity", type=int, default=100, metavar="PERCENT",
+                   help="mine this percent of the time and let the GPU/CPU rest the rest (default 100)")
     s.add_argument("--report", type=float, default=15, help="seconds between status lines")
     s.add_argument("--provide-port", type=int, help="also sell matrix products through channels on this port")
     s.add_argument("--provide-host", default="127.0.0.1", help="address the seller listens on (0.0.0.0: everyone)")
@@ -1096,6 +1107,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("mine", help="turn mining on/off on a running node")
     s.add_argument("state", choices=["on", "off"])
+    s.add_argument("--intensity", type=int, metavar="PERCENT", help="mine this percent of the time (1..100)")
+    s.add_argument("--gpu", choices=["on", "off"], help="mine on the GPU or on the CPU")
     s.set_defaults(fn=cmd_mine)
 
     s = sub.add_parser("stop", help="stop a running node cleanly (it collects what buyers owe it first)")
@@ -1114,6 +1127,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "stop: stop every node cleanly; reset: stop and delete it")
     s.add_argument("--dir", default="localnet", help="folder of the local network (default: localnet)")
     s.add_argument("--cpu", action="store_true", help="the miners mine on the CPU (default: the GPU, if there is one)")
+    s.add_argument("--intensity", type=int, default=50, metavar="PERCENT",
+                   help="each miner mines this percent of the time (default 50: three miners share one GPU)")
     s.add_argument("--base-port", type=int, default=18500,
                    help="ports used: base+1.. (API), base+101.. (P2P), base+201.. (compute); default 18500")
     s.set_defaults(fn=cmd_localnet)
