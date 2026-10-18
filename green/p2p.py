@@ -84,7 +84,7 @@ from .tx import InvalidTx
 from .verify import ProcessChecker
 
 PROTOCOL_VERSION = 1
-AGENT = "green/0.21.4"
+AGENT = "green/0.21.5"
 
 MAX_OUTBOUND = 8               # outbound connections the node keeps
 BLOCK_RELAY_ONLY = 2           # ...of which relay blocks only
@@ -142,7 +142,7 @@ OFFERS_PER_MESSAGE = 100
 OFFER_RATE = 0.2               # offers accepted per second per peer, after a burst of MAX_OFFERS
 FEATURES = ["dtx", "cmpct", "offers", "shares", "relay"]   # optional messages this node understands
 RELAY_SLOTS = 8                # sealed requests this node carries for others at once (green/sealed.py)...
-RELAY_PER_PEER = 2             # ...for any one peer
+RELAY_PER_PEER = 4             # ...for any one peer
 RELAY_BYTES_PER_MINUTE = 256 * 1024 * 1024
 RELAY_SECONDS = 150
 
@@ -1710,11 +1710,26 @@ class P2P:
     def relay(self, to: str, data: bytes, timeout: float = RELAY_SECONDS) -> bytes:
         """Have a random peer carry a sealed request to provider `to`; its sealed answer.
         The provider sees the peer's address, the peer sees ours and the provider's
-        address but not the request; never sent from this node itself."""
-        peers = [p for p in self.all_peers() if p.alive and "relay" in p.features]
-        if not peers:
-            raise OSError("no peer can carry the request")
-        peer = random.choice(peers)
+        address but not the request; never sent from this node itself. A peer that is
+        busy (it carries at most RELAY_PER_PEER of ours at once) hands it to the next one,
+        and when all are, the request waits a moment and tries again."""
+        end = time.time() + timeout
+        while True:
+            peers = [p for p in self.all_peers() if p.alive and "relay" in p.features]
+            if not peers:
+                raise OSError("no peer can carry the request")
+            random.shuffle(peers)
+            for peer in peers:
+                ok, answer = self._relay_through(peer, to, data, end)
+                if ok:
+                    return answer
+                if answer != b"busy":
+                    raise OSError(f"the request was not carried: {answer.decode(errors='replace')[:200]}")
+            if time.time() > end:
+                raise OSError("the request was not carried: every peer is busy")
+            time.sleep(0.2)
+
+    def _relay_through(self, peer: Peer, to: str, data: bytes, end: float) -> tuple[bool, bytes]:
         rid = os.urandom(8)
         wait = {"event": threading.Event(), "data": b"", "ok": False, "peer": peer}
         with self.lock:
@@ -1722,7 +1737,6 @@ class P2P:
         try:
             to_b = to.encode("ascii")
             peer.send("relay", rid + bytes([len(to_b)]) + to_b + data)
-            end = time.time() + timeout
             while not wait["event"].wait(1.0):
                 if not peer.alive or time.time() > end:
                     raise OSError("the peer carrying the request went away" if not peer.alive
@@ -1730,9 +1744,7 @@ class P2P:
         finally:
             with self.lock:
                 self.relay_waits.pop(rid, None)
-        if not wait["ok"]:
-            raise OSError(f"the request was not carried: {wait['data'].decode(errors='replace')[:200]}")
-        return wait["data"]
+        return wait["ok"], wait["data"]
 
     def _on_relay(self, peer: Peer, payload: bytes) -> None:
         """A peer asks us to carry a sealed request to a provider on offer (reader thread:

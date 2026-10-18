@@ -2,6 +2,10 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## 0.21.5
+
+- Training through sealed requests often failed with "busy": a product is cut into tiles sent at once, more than one peer would carry for us at a time, and the first refusal ended the request. A busy peer now hands the request to the next one, and when all are busy it waits a moment and tries again until its deadline; a peer carries up to 4 of a node's requests at once (was 2).
+
 ## 0.21.4
 
 - Found with the thread dump of v0.21.2: a node too busy to carry another sealed request refused it while holding the peer's lock, and sending takes that lock, so the connection's reader locked itself up for good. The node stopped hearing that peer (the stalls of the last runs), and its shutdown waited forever on the same lock. Introduced in v0.21; the refusal is now sent after the lock is released. (`test_a_refused_relay_does_not_lock_up_the_connection`, which hangs without the fix.)

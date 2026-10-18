@@ -8,7 +8,7 @@ import time
 import numpy as np
 import pytest
 
-from green import compute, params, sealed
+from green import compute, p2p, params, sealed
 from green.chain import make_genesis
 from green.compute import ComputeChannel, ComputeCluster, Provider, verify_product_mod
 from green.crypto import Key
@@ -148,6 +148,13 @@ def test_requests_travel_sealed_through_a_peer(tmp_path, monkeypatch):
         wait_until(lambda: p.books(ch.cid)["vouched"] == ch.owed, "the provider to hold the voucher")
         with pytest.raises(OSError, match="no such provider"):
             mine.p2p.relay(Key.generate().address, b"\x00" * 64)
+        monkeypatch.setattr(p2p, "RELAY_PER_PEER", 0)            # every carrier busy: wait, then give up
+        started = time.time()
+        with pytest.raises(OSError, match="every peer is busy"):
+            mine.p2p.relay(miner.address, b"\x00" * 64, timeout=1.5)
+        assert time.time() - started >= 1.5
+        monkeypatch.setattr(p2p, "RELAY_PER_PEER", 4)
+        assert np.array_equal(PrivateCompute(cluster).matmul(a, b, "split"), a.astype(np.int64) @ b.astype(np.int64))
 
         def down(*args, **kw):                                    # our node cannot carry it
             raise OSError("relay failed: no peer can carry the request")
