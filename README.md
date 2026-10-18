@@ -12,7 +12,7 @@ A blockchain prototype where miners do AI work (integer matrix multiplication) i
 - Nodes talk over an **encrypted, authenticated peer-to-peer protocol**; every block header **commits to the whole ledger**, so a new node can start from a verified snapshot.
 - Everything runs on this computer. By default a node listens only on `127.0.0.1`.
 
-Production status of every area, with evidence and blockers: [PRODUCTION.md](PRODUCTION.md). How rules change: [UPGRADES.md](UPGRADES.md). Design and known limitations: [DESIGN.md](DESIGN.md). Protocol specification: [SPEC.md](SPEC.md). HTTP API: [API.md](API.md). Security reviews and fixes: [SECURITY.md](SECURITY.md). Release notes: [CHANGELOG.md](CHANGELOG.md).
+Production status of every area, with evidence and blockers: [PRODUCTION.md](PRODUCTION.md). How rules change: [UPGRADES.md](UPGRADES.md). Design and known limitations: [DESIGN.md](DESIGN.md). Protocol specification: [SPEC.md](SPEC.md). HTTP API: [API.md](API.md). Security reviews and fixes: [SECURITY.md](SECURITY.md). Release notes: [CHANGELOG.md](CHANGELOG.md). Against Bitcoin and Solana: [COMPARISON.md](COMPARISON.md).
 
 ## Try it: a whole network on your computer
 

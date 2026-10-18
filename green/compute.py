@@ -58,7 +58,7 @@ DEFAULT_PRICE = 1_000               # yaprak per unit
 MAX_DIM = 4096                      # m, k, n of one request; k <= 4096 keeps every int32 sum exact
 CREDIT = 4                          # results a provider delivers ahead of payment
 CLAIM_MARGIN = 20                   # blocks before expiry when a provider stops serving and claims
-CLAIM_MIN = 20 * params.MIN_TX_FEE  # unclaimed vouchers worth this much are claimed (fees stay <= 5%)
+CLAIM_MIN = 40 * params.MIN_TX_FEE  # unclaimed vouchers worth this much are claimed (fees stay <= 5%)
 CLAIM_SECONDS = 5.0
 CLAIM_TX_BYTES = 450               # about the size of a claim, for its fee
 COMPUTE_SLOTS = 2                  # products computed at once (the BLAS already uses every core)
@@ -413,7 +413,7 @@ class Provider:
     def _claim_fee(self) -> int:
         """A fee that should get a claim into the next blocks, from the node's estimate."""
         rate = self.node.fee_estimate(2)["fee_rate"]
-        return max(params.MIN_TX_FEE, int(rate * CLAIM_TX_BYTES) + 1 if rate else 0)
+        return max(2 * params.MIN_TX_FEE, int(rate * CLAIM_TX_BYTES) + 1 if rate else 0)   # 2 signatures
 
     def claim_due(self, force: bool = False, close: set | None = None) -> list[str]:
         """Claim vouchers worth claiming (all of them with `force`), and close the channels

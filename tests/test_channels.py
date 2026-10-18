@@ -33,7 +33,7 @@ def test_a_provider_claims_what_the_vouchers_say():
     cid = open_channel(chain, buyer, provider)
     assert chain.state.channels[cid]["amount"] == 1_000_000
     assert supply(chain) == minted(chain)                        # locked coins are still counted
-    fee = params.MIN_TX_FEE
+    fee = 2 * params.MIN_TX_FEE                                  # two signatures: the claim's and the voucher
     add(chain, buyer, [claim(chain, provider, cid, 300_000, buyer)])
     assert chain.state.balance(provider.address) == 300_000 - fee   # the fee comes out of the claim
     add(chain, buyer, [claim(chain, provider, cid, 450_000, buyer)])
@@ -51,7 +51,7 @@ def test_claims_that_break_the_rules_are_refused():
     rejected(chain, claim(chain, provider, cid, 1_000_001, buyer), "exceed what was claimed")
     rejected(chain, claim(chain, provider, cid, 300_000, mallory), "voucher not signed")
     rejected(chain, claim(chain, mallory, cid, 300_000, buyer), "only the channel's provider")
-    rejected(chain, claim(chain, provider, cid, 200_000 + params.MIN_TX_FEE - 1, buyer), "does not cover its fee")
+    rejected(chain, claim(chain, provider, cid, 200_000 + 2 * params.MIN_TX_FEE - 1, buyer), "does not cover its fee")
     rejected(chain, claim(chain, provider, "ab" * 32, 300_000, buyer), "unknown or ended")
     # A voucher is for one channel: it cannot be replayed on another one to the same provider.
     other = open_channel(chain, buyer, provider)
@@ -101,7 +101,7 @@ def test_a_claim_can_pay_several_addresses():
     chain = new_chain(buyer)
     cid = open_channel(chain, buyer, pool)
     payees = sorted([[m1.address, 3], [m2.address, 1]])
-    add(chain, buyer, [claim(chain, pool, cid, 400_000 + params.MIN_TX_FEE, buyer, payees=payees)])
+    add(chain, buyer, [claim(chain, pool, cid, 400_000 + 2 * params.MIN_TX_FEE, buyer, payees=payees)])
     split = dict(payouts(payees, 400_000))
     assert chain.state.balance(m1.address) == split[m1.address] == 300_000
     assert chain.state.balance(m2.address) == 100_000 and chain.state.balance(pool.address) == 0
@@ -119,7 +119,7 @@ def test_a_provider_can_close_a_channel_early(monkeypatch):
     assert cid not in chain.state.channels                       # the rest came back at once
     # (the buyer also mined that block: its reward and its part of the claim's fee)
     assert chain.state.balance(buyer.address) == before + 700_000 + rewards(chain, buyer, chain.height)
-    assert chain.state.balance(provider.address) == 300_000 - params.MIN_TX_FEE
+    assert chain.state.balance(provider.address) == 300_000 - 2 * params.MIN_TX_FEE
     while chain.height <= expires:                               # the expiry event finds nothing to refund
         add(chain, buyer)
     assert supply(chain) == minted(chain)

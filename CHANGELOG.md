@@ -2,6 +2,16 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## 0.22.0
+
+- **Fees as low as Solana's.** The minimum fee is per signature a validator checks: 500 yaprak (0.000005 GRN, as Solana's 5,000 lamports) for a plain transaction, k times that for a k-of-n multisig one, twice for a channel claim (its voucher). It was a flat 10,000 yaprak. When blocks fill, transactions still compete by fee rate (the priority fee), and half of every fee still goes back to the reserve.
+- **A transfer that opens an account sends at least 0.0001 GRN** (`NEW_ACCOUNT_MIN`), so cheap fees do not make filling the ledger with empty accounts cheap. It plays the part of Solana's rent-exempt minimum; the coins are the recipient's.
+- **Six times the transactions per block:** at most 3,000 (was 500), 200 transfers a second, and 6,000 signatures (was 2,000). The 1 MB limit on a block's transactions, which bounds what nodes download and store, is unchanged. Measured with the new `bench/tps_bench.py`: a full block of transfers is checked in ~0.33 s cold and ~0.15 s when its transactions were seen in the mempool, on one core.
+- A signature cache, as in Bitcoin: a transaction checked when it reached the mempool is not checked again when its block comes. Addresses derived from keys and address checks are cached, and the hex check is a regular expression: a block's transactions are applied 2.5x faster (8,000 to 20,000 transfers/s warm).
+- [COMPARISON.md](COMPARISON.md): Green against Bitcoin and Solana: the problem each solves, the numbers side by side, and what Green still has to catch up on.
+- The wallet and the miner pages now live in their own repositories, [green-wallet](https://github.com/ErtungaYusuf/green-wallet) and [green-miner](https://github.com/ErtungaYusuf/green-miner).
+- Consensus change: nodes before 0.22 refuse blocks with more than 500 transactions and transactions below the old minimum fee.
+
 ## 0.21.7
 
 - `grn app --localnet` failed with "no such file" when started from another folder than the one the local network was made in: the plan kept the personas' folders relative to where `grn localnet start` ran. They are now found inside the network's own folder, so existing networks work from anywhere.

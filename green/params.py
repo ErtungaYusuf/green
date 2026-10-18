@@ -83,7 +83,11 @@ SHARE_INCLUSION_PERCENT = 5       # of each share's reward, to the block that in
 MAX_BLOCK_SHARES = 64
 SHARE_WINDOW = 32                 # a share is mined on one of the last 32 blocks
 
-MAX_BLOCK_TXS = 500
+# Transactions per block: 3000 every 15 s is 200 transfers a second. A node checks a
+# full block of transfers in ~0.15 s when it saw them in its mempool (signatures cached)
+# and ~0.4 s cold, on one core (bench/tps_bench.py); MAX_BLOCK_BYTES still bounds
+# what nodes download and store.
+MAX_BLOCK_TXS = 3000
 # Serialized size of a block's transactions. Bounds what every node has to
 # download, store and relay per block, like Bitcoin's block size limit.
 MAX_BLOCK_BYTES = 1_000_000
@@ -93,7 +97,15 @@ MAX_JOB_UNITS_PER_DIM = 16
 MAX_JOB_UNITS = MAX_JOB_UNITS_PER_DIM ** 3
 
 # --- Fees and the compute market -----------------------------------------------
-MIN_TX_FEE = 10_000             # 0.0001 GRN, stops free spam
+# The base fee is per signature a validator checks, as on Solana (5,000 lamports =
+# 0.000005 SOL): 500 yaprak = 0.000005 GRN. Kept low on purpose; when blocks fill,
+# transactions compete by fee per byte (the priority fee), and half of every fee goes
+# back to the reserve (Solana burns half of its base fees).
+MIN_TX_FEE = 500               # per signature: 1 for a plain transaction, k for k-of-n
+# With fees this low, opening ledger entries must not be: a transfer to an address that
+# holds nothing must send at least this much (Solana's rent-exempt minimum plays the
+# same part). Not a fee: the coins are the recipient's.
+NEW_ACCOUNT_MIN = 10_000       # 0.0001 GRN
 DATA_FEE_PER_BYTE = 1           # job data is stored by every node, so it pays per byte
 # Results are sold in batches with commit-reveal. A miner commits to
 # hash(address, units, root): the units (a bitmap over the job, so a batch can
@@ -157,9 +169,9 @@ MAX_GUARD_PERIOD = 10**8          # blocks
 
 # Multisignature accounts: k of n keys (n <= MAX_MULTISIG_KEYS) must sign. A block
 # may carry at most MAX_BLOCK_SIGS signatures in total, which bounds the time a
-# validator spends verifying them (~0.1 s).
+# validator spends verifying them (~0.45 s cold, 75 us each).
 MAX_MULTISIG_KEYS = 16
-MAX_BLOCK_SIGS = 2000
+MAX_BLOCK_SIGS = 6000
 
 # A block's reward can be split among up to MAX_PAYEES addresses by weight, so a
 # pool pays its miners in the block itself and never holds their coins.

@@ -1,8 +1,10 @@
 """Hashing, canonical encoding, Ed25519 signatures and wallet encryption."""
 
+import functools
 import hashlib
 import json
 import os
+import re
 
 from cryptography.exceptions import InvalidSignature, InvalidTag
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -104,19 +106,27 @@ def bech32m_decode(text: str) -> tuple[str, bytes] | None:
     return None if payload is None else (hrp, bytes(payload))
 
 
+@functools.lru_cache(maxsize=1 << 16)       # every transaction asks for its sender's address
 def address_of(pub_hex: str) -> str:
     return bech32m_encode(ADDRESS_HRP, h(bytes.fromhex(pub_hex))[:20])
 
 
+_LOWER_HEX = re.compile(r"[0-9a-f]*")
+
+
 def is_hex(text, length: int) -> bool:
-    return (isinstance(text, str) and len(text) == length
-            and all(c in "0123456789abcdef" for c in text))
+    return isinstance(text, str) and len(text) == length and _LOWER_HEX.fullmatch(text) is not None
 
 
 def is_address(text) -> bool:
     """Canonical form only (lowercase): addresses are ledger keys, so one account
     must never have two spellings."""
-    if not isinstance(text, str) or text != text.lower():
+    return isinstance(text, str) and len(text) <= 90 and _is_address(text)
+
+
+@functools.lru_cache(maxsize=1 << 16)
+def _is_address(text: str) -> bool:
+    if text != text.lower():
         return False
     decoded = bech32m_decode(text)
     return decoded is not None and decoded[0] == ADDRESS_HRP and len(decoded[1]) == 20
@@ -143,14 +153,28 @@ class Key:
         return self._private.sign(message).hex()
 
 
+# Signatures already found good, so a transaction checked on arrival in the mempool is
+# not checked again when its block comes (Bitcoin's sigcache). Only successes are kept,
+# keyed by a hash of key, signature and message together: a hit means exactly this
+# triple verified before. Bounded; emptied when full.
+SIG_CACHE_SIZE = 200_000
+_good_sigs: set[bytes] = set()
+
+
 def verify(pub_hex: str, message: bytes, sig_hex: str) -> bool:
     if not is_hex(pub_hex, 64) or not is_hex(sig_hex, 128):
         return False
+    key = h(bytes.fromhex(pub_hex) + bytes.fromhex(sig_hex) + message)    # 32 + 64 bytes, then the message
+    if key in _good_sigs:
+        return True
     try:
         Ed25519PublicKey.from_public_bytes(bytes.fromhex(pub_hex)).verify(bytes.fromhex(sig_hex), message)
-        return True
     except (InvalidSignature, ValueError):
         return False
+    if len(_good_sigs) >= SIG_CACHE_SIZE:
+        _good_sigs.clear()
+    _good_sigs.add(key)
+    return True
 
 
 def merkle_root(leaves_hex: list[str]) -> str:

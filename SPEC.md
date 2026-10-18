@@ -24,7 +24,7 @@ A transaction is a JSON object with exactly the common fields `type`, `pub`, `no
 - Signing: `sig = Ed25519(secret, C({"chain": chain_id, "tx": tx without "sig"}))`, 128 hex characters. `chain_id` is the genesis block hash, so a transaction is valid on one network only.
 - For a multisig sender, `pub` is the account object (§2) and `sig` a list with one entry per key, in the same order: exactly `k` entries are signatures, each by the key in its position over the bytes above, and the others are `null`.
 - The sender is `address(pub)` (a single key's or a multisig account's address). `nonce` must equal the sender's account nonce; applying the transaction increments it.
-- `fee >= MIN_TX_FEE`, plus the data fees listed per type. The fee is paid to the block's miner.
+- `fee >= MIN_TX_FEE · signatures` (1 for a single-key transaction, `k` for a k-of-n one, plus 1 for a channel claim's voucher), plus the data fees listed per type. The fee is paid to the block's miner.
 - A transaction is applied atomically: if any rule fails, the state is unchanged and the transaction, and therefore the block containing it, is invalid.
 - **Guarded accounts.** If the sender has a guard (§3.4), before any other effect: a frozen sender's transaction is invalid; otherwise, with `w = floor(height / period)`, `spent' = (spent if window == w else 0) + outflow(tx)` must be `<= limit`, and on success the guard's `window := w`, `spent := spent'` (a `guard_set` instead writes its own new guard). `outflow(tx)` = fee + `amount` (transfer and channel_open) + `price · mu·ku·nu` (job_post) + `price` (task_post); bonds are not counted.
 
@@ -47,7 +47,7 @@ Units of a job with dimensions `(mu, ku, nu)` (in units) are triples `[i, l, j]`
 
 | Type | Fields | Rules (in addition to §3) |
 |---|---|---|
-| `transfer` | `to`, `amount` | `to` is an address, `amount >= 1`, balance ≥ amount + fee |
+| `transfer` | `to`, `amount` | `to` is an address, `amount >= 1`, balance ≥ amount + fee; if `to` has no balance and nonce 0, `amount >= NEW_ACCOUNT_MIN` |
 | `job_post` | `job`, `dims`, `price` | `job` is a job blob hash that is not yet a job; `dims` 3 integers in `1..MAX_JOB_UNITS_PER_DIM` matching the blob; `price >= 1` per unit; locks `escrow = price · mu·ku·nu`; fee ≥ MIN_TX_FEE + DATA_FEE_PER_BYTE · blob size |
 | `job_commit` | `job`, `units`, `commitment`; optional `payees` | job open and not cancelled; `units` a bitmap of units that are neither delivered nor reserved; `commitment` not already a batch id of this job (live or delivered); `payees`, if present, is `[[address, weight], ...]` in the form of a header's payee list (§5.1); locks `bond = bond_for(price) · count`; creates batch `id = commitment`, status *committed*, `expires = height + RESERVE_BLOCKS`, recording `payees` if present, and reserves its units |
 | `job_reveal` | `job`, `batch`, `root`, `manifest` | sender is the batch's miner; status *committed*; `batch.height < height <= expires`; `commitment == hex(H(C(["green-commit", sender, job, units, root])))`. Sets status *revealed*, `settle_at = height + JOB_CHALLENGE_BLOCKS`. `manifest` is an unverified hint |
@@ -277,15 +277,15 @@ A node on another network derives different keys and fails at the first frame.
 | P2P (not consensus): Dandelion++ epoch, fluff probability, destinations, embargo | 600 s, 0.1, 2, 15 s + Exp(mean 5 s) |
 | TOTAL_SUPPLY, EMISSION_DIVISOR, FEE_RESERVE_PERCENT | 2,100,000,000,000,000 yaprak (21,000,000 GRN), 2^24, 50 |
 | SHARE_FACTOR, SHARES_PERCENT, SHARE_INCLUSION_PERCENT, MAX_BLOCK_SHARES, SHARE_WINDOW | 32, 80, 5, 64, 32 |
-| MAX_BLOCK_TXS, MAX_BLOCK_BYTES | 500, 1,000,000 |
+| MAX_BLOCK_TXS, MAX_BLOCK_BYTES | 3,000, 1,000,000 |
 | MAX_JOB_UNITS_PER_DIM, MAX_BATCH_UNITS | 16, 4,096 |
-| MIN_TX_FEE, DATA_FEE_PER_BYTE | 10,000, 1 |
+| MIN_TX_FEE (per signature), DATA_FEE_PER_BYTE, NEW_ACCOUNT_MIN | 500, 1, 10,000 |
 | RESERVE_BLOCKS, JOB_CHALLENGE_BLOCKS, JOB_RESPONSE_BLOCKS | 20, 40, 20 |
 | MAX_BLOCK_JOB_RESPONSES, BOND_DIVISOR, CANCEL_DELAY | 32, 10, 40 |
 | `bond_for(price)` | ceil(price / BOND_DIVISOR) |
 | WASMTIME_VERSION | 49.0.0 |
 | MAX_GUARD_PERIOD | 100,000,000 |
-| MAX_MULTISIG_KEYS, MAX_BLOCK_SIGS | 16, 2,000 |
+| MAX_MULTISIG_KEYS, MAX_BLOCK_SIGS | 16, 6,000 |
 | MAX_PAYEES, MAX_PAYEE_WEIGHT | 32, 2^32 |
 | MIN_CHANNEL_BLOCKS, MAX_CHANNEL_BLOCKS | 240, 161,280 |
 | MAX_TASK_FUEL, MAX_TASK_PROGRAM_BYTES, MAX_TASK_INPUT_BYTES | 500,000,000, 2^20, 2^22 |
@@ -299,7 +299,7 @@ Not consensus; defined so that wallets agree. A wallet's key comes from a BIP-39
 
 ## 12. Compute channels (informative)
 
-Not consensus beyond the two transactions of §3.2; defined so that buyers and providers agree. A provider serves HTTP: `GET /offer`, `POST /matmul` with headers `X-Channel`, `X-Shape: m,k,n` and optionally `X-Voucher-Total`, `X-Voucher`, a body of A (`m·k` int8) then B (`k·n` int8) in row-major order, answered with C = A·B as `m·n` little-endian int32 (or 402: pay first or the channel is spent; 404: unknown channel; 409: the channel ends within 20 blocks), `POST /voucher`, and `POST /close` (a final voucher, after which the provider claims with `close`). A provider answers a product request from its headers alone (shape, channel, voucher, credit and funds) before it reads the body. A product costs `price · max(1, ceil(m·k·n / 2^24))`. The buyer checks each C with Freivalds' test over the integers (a secret random matrix with entries in `[0, 2^s)`, `s` the largest value that keeps every sum below 2^53, and `ceil(120 / s)` columns, so a wrong C passes with probability below 2^-120), then signs a voucher for the total it owes for every result checked so far. A provider delivers at most `credit` results ahead of vouchers; it claims vouchers worth at least 20·MIN_TX_FEE, and anything left when the channel is near its end.
+Not consensus beyond the two transactions of §3.2; defined so that buyers and providers agree. A provider serves HTTP: `GET /offer`, `POST /matmul` with headers `X-Channel`, `X-Shape: m,k,n` and optionally `X-Voucher-Total`, `X-Voucher`, a body of A (`m·k` int8) then B (`k·n` int8) in row-major order, answered with C = A·B as `m·n` little-endian int32 (or 402: pay first or the channel is spent; 404: unknown channel; 409: the channel ends within 20 blocks), `POST /voucher`, and `POST /close` (a final voucher, after which the provider claims with `close`). A provider answers a product request from its headers alone (shape, channel, voucher, credit and funds) before it reads the body. A product costs `price · max(1, ceil(m·k·n / 2^24))`. The buyer checks each C with Freivalds' test over the integers (a secret random matrix with entries in `[0, 2^s)`, `s` the largest value that keeps every sum below 2^53, and `ceil(120 / s)` columns, so a wrong C passes with probability below 2^-120), then signs a voucher for the total it owes for every result checked so far. A provider delivers at most `credit` results ahead of vouchers; it claims vouchers worth at least 40·MIN_TX_FEE, and anything left when the channel is near its end.
 
 Since v0.21 a provider also serves `POST /matmul_mod` (headers as `/matmul` plus `X-Modulus: p`, `2 <= p <= 2^20` and `k·(p-1)^2 < 2^53`; a body of A then B as little-endian int32 with entries in `[0, p)`; answered with `(A·B) mod p` as `m·n` int32, priced like `/matmul`; the buyer checks it with Freivalds' test mod p, 12 columns of entries in `[0, 2^10)`), and `POST /sealed`: a request sealed to the offer's `kx`: `eph ‖ nonce ‖ ChaCha20-Poly1305(key, nonce, plaintext, aad "request")` with `key = HKDF-SHA256(X25519(eph, kx), salt = eph ‖ kx, info "green sealed request v1")` and `plaintext = len (4, big-endian) ‖ JSON {"path", "headers"} ‖ body`, for paths `/matmul`, `/matmul_mod`, `/voucher` and `/close`; the answer is `nonce ‖ ChaCha20-Poly1305(key, nonce, len ‖ JSON {"status", "headers"} ‖ body, aad "answer")`. The provider's `kx` key is derived from its wallet key: `X25519(HKDF-SHA256(secret, info "green provider kx v1"))`.
 | `challenge_fee(fuel, bytes)` | MIN_TX_FEE + ceil(adjudication_cost · ADJUDICATION_FEE_PER_MUNIT / 10^6) |

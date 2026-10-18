@@ -326,6 +326,13 @@ Goal: whoever buys compute stays unknown to the providers and to the nodes in be
 
 Residual risks: payments still link the buyer's address to the provider on chain (a channel_open names both); one-time addresses funded from the same wallet only hide that from a casual look, and full unlinkability needs private payments (a shielded pool or coin mixing), which Green does not have. The on-chain job market publishes job data to every node: it is for data that may be public. Two colluding providers of the three in a secret-shared product can rebuild its data, and a provider still learns the shape of a product and the timing of requests.
 
+## Nineteenth review: low fees, bigger blocks, a signature cache (v0.22)
+
+- **C1: Cheap fees, cheap spam?** At 500 yaprak per signature, filling every block with 3,000 transfers costs 0.015 GRN a block, ~86 GRN a day. What it buys is bounded: 1 MB of transactions per block (unchanged since v0.2), and a mempool of 20,000 that evicts by fee rate, so a payer outbids the spam by fee rate (the fee estimate follows) and the spammer must keep raising its own fees. Pruning nodes drop old bodies. (`test_the_base_fee_is_small_and_per_signature`.)
+- **C2: Ledger growth.** Cheap transfers to fresh addresses would add ledger entries for almost nothing, and every node keeps the ledger forever. Fix: a transfer that opens an account sends at least NEW_ACCOUNT_MIN = 0.0001 GRN, so a million empty accounts park 100 GRN. (`test_opening_an_account_takes_a_minimum_transfer`.) Residual: rewards and claims split among payees (up to 32 per claim) can still create small accounts; they cost a channel or a block.
+- **C3: The signature cache cannot be poisoned.** It keeps only signatures that verified, keyed by a hash over the whole key, the whole signature and the message, so a hit means that exact triple verified before; any other key, signature or message misses and is verified. Bounded at 200,000 entries, emptied when full. (`test_the_signature_cache_only_vouches_for_the_exact_triple`, which fails if the signature is left out of the key.)
+- **C4: Bigger blocks and checking time.** 3,000 transfers take ~0.33 s to check cold on one core, 6,000 signatures (the new budget, ~70 µs each) ~0.45 s: small against 15 s blocks. A full node syncing a long run of full blocks checks ~9,000 transfers/s; new nodes can start from a verified snapshot instead. (`bench/tps_bench.py`, `test_a_block_holds_far_more_than_the_old_500_transactions`.)
+
 ## Still open (needed before production)
 
 The full list, by area, is in [PRODUCTION.md](PRODUCTION.md).

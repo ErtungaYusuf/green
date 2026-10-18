@@ -548,3 +548,13 @@ def test_decoded_job_data_is_cached_within_a_bound():
     assert list(blobs._jobs) == ids[-chainmod.JOB_CACHE:]          # the most recently used are kept
     blobs.job(ids[-chainmod.JOB_CACHE], 0)
     assert list(blobs._jobs)[-1] == ids[-chainmod.JOB_CACHE]       # and use refreshes an entry
+
+
+def test_a_block_holds_far_more_than_the_old_500_transactions():
+    alice = Key.generate()
+    chain = new_chain(alice)
+    friends = [Key.generate().address for _ in range(600)]
+    txs = [make_tx(alice, chain.chain_id, "transfer", n, FEE, to=to, amount=1) for n, to in enumerate(friends)]
+    block, _ = add(chain, alice, txs)
+    assert len(block["txs"]) == 600 and all(chain.state.balance(f) == 1 for f in friends)
+    assert params.MAX_BLOCK_TXS >= 3000 and params.MAX_BLOCK_SIGS >= 2 * params.MAX_BLOCK_TXS

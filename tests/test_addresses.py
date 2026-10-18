@@ -56,3 +56,27 @@ def test_transfer_to_a_mistyped_address_is_refused():
     typo = bob.address[:-1] + ("q" if bob.address[-1] != "q" else "p")
     with pytest.raises(InvalidTx, match="recipient"):
         chain.apply_tx(chain.state.copy(), tx(chain, alice, "transfer", to=typo, amount=1), 1)
+
+
+def test_the_signature_cache_only_vouches_for_the_exact_triple():
+    from green import crypto
+    k, other = Key.generate(), Key.generate()
+    sig = k.sign(b"pay bob 1")
+    assert crypto.verify(k.pub_hex, b"pay bob 1", sig)            # checked, then cached
+    assert crypto.verify(k.pub_hex, b"pay bob 1", sig)            # a hit
+    for i in (0, 63, 127):                                        # any changed signature character...
+        bad = sig[:i] + ("0" if sig[i] != "0" else "1") + sig[i + 1:]
+        assert not crypto.verify(k.pub_hex, b"pay bob 1", bad), i
+    assert not crypto.verify(k.pub_hex, b"pay bob 2", sig)        # ...message...
+    assert not crypto.verify(other.pub_hex, b"pay bob 1", sig)    # ...or key misses the cache
+    assert not crypto.verify(k.pub_hex.upper(), b"pay bob 1", sig)   # not canonical hex
+    crypto._good_sigs.clear()
+    assert crypto.verify(k.pub_hex, b"pay bob 1", sig)
+
+
+def test_odd_values_are_not_addresses_or_hex():
+    from green.crypto import is_hex
+    for v in (None, 5, b"grn1", ["grn1"], "grn1" + "q" * 100):
+        assert not is_address(v)
+    assert is_hex("00ff", 4) and not is_hex("00FF", 4) and not is_hex("00f", 4) and not is_hex("00fg", 4)
+    assert not is_hex("00f\n", 4) and not is_hex(b"00ff", 4) and not is_hex(None, 4)

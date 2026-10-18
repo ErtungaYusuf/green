@@ -18,7 +18,7 @@ def account(k=2, n=3):
 def signed(chain, keys, pubs, k, signers, kind="transfer", nonce=None, **fields):
     addr = multisig_address(k, pubs)
     t = make_multisig_tx(chain.chain_id, k, pubs, kind, chain.state.nonce(addr) if nonce is None else nonce,
-                         txmod.min_fee({"type": kind, **fields}), **fields)
+                         **fields)                                    # the fee: MIN_TX_FEE per signature
     for key in signers:
         t = add_signature(t, key, chain.chain_id)
     return t

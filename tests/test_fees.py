@@ -151,3 +151,33 @@ def test_our_protocol_transactions_get_a_higher_fee_when_they_wait(node, monkeyp
         n._add_block(mine(n.chain, keys[1])[0])
     monkeypatch.setattr(nodemod, "MAX_BUMP_FEE", second["fee"])   # at the cap: left alone
     assert n._bump_stuck() == [] and list(n.mempool.values()) == [second]
+
+
+def test_the_base_fee_is_small_and_per_signature():
+    from green import tx as txmod
+    alice, b, c = Key.generate(), Key.generate(), Key.generate()
+    chain = new_chain(alice)
+    assert params.MIN_TX_FEE * 200_000 == params.YAPRAK_PER_COIN     # 0.000005 GRN, as Solana's 5,000 lamports
+    plain = txmod.make_tx(alice, chain.chain_id, "transfer", 0, to=b.address, amount=1)
+    assert plain["fee"] == params.MIN_TX_FEE
+    chain.apply_tx(chain.state.copy(), plain, 1)
+    with pytest.raises(InvalidTx, match="fee must be at least"):
+        chain.apply_tx(chain.state.copy(), txmod.make_tx(alice, chain.chain_id, "transfer", 0, params.MIN_TX_FEE - 1,
+                                                         to=b.address, amount=1), 1)
+    pubs = [alice.pub_hex, b.pub_hex, c.pub_hex]
+    two_of_three = txmod.make_multisig_tx(chain.chain_id, 2, pubs, "transfer", 0, to=c.address, amount=1)
+    assert two_of_three["fee"] == 2 * params.MIN_TX_FEE == txmod.min_fee(two_of_three)
+    assert txmod.min_fee({"type": "channel_claim", "pub": alice.pub_hex}) == 2 * params.MIN_TX_FEE
+
+
+def test_opening_an_account_takes_a_minimum_transfer(monkeypatch):
+    monkeypatch.setattr(params, "NEW_ACCOUNT_MIN", 10_000)
+    alice, bob = Key.generate(), Key.generate()
+    chain = new_chain(alice)
+    with pytest.raises(InvalidTx, match="opens an account"):
+        chain.apply_tx(chain.state.copy(), tx(chain, alice, "transfer", to=bob.address, amount=9_999), 1)
+    s = chain.state.copy()
+    chain.apply_tx(s, tx(chain, alice, "transfer", to=bob.address, amount=10_000), 1)
+    chain.apply_tx(s, tx(chain, alice, "transfer", to=bob.address, amount=1, nonce=1), 1)   # it exists now
+    assert s.balance(bob.address) == 10_001
+    chain.apply_tx(s, tx(chain, alice, "transfer", to=alice.address, amount=1, nonce=2), 1)  # alice exists too

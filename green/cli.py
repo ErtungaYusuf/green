@@ -283,7 +283,7 @@ def cmd_multisig(args):
         else:
             kind, fields = args.type, json.loads(args.fields or "{}")
         nonce = api_get(args, f"/account/{addr}")["pending_nonce"]
-        fee = txmod.min_fee({"type": kind, **fields}) if args.fee is None else params.parse_amount(args.fee)
+        fee = None if args.fee is None else params.parse_amount(args.fee)    # None: the least, per signature
         t = txmod.make_multisig_tx(st["genesis"], args.k, args.keys, kind, nonce, fee, **fields)
         with open(args.out, "w") as f:
             json.dump({"chain": st["genesis"], "tx": t}, f, indent=1)

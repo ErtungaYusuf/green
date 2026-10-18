@@ -675,6 +675,8 @@ class Chain:
         if kind == "transfer":
             if bal < tx["amount"] + fee:
                 raise InvalidTx("insufficient balance")
+            if tx["amount"] < params.NEW_ACCOUNT_MIN and s.balance(tx["to"]) == 0 and s.nonce(tx["to"]) == 0:
+                raise InvalidTx(f"a transfer that opens an account sends at least {params.NEW_ACCOUNT_MIN}")
             s.set_balance(addr, bal - tx["amount"] - fee)
             s.credit(tx["to"], tx["amount"])
 

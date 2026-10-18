@@ -93,8 +93,10 @@ def signing_bytes(tx: dict, chain_id: str) -> bytes:
     return canonical({"chain": chain_id, "tx": {k: v for k, v in tx.items() if k != "sig"}})
 
 
-def make_tx(key: Key, chain_id: str, tx_type: str, nonce: int, fee: int = params.MIN_TX_FEE, **fields) -> dict:
-    tx = {"type": tx_type, "pub": key.pub_hex, "nonce": nonce, "fee": fee, **fields}
+def make_tx(key: Key, chain_id: str, tx_type: str, nonce: int, fee: int | None = None, **fields) -> dict:
+    """A signed transaction; `fee` defaults to the least it may pay (min_fee)."""
+    tx = {"type": tx_type, "pub": key.pub_hex, "nonce": nonce, "fee": 0, **fields}
+    tx["fee"] = min_fee(tx) if fee is None else fee
     tx["sig"] = key.sign(signing_bytes(tx, chain_id))
     return tx
 
@@ -136,11 +138,13 @@ def sign_voucher(key: Key, chain_id: str, channel_id: str, total: int) -> str:
 
 
 def make_multisig_tx(chain_id: str, k: int, keys: list[str], tx_type: str, nonce: int,
-                     fee: int = params.MIN_TX_FEE, **fields) -> dict:
+                     fee: int | None = None, **fields) -> dict:
     """An unsigned multisig transaction; each cosigner then calls add_signature."""
     keys = sorted(keys)
-    return {"type": tx_type, "pub": {"k": k, "keys": keys}, "nonce": nonce, "fee": fee, **fields,
-            "sig": [None] * len(keys)}
+    tx = {"type": tx_type, "pub": {"k": k, "keys": keys}, "nonce": nonce, "fee": 0, **fields,
+          "sig": [None] * len(keys)}
+    tx["fee"] = min_fee(tx) if fee is None else fee
+    return tx
 
 
 def add_signature(tx: dict, key: Key, chain_id: str) -> dict:
@@ -296,7 +300,9 @@ def min_fee(tx: dict) -> int:
     task_post and task_challenge also pay for data / adjudication, which needs
     chain state; the chain checks those (see task_post_fee, params.challenge_fee).
     """
-    fee = params.MIN_TX_FEE
+    pub = tx.get("pub")
+    sigs = (pub["k"] if isinstance(pub, dict) and isinstance(pub.get("k"), int) else 1)         + (tx.get("type") == "channel_claim")         # sig_count, also before the format is checked
+    fee = params.MIN_TX_FEE * sigs
     if tx["type"] == "job_post":
         fee += params.DATA_FEE_PER_BYTE * job_blob_size(tx["dims"])
     elif tx["type"] == "job_challenge":

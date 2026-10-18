@@ -32,7 +32,7 @@ Status as of v0.21 (October 2026). 274 automated tests; eighteen internal securi
 
 ## 1. Consensus rules and specification
 
-**Done.** The rules are written down independently of the code in [SPEC.md](SPEC.md): encodings, addresses, every transaction type and its validity rules, end-of-block events, Merkle trees, the work unit bit for bit, difficulty, fork choice, block limits, WASM execution and constants. Block size is bounded (500 transactions, 1 MB); forks that leave the main chain more than 100 blocks below the tip are refused (measured at the fork point since v0.5).
+**Done.** The rules are written down independently of the code in [SPEC.md](SPEC.md): encodings, addresses, every transaction type and its validity rules, end-of-block events, Merkle trees, the work unit bit for bit, difficulty, fork choice, block limits, WASM execution and constants. Block size is bounded (3,000 transactions, 1 MB; 500 transactions before v0.22); forks that leave the main chain more than 100 blocks below the tip are refused (measured at the fork point since v0.5).
 
 **Evidence:** every rule has tests (`tests/test_chain.py`, `tests/test_security.py`); the work-unit description in SPEC was checked line by line against the code.
 

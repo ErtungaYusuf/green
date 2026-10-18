@@ -17,3 +17,6 @@ def easy_target(monkeypatch):
     # each block's emission would just stay in the reserve: the finder gets it all.
     # Tests of the share economy set SHARES_PERCENT (and a real target) themselves.
     monkeypatch.setattr(params, "SHARES_PERCENT", 0)
+    # Tests pay new addresses a few yaprak at a time; the minimum for opening an
+    # account is tested on its own (test_fees.py sets NEW_ACCOUNT_MIN).
+    monkeypatch.setattr(params, "NEW_ACCOUNT_MIN", 0)
