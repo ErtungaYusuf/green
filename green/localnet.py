@@ -83,9 +83,12 @@ def _alive(pid: int) -> bool:
 def load(root: str) -> dict | None:
     try:
         with open(network_file(root), encoding="utf-8") as f:
-            return json.load(f)
+            net = json.load(f)
     except FileNotFoundError:
         return None
+    for p in net["personas"]:              # each persona lives in the network's folder,
+        p["data"] = os.path.join(os.path.abspath(root), p["name"])  # wherever we run from
+    return net
 
 
 def create(root: str, base_port: int = BASE_PORT, log=print) -> dict:
@@ -365,7 +368,7 @@ def run_buyer(root: str, name: str) -> None:
     net = load(root)
     me = next(p for p in net["personas"] if p["name"] == name)
     accounts, _ = appmod.localnet_accounts(root)
-    app = appmod.App(accounts, buyer=name, providers=3, log=_say)
+    app = appmod.App(accounts, buyer=name, log=_say)
     stats_path = os.path.join(me["data"], "buyer.json")
     try:
         with open(stats_path, encoding="utf-8") as f:

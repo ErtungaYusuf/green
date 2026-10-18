@@ -2,6 +2,12 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## 0.21.7
+
+- `grn app --localnet` failed with "no such file" when started from another folder than the one the local network was made in: the plan kept the personas' folders relative to where `grn localnet start` ran. They are now found inside the network's own folder, so existing networks work from anywhere.
+- The app's secret mode always failed with "secret sharing needs three providers": an account opened channels to only two providers. It now opens three, as the local network's buyers already did.
+- Checked by hand on the local network: the miner and wallet pages of green-ui (a received payment shows in the history, a sent one confirms in the next block) and a secret-shared purchase from the app page.
+
 ## 0.21.6
 
 - A local network's buyer that spends more than five minutes on one purchase writes where every thread is to its log (`faulthandler`), as nodes do when their shutdown hangs.

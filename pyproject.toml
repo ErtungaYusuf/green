@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "green-grn"
-version = "0.21.6"
+version = "0.21.7"
 description = "Green (GRN): a blockchain secured by proof of useful work (AI matrix multiplication)"
 readme = "README.md"
 license = "MIT"

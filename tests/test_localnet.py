@@ -97,3 +97,17 @@ def test_reset_deletes_only_a_local_network(tmp_path):
     localnet.reset(ln, log=lambda m: None)
     assert not os.path.exists(ln)
     localnet.reset(ln, log=lambda m: None)                     # nothing there: nothing to do
+
+
+def test_a_network_made_with_a_relative_path_works_from_anywhere(tmp_path, monkeypatch):
+    """`grn localnet start` in one folder, `grn app --localnet` from another."""
+    from green import app as appmod
+    monkeypatch.chdir(tmp_path)
+    localnet.create("ln", base_port=free_base(), log=lambda m: None)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    accounts, buyer = appmod.localnet_accounts(str(tmp_path / "ln"))
+    assert buyer == "carol" and len(accounts) == 5
+    assert all(os.path.isfile(os.path.join(a.data, "wallet.json")) for a in accounts)
+    assert appmod.PROVIDERS >= 3                               # secret sharing needs three

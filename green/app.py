@@ -38,7 +38,7 @@ from .train import MLP, digits, train
 
 DEFAULT_PORT = 8600
 CHANNEL_AMOUNT = params.YAPRAK_PER_COIN // 20   # locked with each provider when an account starts buying
-PROVIDERS = 2                                    # channels an account opens, to the cheapest providers
+PROVIDERS = 3                                    # channels an account opens (secret sharing needs three)
 MAX_BODY = 2 * MAX_DIM * MAX_DIM
 MAX_UNIT = params.UNIT                           # jobs are padded to whole units
 TRAIN_STEPS_MAX = 2000
