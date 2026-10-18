@@ -84,7 +84,7 @@ from .tx import InvalidTx
 from .verify import ProcessChecker
 
 PROTOCOL_VERSION = 1
-AGENT = "green/0.21.0"
+AGENT = "green/0.21.1"
 
 MAX_OUTBOUND = 8               # outbound connections the node keeps
 BLOCK_RELAY_ONLY = 2           # ...of which relay blocks only
@@ -698,6 +698,7 @@ class P2P:
         self.offers: OrderedDict[str, dict] = OrderedDict()
         self.offers_waiting: OrderedDict[str, dict] = OrderedDict()   # valid, but not funded on our chain yet
         self.relay_waits: dict[bytes, dict] = {}     # sealed requests of ours a peer is carrying
+        self.flood_strikes: dict[str, list] = {}     # ban key -> times its queue overflowed
         self._relay_slots = threading.BoundedSemaphore(RELAY_SLOTS)
         # compact blocks waiting for missing transactions (guarded by node.lock)
         self.partial: dict[str, dict] = {}         # hash -> {"header", "txs", "missing", "peer", "time"}
@@ -1117,13 +1118,31 @@ class P2P:
         if cmd in ("ping", "pong", "noblob"):
             return self._dispatch(peer, cmd, json.loads(payload))
         with peer.lock:
-            if len(peer.in_q) >= MAX_PEER_QUEUE:
-                raise Misbehaving(BAN_SCORE, "flooding faster than it can be processed")
-            peer.in_q.append((cmd, payload))
-            if peer.scheduled:
-                return
-            peer.scheduled = True
+            full = len(peer.in_q) >= MAX_PEER_QUEUE
+            if not full:
+                peer.in_q.append((cmd, payload))
+                if peer.scheduled:
+                    return
+                peer.scheduled = True
+        if full:
+            return self._flooded(peer)
         self._ready.put(peer)
+
+    def _flooded(self, peer: Peer) -> None:
+        """A peer whose messages pile up faster than we handle them: disconnect it, and ban
+        it the third time within an hour. Banning at once punished honest peers whenever
+        this node fell behind (one stalled, and banned all its peers)."""
+        key, now = self._ban_key(peer.host, peer.node_id), time.time()
+        with self.lock:
+            strikes = [t for t in self.flood_strikes.get(key, []) if now - t < 3600] + [now]
+            self.flood_strikes[key] = strikes
+            while len(self.flood_strikes) > 10_000:
+                self.flood_strikes.pop(next(iter(self.flood_strikes)))
+        if len(strikes) >= 3:
+            self.punish(peer, BAN_SCORE, "flooding faster than it can be processed")
+        else:
+            self.log(f"[p2p] {peer.name}: messages pile up faster than we handle them; disconnecting")
+            peer.close("message queue full")
 
     def _worker(self) -> None:
         while self.running:

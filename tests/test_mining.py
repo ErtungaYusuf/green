@@ -55,3 +55,22 @@ def test_intensity_and_gpu_can_change_while_mining(node):
     http_post(f"{node.url}/mining", {"on": False})
     time.sleep(1)
     assert units_in(node, 1) <= (node.gpu.batch if node.gpu else 4)
+
+
+def test_a_miner_waiting_for_the_clock_does_not_starve_the_node(node, monkeypatch):
+    """When the chain's clock runs ahead (blocks many per second, e.g. after a long
+    outage) the miner waits; it must wait without holding the node's lock, or the node
+    stops handling blocks and peers (seen: it banned its honest peers as flooders)."""
+    from green import params
+    monkeypatch.setattr(params, "MAX_FUTURE_SECONDS", -10**6)      # every template looks too far ahead
+    http_post(f"{node.url}/mining", {"on": True, "intensity": 100})
+    time.sleep(1)
+    slowest = 0.0
+    for _ in range(20):
+        t = time.perf_counter()
+        with node.lock:
+            pass
+        slowest = max(slowest, time.perf_counter() - t)
+        time.sleep(0.05)
+    assert slowest < 0.25, slowest
+    assert units_in(node, 1) == 0                                  # and it mines nothing meanwhile

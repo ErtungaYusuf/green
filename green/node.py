@@ -717,21 +717,24 @@ class Node:
                                                          signal_skip=self.no_signal, shares=shares)
                 t = self._template = (key, now, base, txs, shares, version)
             _, _, base, txs, shares, _ = t
-            if base["time"] > time.time() + params.MAX_FUTURE_SECONDS - 5:
-                # The chain's clock (each block after the median of the last 11) ran ahead of
-                # ours, as it does when blocks come many per second: a block now would be
-                # refused as from the future, so wait for the clock instead of mining it.
+            ahead = base["time"] > time.time() + params.MAX_FUTURE_SECONDS - 5
+            if ahead:
                 self._template = None
-                time.sleep(0.5)
-                return []
             tip = self.chain.tip
             busy = self._busy_units()
             headers = []
-            for _ in range(count):
+            for _ in range(count if not ahead else 0):
                 header = dict(base, work=self._choose_work(busy), nonce=random.getrandbits(48))
                 if header["work"]["job"] is not None:
                     self._inflight_units.add((header["work"]["job"], txmod.unit_key(header["work"]["unit"])))
                 headers.append(header)
+        if ahead:
+            # The chain's clock (each block after the median of the last 11) ran ahead of ours,
+            # as it does when blocks come many per second: a block now would be refused as
+            # from the future, so wait for the clock instead of mining it -- outside the lock,
+            # which waiting under starved the rest of the node (seen after a long outage).
+            time.sleep(0.5)
+            return []
         tries = []
         for header, inputs in zip(headers, pool.map(self._prepare_try, headers)):
             if isinstance(inputs, Exception):

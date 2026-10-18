@@ -2,6 +2,13 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## 0.21.1
+
+Found when the local network came back after 15 hours off (ASERT then lowers the difficulty as far as it goes, and blocks come many per second until the chain is back on schedule):
+- A miner whose chain's clock ran ahead of real time waited for it while holding the node's lock (v0.20): the node stopped handling blocks and peers, and banned its honest peers as flooders. It now waits outside the lock. (`test_a_miner_waiting_for_the_clock_does_not_starve_the_node`, which fails with the wait back under the lock.)
+- A peer whose messages pile up faster than the node handles them is now disconnected, and banned only the third time within an hour; a node that fell behind used to ban every honest peer at once. (`test_a_flood_beyond_the_queue_is_cut_off`.)
+- 271 tests.
+
 ## 0.21.0
 
 **Anonymous compute**

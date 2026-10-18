@@ -64,10 +64,10 @@ class RawPeer:
     """A hand-driven peer: does the real handshake, then sends whatever a test wants."""
 
     def __init__(self, node: Node, work: int = 0, genesis_hash: str | None = None, port: int = 0,
-                 features: list | None = None):
+                 features: list | None = None, key: Ed25519PrivateKey | None = None):
         self.sock = socket.create_connection(("127.0.0.1", node.p2p.port), timeout=10)
         self.send_c, self.recv_c, self.sid = p2p.key_exchange(self.sock, True, genesis_hash or node.chain.genesis_hash)
-        self.key = Ed25519PrivateKey.generate()
+        self.key = key or Ed25519PrivateKey.generate()
         self.node_id = p2p.pub_hex(self.key)
         self.send("version", {"proto": p2p.PROTOCOL_VERSION, "agent": "raw", "id": self.node_id,
                               "sig": self.key.sign(p2p.auth_message(self.sid, True)).hex(), "port": port,
@@ -451,16 +451,22 @@ def test_malformed_messages_add_up_to_a_ban(nodes):
 
 
 def test_a_flood_beyond_the_queue_is_cut_off(nodes, monkeypatch):
+    """Disconnected at once, banned the third time within an hour: banning at once hit
+    honest peers whenever the node itself fell behind."""
     monkeypatch.setattr(p2p, "MAX_PEER_QUEUE", 5)
     monkeypatch.setattr(p2p, "WORKERS", 0)               # nothing drains the queue
     a = nodes("a", make_genesis(Key.generate().address, "flood"))
-    peer = RawPeer(a)
-    try:
-        for _ in range(10):
-            peer.send("getaddr")
-    except OSError:
-        pass                                             # cut off before the flood was even sent
-    assert peer.closed(timeout=5)
+    key = Ed25519PrivateKey.generate()
+    for time_ in range(3):
+        peer = RawPeer(a, key=key)
+        try:
+            for _ in range(10):
+                peer.send("getaddr")
+        except OSError:
+            pass                                         # cut off before the flood was even sent
+        assert peer.closed(timeout=5)
+        banned = a.p2p.is_banned("127.0.0.1", peer.node_id)
+        assert banned == (time_ == 2), time_
 
 
 def test_a_silent_connection_is_closed_after_the_handshake_deadline(nodes, monkeypatch):
