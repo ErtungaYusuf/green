@@ -333,6 +333,12 @@ Residual risks: payments still link the buyer's address to the provider on chain
 - **C3: The signature cache cannot be poisoned.** It keeps only signatures that verified, keyed by a hash over the whole key, the whole signature and the message, so a hit means that exact triple verified before; any other key, signature or message misses and is verified. Bounded at 200,000 entries, emptied when full. (`test_the_signature_cache_only_vouches_for_the_exact_triple`, which fails if the signature is left out of the key.)
 - **C4: Bigger blocks and checking time.** 3,000 transfers take ~0.33 s to check cold on one core, 6,000 signatures (the new budget, ~70 µs each) ~0.45 s: small against 15 s blocks. A full node syncing a long run of full blocks checks ~9,000 transfers/s; new nodes can start from a verified snapshot instead. (`bench/tps_bench.py`, `test_a_block_holds_far_more_than_the_old_500_transactions`.)
 
+## Twentieth review: rewards by work, and burning (v0.23)
+
+- **D1: Shares are cheap to check, not free.** 128 shares a block, each a work unit (2.4 ms) and ~640 bytes: ~0.3 s of a core and ~82 KB per 15 s block at most 256 (MAX_BLOCK_SHARES). Shares are checked once, on arrival, and cached, so a block that includes them is checked without recomputing them; a fake share bans its sender.
+- **D2: A finder premium no longer protects anything.** With 1% for the block itself, withholding a found block (to mine on it in secret) forgoes the shares other miners keep publishing, and a block that loses a race still pays as a share. Including shares earns 5% of each; leaving them out earns nothing (their pay stays in the reserve).
+- **D3: Burning cannot create coins.** The supply audit is now `balances + locked + reserve = TOTAL_SUPPLY − burned`, checked by `GET /supply`; `burned` only grows, by a fixed share of the fees of each block. (`test_no_coin_is_created_and_fees_go_back_or_burn`, `test_nearly_all_of_the_emission_pays_for_work_not_luck`.)
+
 ## Still open (needed before production)
 
 The full list, by area, is in [PRODUCTION.md](PRODUCTION.md).

@@ -196,16 +196,20 @@ def share_id(share: dict) -> str:
 def pay_block(s: State, hdr: dict, fees: int, shares: list) -> None:
     """A block's rewards (SPEC.md §3.5): from the reserve, the finder's part of the
     emission plus a cut of each share it includes, and each share's reward to the
-    share's miner; of the fees, FEE_RESERVE_PERCENT back into the reserve and the
-    rest to the finder. Coins only move, so the total supply never changes."""
+    share's miner; of the fees, FEE_RESERVE_PERCENT back into the reserve,
+    FEE_BURN_PERCENT destroyed and the rest to the finder. No coin is ever created:
+    the supply is TOTAL_SUPPLY minus what was burned."""
     finder, per_share, cut = params.emission(s.reserve)
     to_reserve = fees * params.FEE_RESERVE_PERCENT // 100
+    burn = fees * params.FEE_BURN_PERCENT // 100
     for sh in shares:
         for addr, amount in payouts(sh["miner"], per_share - cut):
             s.credit(addr, amount)
-    for addr, amount in payouts(hdr["miner"], finder + cut * len(shares) + fees - to_reserve):
+    for addr, amount in payouts(hdr["miner"], finder + cut * len(shares) + fees - to_reserve - burn):
         s.credit(addr, amount)
     s.reserve = s.reserve - finder - per_share * len(shares) + to_reserve
+    if burn:
+        s.burned += burn
 
 
 def make_genesis(miner: str, msg: str, timestamp: int | None = None, on_try=None) -> dict:

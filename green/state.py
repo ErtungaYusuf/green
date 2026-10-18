@@ -409,6 +409,15 @@ class State:
     def reserve(self, amount: int) -> None:
         self.protocol["reserve"] = amount
 
+    @property
+    def burned(self) -> int:
+        """Fees destroyed so far: the supply is TOTAL_SUPPLY minus this."""
+        return self.protocol.get("burned", 0)
+
+    @burned.setter
+    def burned(self, amount: int) -> None:
+        self.protocol["burned"] = amount
+
     def locked_total(self) -> int:
         """Coins held by the protocol (escrow + bonds), for supply accounting."""
         jobs = sum(j["escrow"] + sum(b["bond"] for b in j["batches"].values()) for j in self.jobs.values())

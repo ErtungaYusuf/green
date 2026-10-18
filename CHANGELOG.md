@@ -2,6 +2,13 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## 0.23.0
+
+- **Miners earn for the work they do, not for luck.** 99% of each block's emission now goes to shares (was 80%), and shares are 128 times easier than a block (was 32): about 128 a block, one every ~0.12 s across the network. Finding the block is worth about one share plus a 5% cut of the shares it includes and half of the fees. On the local network over 300 blocks, each miner's part of the rewards already matched its part of the work within a point; with the new setting a GPU with 0.01% of a large network gets ~74 shares a day, and its daily income stays within ~12% of what its work deserves (32% before; `bench/economics_sim.py`). Nobody needs a pool. Checking 128 shares costs a node ~0.3 s per 15 s block (2.4 ms each).
+- **A slow, small deflation.** Of every fee, 50% goes to the block's miner, 30% back into the reserve (paid out again as rewards, so rewards never dry up) and 20% is burned (state entry `burned`). No coin is ever created; the supply is 21M minus what was burned, and shrinks a little with use: at 10 transfers a second, ~0.0015% a year. `GET /supply` and `grn supply` show what was burned.
+- [green-hub](https://github.com/ErtungaYusuf/green-hub): wallet, compute buying and mining in one page in the browser.
+- Consensus change: a new network (the payout and the supply rule differ from 0.22).
+
 ## 0.22.0
 
 - **Fees as low as Solana's.** The minimum fee is per signature a validator checks: 500 yaprak (0.000005 GRN, as Solana's 5,000 lamports) for a plain transaction, k times that for a k-of-n multisig one, twice for a channel claim (its voucher). It was a flat 10,000 yaprak. When blocks fill, transactions still compete by fee rate (the priority fee), and half of every fee still goes back to the reserve.

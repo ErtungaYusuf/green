@@ -42,7 +42,7 @@ def with_shares(chain, key, shares, txs=()):
     return block
 
 
-def test_the_supply_never_changes_and_half_of_every_fee_goes_back():
+def test_no_coin_is_created_and_fees_go_back_or_burn():
     keys = [Key.generate() for _ in range(5)]
     chain = new_chain(keys[0])
     rng = random.Random(1)
@@ -50,11 +50,12 @@ def test_the_supply_never_changes_and_half_of_every_fee_goes_back():
         rich = max(keys, key=lambda k: chain.state.balance(k.address))
         pays = [tx(chain, rich, "transfer", to=rng.choice(keys).address, amount=rng.randint(1, 10**6),
                    fee=params.MIN_TX_FEE * rng.randint(1, 50))]
-        before, fees = chain.state.reserve, pays[0]["fee"]
+        before, burned, fees = chain.state.reserve, chain.state.burned, pays[0]["fee"]
         finder, _, _ = params.emission(before)
         add(chain, rng.choice(keys), pays)
         assert chain.state.reserve == before - finder + fees * params.FEE_RESERVE_PERCENT // 100
-        assert supply(chain) == minted(chain) == params.TOTAL_SUPPLY
+        assert chain.state.burned == burned + fees * params.FEE_BURN_PERCENT // 100 > burned
+        assert supply(chain) == minted(chain) == params.TOTAL_SUPPLY - chain.state.burned
 
 
 def test_shares_pay_their_miners_from_the_reserve(shares_on):
@@ -171,3 +172,16 @@ def test_shares_travel_the_network_and_fake_ones_get_the_sender_banned(tmp_path,
         assert raw.closed()
     finally:
         node.stop()
+
+
+def test_nearly_all_of_the_emission_pays_for_work_not_luck():
+    import importlib
+    defaults = importlib.reload(importlib.import_module("green.params"))      # the real values, not the tests'
+    try:
+        finder, per_share, cut = defaults.emission(defaults.TOTAL_SUPPLY)
+        e = defaults.TOTAL_SUPPLY // defaults.EMISSION_DIVISOR
+        assert defaults.SHARE_FACTOR >= 128 and finder < e // 50              # finding the block: ~1%
+        assert finder + cut * defaults.SHARE_FACTOR < 8 * per_share            # with its cuts, < 8 shares' worth
+        assert defaults.FEE_BURN_PERCENT > 0 and defaults.FEE_RESERVE_PERCENT + defaults.FEE_BURN_PERCENT < 100
+    finally:
+        importlib.reload(defaults)

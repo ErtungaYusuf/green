@@ -58,8 +58,8 @@ c = np.frombuffer(urllib.request.urlopen(req).read(), "<i4").reshape(512, 512)  
 
 ## What's new in v0.17
 
-- **Money that neither inflates nor halves:** the 21M GRN supply is fixed and starts in the protocol's reserve; each block pays out a fixed fraction of what is left (a smooth curve, no halving cliffs), and half of every fee flows back in, so rewards never dry up and the supply never grows.
-- **Paid for work, not luck:** 80% of each block's reward goes to *shares*, tickets 32 times easier than a block, so every miner is paid in proportion to its work, block after block, without a pool. A block that loses a race still counts as a share.
+- **Money that never inflates and slowly deflates:** the 21M GRN supply is fixed and starts in the protocol's reserve; each block pays out a fixed fraction of what is left (a smooth curve, no halving cliffs). Of every fee, 30% flows back into the reserve, so rewards never dry up, and 20% is burned, so the supply shrinks a little with use.
+- **Paid for work, not luck:** 99% of each block's reward goes to *shares*, tickets 128 times easier than a block (one every ~0.12 s across the network), so every miner is paid in proportion to its work, several times a minute, without a pool. Finding the block is worth about one share plus a 5% cut of the shares it includes. A block that loses a race still counts as a share.
 
 ## What's new in v0.16
 

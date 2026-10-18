@@ -81,12 +81,13 @@ After a block's transactions, at height `h`, in this order:
 
 ### 3.5 Money: the reserve, rewards and shares
 
-The total supply is fixed at TOTAL_SUPPLY. Before the genesis block all of it is in the protocol's **reserve** (state map `protocol`, key `"reserve"`); coins only ever move between the reserve and accounts, so `Σ balances + escrows + bonds + channel funds + reserve = TOTAL_SUPPLY` at every block. There is no halving and no inflation.
+The total supply is fixed at TOTAL_SUPPLY. Before the genesis block all of it is in the protocol's **reserve** (state map `protocol`, key `"reserve"`); no coin is ever created, and a part of every fee is destroyed (recorded under key `"burned"`), so `Σ balances + escrows + bonds + channel funds + reserve = TOTAL_SUPPLY − burned` at every block. There is no halving and no inflation; the supply shrinks slowly with use.
 
 A block whose parent state holds reserve `R` has emission `E = floor(R / EMISSION_DIVISOR)`, of which `per_share = floor(floor(E · SHARES_PERCENT / 100) / SHARE_FACTOR)`, `cut = floor(per_share · SHARE_INCLUSION_PERCENT / 100)` and `finder = E − SHARE_FACTOR · per_share`. With `F` the block's fees and `n` its shares:
 - each share's `miner` receives `per_share − cut`;
-- the block's `miner` receives `finder + n · cut + F − floor(F · FEE_RESERVE_PERCENT / 100)`;
-- the reserve changes by `floor(F · FEE_RESERVE_PERCENT / 100) − finder − n · per_share`.
+- the block's `miner` receives `finder + n · cut + F − floor(F · FEE_RESERVE_PERCENT / 100) − floor(F · FEE_BURN_PERCENT / 100)`;
+- the reserve changes by `floor(F · FEE_RESERVE_PERCENT / 100) − finder − n · per_share`;
+- `burned` grows by `floor(F · FEE_BURN_PERCENT / 100)` (the entry is absent while it is 0).
 
 The finder's part does not depend on `n`: a block that leaves shares out keeps nothing more (what the missing shares would have been paid stays in the reserve), and one that includes them earns their cut.
 
@@ -275,8 +276,8 @@ A node on another network derives different keys and fails at the first frame.
 | SIGNAL_PERIOD, SIGNAL_THRESHOLD | 20,160, 18,144 (90%) |
 | P2P: REKEY_FRAMES, MAX_FRAME, MAX_HEADERS, MAX_INV | 4,096, 4 MiB, 2,000, 1,000 |
 | P2P (not consensus): Dandelion++ epoch, fluff probability, destinations, embargo | 600 s, 0.1, 2, 15 s + Exp(mean 5 s) |
-| TOTAL_SUPPLY, EMISSION_DIVISOR, FEE_RESERVE_PERCENT | 2,100,000,000,000,000 yaprak (21,000,000 GRN), 2^24, 50 |
-| SHARE_FACTOR, SHARES_PERCENT, SHARE_INCLUSION_PERCENT, MAX_BLOCK_SHARES, SHARE_WINDOW | 32, 80, 5, 64, 32 |
+| TOTAL_SUPPLY, EMISSION_DIVISOR, FEE_RESERVE_PERCENT, FEE_BURN_PERCENT | 2,100,000,000,000,000 yaprak (21,000,000 GRN), 2^24, 30, 20 |
+| SHARE_FACTOR, SHARES_PERCENT, SHARE_INCLUSION_PERCENT, MAX_BLOCK_SHARES, SHARE_WINDOW | 128, 99, 5, 256, 32 |
 | MAX_BLOCK_TXS, MAX_BLOCK_BYTES | 3,000, 1,000,000 |
 | MAX_JOB_UNITS_PER_DIM, MAX_BATCH_UNITS | 16, 4,096 |
 | MIN_TX_FEE (per signature), DATA_FEE_PER_BYTE, NEW_ACCOUNT_MIN | 500, 1, 10,000 |

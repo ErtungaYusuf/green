@@ -906,10 +906,11 @@ def cmd_supply(args):
     print(f"Locked   : {params.fmt_amount(s['locked'])}  (escrow, bonds and channels)")
     print(f"Reserve  : {params.fmt_amount(s['reserve'])}  (not yet paid out as rewards, and fees flowing back)")
     print(f"Total    : {params.fmt_amount(s['total'])}")
-    print(f"Supply   : {params.fmt_amount(s['supply'])}  (fixed: it never grows)")
+    print(f"Burned   : {params.fmt_amount(s.get('burned', 0))}  ({params.FEE_BURN_PERCENT}% of every fee is destroyed)")
+    print(f"Supply   : {params.fmt_amount(s['supply'])}  (never grows: the fixed total minus what was burned)")
     if not s["ok"]:
         raise CliError("SUPPLY MISMATCH: coins were created from nothing, or coins are missing")
-    print("OK: every coin is accounted for, and the supply is exactly the fixed total")
+    print("OK: every coin is accounted for, and no coin was ever created")
 
 
 def cmd_guard(args):

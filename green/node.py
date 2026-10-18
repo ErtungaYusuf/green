@@ -57,7 +57,7 @@ BATCH_SECONDS = 2.0           # commit a partly filled batch after this long
 BUMP_AFTER_BLOCKS = 3         # our own protocol transaction still waiting after this many blocks gets a higher fee
 MAX_BUMP_FEE = 10_000_000     # ...up to this (0.1 GRN), so a fee spike cannot drain the wallet
 BUMP_SECONDS = 5.0
-MAX_SHARE_POOL = 4096         # shares waiting to be included
+MAX_SHARE_POOL = 16_384       # shares waiting to be included (~SHARE_FACTOR per block of the window)
 TEMPLATE_SECONDS = 5          # the miner rebuilds its block template at least this often
 MINING_THREADS = max(1, min(4, (os.cpu_count() or 2) - 1))   # threads that prepare (CPU: compute) tries
 SHARE_TEMPLATE_SECONDS = 1    # ...and for new shares at most this often
@@ -1274,7 +1274,8 @@ class Node:
                 "units_per_second": round(self.units_per_second(), 2), "stats": dict(self.stats),
                 "warnings": self.warnings(),
                 "pruned": self.prune, "first_block": self.chain.first_block,
-                "reserve": self.chain.state.reserve, "shares_waiting": len(self.share_pool),
+                "reserve": self.chain.state.reserve, "burned": self.chain.state.burned,
+                "shares_waiting": len(self.share_pool),
                 "next_emission": dict(zip(("finder", "per_share", "inclusion_cut"),
                                           params.emission(self.chain.state.reserve))),
             }
@@ -1437,15 +1438,15 @@ class Node:
 
     def supply(self) -> dict:
         """Audit: every coin sits in a balance, an escrow, a bond or a channel, or in the
-        protocol's reserve, and together they are exactly the fixed total supply."""
+        protocol's reserve, and together they are the fixed total minus the fees burned."""
         with self.lock:
             state, height = self.chain.state, self.chain.height
             balances = sum(state.balances.values())
             locked = state.locked_total()
-            reserve = state.reserve
+            reserve, burned = state.reserve, state.burned
         return {"height": height, "balances": balances, "locked": locked, "reserve": reserve,
-                "total": balances + locked + reserve, "supply": params.TOTAL_SUPPLY,
-                "ok": balances + locked + reserve == params.TOTAL_SUPPLY}
+                "burned": burned, "total": balances + locked + reserve, "supply": params.TOTAL_SUPPLY - burned,
+                "ok": balances + locked + reserve == params.TOTAL_SUPPLY - burned}
 
     def metrics(self) -> str:
         """Prometheus text format, for dashboards and alerts."""

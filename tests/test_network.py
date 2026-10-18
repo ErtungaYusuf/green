@@ -395,7 +395,7 @@ def test_supply_audit_and_metrics_on_a_live_node(network):
     n1, n2, miner, buyer = network
     wait_for(lambda: n1.chain.height >= 5, what="blocks")
     s = http_get(f"{n1.url}/supply")
-    assert s["ok"] and s["total"] == s["supply"] == params.TOTAL_SUPPLY
+    assert s["ok"] and s["total"] == s["supply"] == params.TOTAL_SUPPLY - s["burned"]
     assert s["reserve"] < params.TOTAL_SUPPLY - 5 * params.emission(params.TOTAL_SUPPLY)[0] // 2   # rewards were paid
     import urllib.request
     with urllib.request.urlopen(f"{n1.url}/metrics", timeout=5) as r:

@@ -71,16 +71,22 @@ SNAPSHOT_INTERVAL = 2880
 # out, miners are paid from what users pay, smoothed over years.
 TOTAL_SUPPLY = 21_000_000 * 100_000_000
 EMISSION_DIVISOR = 2 ** 24        # a block pays out 1/16,777,216 of the reserve
-FEE_RESERVE_PERCENT = 50          # of every block's fees, into the reserve (the rest to its miner)
+FEE_RESERVE_PERCENT = 30          # of every block's fees, into the reserve (paid out again as rewards)
+FEE_BURN_PERCENT = 20             # of every block's fees, destroyed: the supply shrinks a little with use
+                                  # (the rest, 50%, to the block's miner)
 
 # Shares: tickets that meet SHARE_FACTOR times the block target (on headers mined on
 # one of the last SHARE_WINDOW blocks) are included in blocks and paid from the
 # reserve, so every miner is paid in proportion to its work, not all or nothing.
-SHARE_FACTOR = 32                 # shares are 32 times easier than blocks: ~32 per block (each costs
-                                  # every node a work unit to check, ~2% of a core at 15 s blocks)
-SHARES_PERCENT = 80               # of each block's emission, paid to shares (SHARE_FACTOR shares' worth)
+# Nearly all of the emission goes to shares, so a miner earns in proportion to the work
+# it does, a few times a minute, with no pool: finding the block itself is worth about
+# one share (plus the inclusion cuts and the fees), not a jackpot.
+SHARE_FACTOR = 128                # shares are 128 times easier than blocks: ~128 per block, one
+                                  # every ~0.12 s; each costs every node a work unit to check
+                                  # (~2 ms: ~2% of a core at 15 s blocks) and ~640 bytes
+SHARES_PERCENT = 99               # of each block's emission, paid to shares (SHARE_FACTOR shares' worth)
 SHARE_INCLUSION_PERCENT = 5       # of each share's reward, to the block that includes it
-MAX_BLOCK_SHARES = 64
+MAX_BLOCK_SHARES = 256
 SHARE_WINDOW = 32                 # a share is mined on one of the last 32 blocks
 
 # Transactions per block: 3000 every 15 s is 200 transfers a second. A node checks a

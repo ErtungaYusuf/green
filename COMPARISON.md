@@ -23,9 +23,10 @@ What each one solves, how they compare in numbers, and where Green still falls s
 | Off chain | Lightning | none needed at its speed | payment channels for compute (each result checked, paid per product) |
 | Transaction size | ~140–250 B (P2WPKH) | ≤ 1,232 B | ~320 B transfer |
 | Minimum fee | market, ~1 sat/vB floor for relay | 5,000 lamports per signature (0.000005 SOL) + priority fee | **500 yaprak per signature (0.000005 GRN)** + priority by fee rate |
-| Where fees go | miner | half of the base fee burned, rest + priority to the leader | half back into the reserve (paid out again as rewards), half to the miner |
+| Where fees go | miner | half of the base fee burned, rest + priority to the leader | 50% to the miner, 30% back into the reserve (paid out again as rewards), 20% burned |
+| Reward split | the block finder takes all; small miners must pool | stake-weighted | 99% to shares (~128 a block, one every 0.12 s): every miner paid in proportion to its work, no pool |
 | Account spam | UTXO dust limits | rent-exempt minimum balance | a transfer that opens an account sends ≥ 0.0001 GRN |
-| Supply | 21M, halving every 210,000 blocks | inflationary (decreasing yearly rate) | 21M, fixed; every block pays 1/2^24 of the reserve, no halving cliff |
+| Supply | 21M, halving every 210,000 blocks | inflationary (decreasing yearly rate) | 21M at most, never created, slowly burned; every block pays 1/2^24 of the reserve, no halving cliff |
 | Signatures | ECDSA/Schnorr secp256k1 | Ed25519 | Ed25519, k-of-n multisig, guardians |
 | Light clients | SPV (headers + Merkle proofs) | RPC trust or light-client research | headers + Merkle proofs, and a state root in every header for verified snapshots |
 | Programs | Script (not Turing complete) | eBPF/SBF programs, re-executed by all | WASM tasks run once off chain, settled optimistically with fraud proofs; matmul jobs checked by Freivalds |

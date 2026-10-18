@@ -143,14 +143,15 @@ def supply(chain) -> int:
 
 
 def minted(chain) -> int:
-    """The supply never changes: coins only move between the reserve and accounts."""
-    return params.TOTAL_SUPPLY
+    """No coin is ever created: the supply is the fixed total minus the fees burned."""
+    return params.TOTAL_SUPPLY - chain.state.burned
 
 
 def reward(state, fees: int = 0, shares: int = 0) -> int:
     """What the finder of a block on `state` receives (SPEC.md §3.5)."""
     finder, _, cut = params.emission(state.reserve)
-    return finder + cut * shares + fees - fees * params.FEE_RESERVE_PERCENT // 100
+    return (finder + cut * shares + fees - fees * params.FEE_RESERVE_PERCENT // 100
+            - fees * params.FEE_BURN_PERCENT // 100)
 
 
 def rewards(chain, key, start: int, end: int | None = None) -> int:
