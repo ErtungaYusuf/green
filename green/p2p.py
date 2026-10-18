@@ -84,7 +84,7 @@ from .tx import InvalidTx
 from .verify import ProcessChecker
 
 PROTOCOL_VERSION = 1
-AGENT = "green/0.23.0"
+AGENT = "green/0.23.1"
 
 MAX_OUTBOUND = 8               # outbound connections the node keeps
 BLOCK_RELAY_ONLY = 2           # ...of which relay blocks only
@@ -185,6 +185,30 @@ def parse_address(text) -> tuple[str, int, str | None] | None:
     if any(c.isspace() or c in "/?#@" for c in host):
         return None
     return host.lower(), int(port_s), node_id
+
+
+MAX_SEED_ADDRESSES = 16
+
+
+def seed_hosts(host: str, port: int, resolve=socket.getaddrinfo) -> list[str]:
+    """The addresses behind a seed: an IP as it is, a DNS name as up to MAX_SEED_ADDRESSES
+    of the addresses it resolves to (a DNS seed answers with many nodes, as Bitcoin's do,
+    so one name gives a new node many peers to choose from)."""
+    try:
+        ipaddress.ip_address(host)
+        return [host]
+    except ValueError:
+        pass
+    try:
+        infos = resolve(host, port, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError):
+        return []
+    out = []
+    for info in infos:
+        ip = info[4][0]
+        if ip not in out:
+            out.append(ip)
+    return out[:MAX_SEED_ADDRESSES]
 
 
 def addr_key(host: str, port: int) -> str:
@@ -923,7 +947,9 @@ class P2P:
                 for text in self.seeds:
                     parsed = parse_address(text)
                     if parsed:
-                        self.addrman.add(parsed[0], parsed[1], parsed[2], source=None)
+                        hosts = seed_hosts(parsed[0], parsed[1])
+                        for host in hosts:               # a node id only fits a seed of one address
+                            self.addrman.add(host, parsed[1], parsed[2] if len(hosts) == 1 else None, source=None)
             return
         if self.is_banned(pick["host"], pick.get("id") or ""):
             self.addrman.attempt(addr_key(pick["host"], pick["port"]))

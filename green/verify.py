@@ -24,6 +24,20 @@ WORKER_ENV = {"OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THRE
 _env_lock = threading.Lock()
 
 
+def _die_with_parent() -> None:
+    """Runs in each worker: exit as soon as the node that started it is gone. A node
+    that is killed (or crashes) never shuts its pool down, and its workers would
+    otherwise live on, idle, holding its log file open."""
+    parent = multiprocessing.parent_process()
+    if parent is None:
+        return
+
+    def watch():
+        parent.join()                            # returns when the parent process ends
+        os._exit(0)
+    threading.Thread(target=watch, daemon=True, name="parent-watch").start()
+
+
 def start_pool(workers: int) -> ProcessPoolExecutor:
     """A pool with all its workers started now, under WORKER_ENV. The BLAS reads its
     thread count when it loads, so a worker must inherit the setting at birth: the
@@ -35,7 +49,8 @@ def start_pool(workers: int) -> ProcessPoolExecutor:
         try:
             # spawn everywhere: fork (Linux's default before Python 3.14) copies a process
             # whose other threads may hold locks the child then waits on forever.
-            pool = ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("spawn"))
+            pool = ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("spawn"),
+                                       initializer=_die_with_parent)
             for _ in range(workers):
                 pool.submit(time.sleep, 0.2)
         finally:

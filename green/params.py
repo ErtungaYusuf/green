@@ -198,7 +198,8 @@ HD_COIN_TYPE = 7777
 DEFAULT_PORT = 8545               # HTTP API for wallets and tools
 DEFAULT_P2P_PORT = 8546           # encrypted node-to-node protocol (green/p2p.py)
 # Nodes to ask for addresses when the address book is empty. Filled in when a
-# public network launches; "host:port" or "<node id>@host:port".
+# public network launches; "host:port" or "<node id>@host:port". A host that is a
+# DNS name is resolved and each address it answers with is tried (DNS seeds).
 SEED_NODES: list[str] = []
 # Maintainer keys (Ed25519 public keys, hex) that sign releases, and how many
 # different ones a release needs (green/release.py). Filled in at launch.

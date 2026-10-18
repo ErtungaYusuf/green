@@ -57,7 +57,30 @@ Data nothing uses any more is marked, and deleted about a day later if it is sti
 
 ## Selling compute
 
-`provide_port = 8548`, `provide_host = "0.0.0.0"` and `provide_url = "http://<public address>:8548"` make the node sell matrix products through compute channels at `provide_price` yaprak per 2^24 multiply-adds (default 1,000). The offer is advertised over the network once the wallet holds 0.1 GRN and renewed every 20 minutes. Buyers pay with vouchers; the node claims them on chain when they are worth 20 transaction fees, before a channel ends, and on shutdown. Its books are in `provider.json` in the data folder: back it up with the wallet (vouchers not yet claimed are money). Open the port in the firewall; each request is at most 32 MiB.
+`provide_port = 8548`, `provide_host = "0.0.0.0"` and `provide_url = "http://<public address>:8548"` make the node sell matrix products through compute channels at `provide_price` yaprak per 2^24 multiply-adds (default 1,000). The offer is advertised over the network once the wallet holds 0.1 GRN and renewed every 20 minutes. Buyers pay with vouchers; the node claims them on chain when they are worth 40 transaction fees, before a channel ends, and on shutdown. Its books are in `provider.json` in the data folder: back it up with the wallet (vouchers not yet claimed are money). Open the port in the firewall; each request is at most 32 MiB.
+
+## A network across several computers
+
+Green is peer to peer like Bitcoin: every computer runs its own node, keeps its own copy of the chain and checks every block itself; nobody's node is in charge. Nodes find each other through seeds and then tell each other about more nodes (address gossip), and each node remembers the addresses it heard (`peers.json`), so after the first start it finds the network on its own.
+
+To start a new network:
+
+1. On the first computer, mine the genesis block and start a node that others can reach:
+   ```bash
+   grn --data node genesis "my network"
+   grn --data node wallet create
+   grn --data node node --mine --gpu --p2p-host 0.0.0.0 --portmap
+   ```
+   `--p2p-host 0.0.0.0` accepts connections from other computers on the P2P port (8546; the HTTP API stays on this computer). `--portmap` asks a home router to forward the port; otherwise forward 8546/tcp by hand and allow it in the firewall.
+2. Give the other computers `node/genesis.json` (it is public: it only names the network) and the first computer's address.
+3. On each other computer:
+   ```bash
+   grn --data node wallet create
+   grn --data node node --genesis genesis.json --peer <first computer's address>:8546 --mine --gpu --p2p-host 0.0.0.0 --portmap
+   ```
+   Every node that listens becomes a way in for the next ones; `--peer` is only needed until a node has learned other addresses.
+
+For a public network the release fills in `SEED_NODES` (params.py) with long-running nodes and DNS names (a DNS seed answers with the addresses of many healthy nodes), so a new node needs nothing but the software. Each person's wallet lives on their own computer: it signs transactions there, and coins can only be spent with the key of the account that holds them.
 
 ## Behind a home router
 

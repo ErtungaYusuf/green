@@ -105,3 +105,41 @@ def test_a_long_sync_checks_blocks_and_shares_in_processes(tmp_path, monkeypatch
         if fresh is not None:
             fresh.stop()
         source.stop()
+
+
+def _alive(pid: int) -> bool:
+    if os.name == "nt":                          # os.kill(pid, 0) would terminate it on Windows
+        import ctypes
+        h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)     # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(code))
+        ctypes.windll.kernel32.CloseHandle(h)
+        return code.value == 259                 # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def test_workers_die_with_a_killed_node():
+    """A node killed without shutting down left its 8 workers running for hours."""
+    import subprocess
+    import sys
+    import time
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    script = ("import sys, time; sys.path.insert(0, sys.argv[1]); from green.verify import start_pool; "
+              "pool = start_pool(2); time.sleep(1); print(*pool._processes, flush=True); time.sleep(120)")
+    proc = subprocess.Popen([sys.executable, "-c", script, root], stdout=subprocess.PIPE, text=True)
+    try:
+        pids = [int(x) for x in proc.stdout.readline().split()]
+        assert len(pids) == 2 and all(_alive(p) for p in pids)
+    finally:
+        proc.kill()                              # no shutdown, as when a node is killed
+        proc.wait()
+    end = time.time() + 30
+    while any(_alive(p) for p in pids):
+        assert time.time() < end, "the workers outlived their node"
+        time.sleep(0.2)

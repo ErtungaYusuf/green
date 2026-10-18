@@ -2,6 +2,12 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## 0.23.1
+
+- A node that was killed (or crashed) left its 8 block-checking worker processes running, idle, holding its log file open: 40 of them had been left by local-network nodes stopped hours earlier. Workers now exit as soon as the node that started them is gone. (`test_workers_die_with_a_killed_node`, which fails without the fix.)
+- DNS seeds: a seed given by name is resolved and up to 16 of the addresses it answers with are tried, as Bitcoin's DNS seeds work, so one name gives a new node many peers.
+- OPERATIONS.md: how to run one network across several computers (genesis, `--p2p-host 0.0.0.0`, `--portmap`, `--peer`, seeds).
+
 ## 0.23.0
 
 - **Miners earn for the work they do, not for luck.** 99% of each block's emission now goes to shares (was 80%), and shares are 128 times easier than a block (was 32): about 128 a block, one every ~0.12 s across the network. Finding the block is worth about one share plus a 5% cut of the shares it includes and half of the fees. On the local network over 300 blocks, each miner's part of the rewards already matched its part of the work within a point; with the new setting a GPU with 0.01% of a large network gets ~74 shares a day, and its daily income stays within ~12% of what its work deserves (32% before; `bench/economics_sim.py`). Nobody needs a pool. Checking 128 shares costs a node ~0.3 s per 15 s block (2.4 ms each).

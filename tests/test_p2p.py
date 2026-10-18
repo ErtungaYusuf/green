@@ -611,3 +611,15 @@ def test_gossip_cannot_point_us_into_our_own_network():
         assert not p2p.gossip_ok(host, "8.8.4.4"), host
     assert p2p.gossip_ok("192.168.1.20", "192.168.1.7")         # a LAN peer may name LAN nodes
     assert not p2p.gossip_ok("evil.example", "192.168.1.7")
+
+
+def test_a_dns_seed_gives_many_addresses():
+    from green.p2p import MAX_SEED_ADDRESSES, seed_hosts
+    assert seed_hosts("203.0.113.5", 8546) == ["203.0.113.5"]          # an IP is used as it is
+    answers = [(2, 1, 6, "", (f"198.51.100.{i % 40}", 8546)) for i in range(60)]
+    got = seed_hosts("seed.example", 8546, resolve=lambda *a, **k: answers)
+    assert len(got) == MAX_SEED_ADDRESSES and len(set(got)) == len(got)
+
+    def fails(*a, **k):
+        raise OSError("no such name")
+    assert seed_hosts("seed.example", 8546, resolve=fails) == []
