@@ -30,7 +30,7 @@ from urllib.parse import urlparse
 import numpy as np
 
 from . import params, tx as txmod, work
-from .compute import MAX_DIM, ComputeCluster, PaymentRequired, ProviderError, WrongResult
+from .compute import MAX_DIM, ComputeCluster, PaymentRequired, ProviderError, RelayError, WrongResult
 from .private import MODES, PrivateCompute
 from .crypto import Key, is_address
 from .node import BoundedServer, http_get, http_post, names_this_machine
@@ -192,6 +192,8 @@ class App:
             cl = self.cluster(acct)
             try:
                 return cl.matmul(a8, b8) if mode == "none" else PrivateCompute(cl).matmul(a8, b8, mode)
+            except RelayError as e:
+                raise AppError(f"{e} (is our node connected to peers?)") from None
             except (PaymentRequired, ProviderError) as e:
                 if attempt == 2:
                     raise AppError(f"no provider could do it: {e}") from None

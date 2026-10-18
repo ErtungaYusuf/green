@@ -2,6 +2,11 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## 0.21.2
+
+- A buyer whose own node could not carry a sealed request (it was restarting) counted that against the providers, gave up all three channels as dishonest and opened new ones, locking more coins. Failures to carry a request are now their own error (`RelayError`) and leave the channels alone.
+- `GET /debug/threads` (admin): where every thread of the node is, for diagnosing a node that hangs. A buyer's node on the local network stalled for four minutes during the catch-up after an outage and recovered when its peers reconnected; the cause is not found yet, and this is how it will be.
+
 ## 0.21.1
 
 Found when the local network came back after 15 hours off (ASERT then lowers the difficulty as far as it goes, and blocks come many per second until the chain is back on schedule):

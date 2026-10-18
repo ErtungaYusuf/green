@@ -60,6 +60,7 @@ An admin request must come from the node's machine, carry the header `X-Green-Cl
 | `POST /peers` | `{"addr": "host:port"}` or `{"addr": "<node id>@host:port"}`: keep a P2P connection to that node (with an id, it must present that key). Returns `{"added": bool}` |
 | `POST /mining` | any of `{"on": bool, "intensity": 1..100, "gpu": bool}`: switch mining, mine that percent of the time, mine on the GPU (checked against the CPU first) or the CPU. Returns `{"mining", "intensity", "gpu"}` (the GPU's name or null) |
 | `POST /relay` | header `X-Relay-To: <provider address>`, raw body: a sealed request (SPEC.md §12); a random peer carries it to that provider and the sealed answer comes back raw (503 if no peer could) |
+| `GET /debug/threads` | the stack of every thread of the node (thread name -> its last frames), to diagnose a node that hangs; admin rules as above |
 | `POST /shutdown` | `{}`: stop the node cleanly (as `grn stop` does); a provider first claims what buyers owe it. Returns `{"stopping": true}` |
 
 ## The app's compute proxy (`grn app`)

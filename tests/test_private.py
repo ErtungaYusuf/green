@@ -148,6 +148,13 @@ def test_requests_travel_sealed_through_a_peer(tmp_path, monkeypatch):
         wait_until(lambda: p.books(ch.cid)["vouched"] == ch.owed, "the provider to hold the voucher")
         with pytest.raises(OSError, match="no such provider"):
             mine.p2p.relay(Key.generate().address, b"\x00" * 64)
+
+        def down(*args, **kw):                                    # our node cannot carry it
+            raise OSError("relay failed: no peer can carry the request")
+        monkeypatch.setattr(compute, "relay_post", down)
+        with pytest.raises(compute.RelayError):
+            cluster.matmul(a, b)
+        assert not ch.bad                                          # not the provider's fault
     finally:
         p.stop()
         mine.stop()

@@ -82,6 +82,11 @@ class WrongResult(Exception):
     """The provider's product failed Freivalds' test: it is not paid and should be dropped."""
 
 
+class RelayError(Exception):
+    """A relayed request could not be carried (our node or its peers): not the provider's
+    fault, so its channel is not given up on."""
+
+
 class ProviderError(Exception):
     pass
 
@@ -809,6 +814,8 @@ class ComputeChannel:
                 status, data = self._exchange(path, headers, body)
             except (OSError, http.client.HTTPException) as e:
                 if retried:
+                    if self.relay:
+                        raise RelayError(f"the request could not be carried: {e}") from None
                     raise ProviderError(f"cannot reach the provider: {e}") from None
                 retried = True                    # a kept-alive connection the provider closed: once more
                 continue
