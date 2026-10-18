@@ -90,6 +90,15 @@ class TooLarge(ValueError):
     pass
 
 
+def thread_stacks(frames: int = 12) -> dict:
+    """Where every thread of this process is: thread name -> its last frames."""
+    import sys
+    import traceback
+    names = {t.ident: t.name for t in threading.enumerate()}
+    return {names.get(tid, str(tid)): traceback.format_stack(frame)[-frames:]
+            for tid, frame in sys._current_frames().items()}
+
+
 def tx_role(t: dict, addr: str) -> str | None:
     """How an address takes part in a transaction, named as the address index names it
     once the transaction is in a block (chain.py): sender, recipient, account, guardian."""
@@ -1656,15 +1665,13 @@ def make_handler(node: Node):
             q = parse_qs(u.query)
             if parts == ["status"]:
                 return self._send(200, node.status())
-            if parts == ["debug", "threads"]:
-                # Where every thread is right now: for diagnosing a node that hangs (admin only).
+            if parts[:1] == ["debug"] and parts[1:] in (["threads"], ["process"]):
+                # For diagnosing a node that hangs, and for launchers (admin only).
                 if not (self._local() and self.headers.get(CLIENT_HEADER) and names_this_machine(self.headers.get("Host"))):
                     return self._send(403, {"error": f"admin endpoint: only from this machine, with an {CLIENT_HEADER} header"})
-                import sys
-                import traceback
-                names = {t.ident: t.name for t in threading.enumerate()}
-                return self._send(200, {names.get(tid, str(tid)): traceback.format_stack(frame)[-12:]
-                                        for tid, frame in sys._current_frames().items()})
+                if parts[1] == "process":
+                    return self._send(200, {"pid": os.getpid()})
+                return self._send(200, thread_stacks())
             if parts == ["supply"]:
                 return self._send(200, node.supply())
             if parts == ["metrics"]:

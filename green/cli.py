@@ -392,13 +392,31 @@ def cmd_node(args):
     except KeyboardInterrupt:
         pass
     log("Shutting down...")
+    watchdog = threading.Timer(SHUTDOWN_SECONDS, _stuck_shutdown, args=(logger,))
+    watchdog.daemon = True
+    watchdog.start()
     if pool is not None:
         pool.stop()
     if provider is not None:
         provider.claim_due(force=True)           # collect what is owed before going away
         provider.stop()
     node.stop()
+    watchdog.cancel()
     log("Stopped.")
+
+
+SHUTDOWN_SECONDS = 45          # a node that has not stopped by then logs where it is stuck and exits
+
+
+def _stuck_shutdown(logger) -> None:
+    """The shutdown hangs: say where every thread is (the log is how such a bug gets found),
+    then end the process; the store's write-ahead log keeps the chain safe."""
+    from .node import thread_stacks
+    logger.error(f"[error] shutdown has not finished after {SHUTDOWN_SECONDS} s; where every thread is:")
+    for name, stack in thread_stacks().items():
+        logger.error(f"--- {name}\n" + "".join(stack))
+    logging.shutdown()
+    os._exit(3)
 
 
 def setup_logging(level: str, path: str | None) -> logging.Logger:

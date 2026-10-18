@@ -27,6 +27,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.request
 
 from . import params
 from .chain import block_hash, make_genesis
@@ -207,7 +208,8 @@ def start(root: str, gpu: bool = True, base_port: int = BASE_PORT, log=print, in
             started[name].kill()
         raise LocalnetError(f"no answer from {', '.join(sorted(waiting))} after {START_SECONDS} s; see their node.log")
     pids = _read_pids(root)
-    pids.update({name: proc.pid for name, proc in started.items()})
+    pids.update({name: _real_pid(next(p for p in net["personas"] if p["name"] == name), proc.pid)
+                 for name, proc in started.items()})
     for p in net["personas"]:                    # the buyers' processes, next to their nodes
         key = f"{p['name']}-buyer"
         if p.get("buys") and not (key in pids and _alive(pids[key])):
@@ -218,6 +220,18 @@ def start(root: str, gpu: bool = True, base_port: int = BASE_PORT, log=print, in
     with open(_pids_file(root), "w", encoding="utf-8") as f:
         json.dump(pids, f)
     return net
+
+
+def _real_pid(p: dict, fallback: int) -> int:
+    """The node's own process id (on Windows a virtual environment's python.exe is a
+    launcher that runs the real interpreter as a child: waiting on the launcher, or
+    stopping it, leaves the node running)."""
+    req = urllib.request.Request(f"{url(p)}/debug/process", headers={"X-Green-Client": "1"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return int(json.loads(r.read())["pid"])
+    except (OSError, ValueError, KeyError):
+        return fallback
 
 
 def _read_pids(root: str) -> dict:

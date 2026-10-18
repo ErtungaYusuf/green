@@ -2,6 +2,12 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## 0.21.3
+
+- On Windows a virtual environment's `python.exe` is a launcher that runs the real interpreter as its child. The local network recorded the launcher's process id, so `stop` waited on the wrong process, and a node stopped by its id kept running behind it: an old, stuck node of the local network went on answering on its port while its replacement never started (the "node that keeps stalling" of the last run). The local network now asks each node for its own id (`GET /debug/process`, admin).
+- A node whose shutdown has not finished after 45 s writes where every thread is to its log and exits: one did hang after "Shutting down...", and the log is how the cause will be found. The store's write-ahead log keeps the chain safe.
+- 273 tests.
+
 ## 0.21.2
 
 - A buyer whose own node could not carry a sealed request (it was restarting) counted that against the providers, gave up all three channels as dishonest and opened new ones, locking more coins. Failures to carry a request are now their own error (`RelayError`) and leave the channels alone.

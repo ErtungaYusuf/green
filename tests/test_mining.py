@@ -74,3 +74,37 @@ def test_a_miner_waiting_for_the_clock_does_not_starve_the_node(node, monkeypatc
         time.sleep(0.05)
     assert slowest < 0.25, slowest
     assert units_in(node, 1) == 0                                  # and it mines nothing meanwhile
+
+
+def test_debug_endpoints_answer_only_admins(node):
+    import json
+    import os
+    import urllib.request
+    for path in ("/debug/process", "/debug/threads"):
+        with pytest.raises(urllib.error.HTTPError) as e:
+            http_get(node.url + path)                              # no client header: a web page
+        assert e.value.code == 403
+
+    def admin(path):
+        req = urllib.request.Request(node.url + path, headers={"X-Green-Client": "1"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read())
+    assert admin("/debug/process") == {"pid": os.getpid()}
+    stacks = admin("/debug/threads")
+    assert "MainThread" in stacks and any("_mine_loop" in "".join(s) for s in stacks.values())
+
+
+def test_a_stuck_shutdown_logs_every_thread_and_exits(monkeypatch):
+    import logging
+    from green import cli
+    lines, codes = [], []
+
+    class Grab(logging.Handler):
+        def emit(self, record):
+            lines.append(record.getMessage())
+    logger = logging.getLogger("green-test-watchdog")
+    logger.addHandler(Grab())
+    monkeypatch.setattr(cli.os, "_exit", codes.append)
+    cli._stuck_shutdown(logger)
+    assert codes == [3] and "shutdown has not finished" in lines[0]
+    assert any(line.startswith("--- MainThread") and "test_a_stuck_shutdown" in line for line in lines)
