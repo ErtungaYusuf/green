@@ -2,6 +2,11 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## 0.21.4
+
+- Found with the thread dump of v0.21.2: a node too busy to carry another sealed request refused it while holding the peer's lock, and sending takes that lock, so the connection's reader locked itself up for good. The node stopped hearing that peer (the stalls of the last runs), and its shutdown waited forever on the same lock. Introduced in v0.21; the refusal is now sent after the lock is released. (`test_a_refused_relay_does_not_lock_up_the_connection`, which hangs without the fix.)
+- 274 tests.
+
 ## 0.21.3
 
 - On Windows a virtual environment's `python.exe` is a launcher that runs the real interpreter as its child. The local network recorded the launcher's process id, so `stop` waited on the wrong process, and a node stopped by its id kept running behind it: an old, stuck node of the local network went on answering on its port while its replacement never started (the "node that keeps stalling" of the last run). The local network now asks each node for its own id (`GET /debug/process`, admin).

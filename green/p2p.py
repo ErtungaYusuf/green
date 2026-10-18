@@ -84,7 +84,7 @@ from .tx import InvalidTx
 from .verify import ProcessChecker
 
 PROTOCOL_VERSION = 1
-AGENT = "green/0.21.3"
+AGENT = "green/0.21.4"
 
 MAX_OUTBOUND = 8               # outbound connections the node keeps
 BLOCK_RELAY_ONLY = 2           # ...of which relay blocks only
@@ -1747,14 +1747,16 @@ class P2P:
         def refuse(why: str) -> None:
             peer.send("relayed", rid + b"\x01" + why.encode())
         now = time.time()
-        with peer.lock:
+        with peer.lock:                              # (never send under it: send takes it too)
             peer.relay_budget = min(float(RELAY_BYTES_PER_MINUTE),
                                     peer.relay_budget + (now - peer.relay_time) * RELAY_BYTES_PER_MINUTE / 60)
             peer.relay_time = now
-            if peer.relays_inflight >= RELAY_PER_PEER or len(data) > peer.relay_budget:
-                return refuse("busy")
-            peer.relay_budget -= len(data)
-            peer.relays_inflight += 1
+            busy = peer.relays_inflight >= RELAY_PER_PEER or len(data) > peer.relay_budget
+            if not busy:
+                peer.relay_budget -= len(data)
+                peer.relays_inflight += 1
+        if busy:
+            return refuse("busy")
         offer = next((o for o in self.offer_list() if o["provider"] == to), None)
         why = None
         if offer is None:

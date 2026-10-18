@@ -85,7 +85,7 @@ class RawPeer:
         length = self.recv_c.open_length(p2p._recv_exact(self.sock, 20, deadline))
         body = self.recv_c.open_body(p2p._recv_exact(self.sock, length + 16, deadline))
         cmd = p2p.NAME[body[0]]
-        return cmd, (body[1:] if cmd == "blob" else json.loads(body[1:]))
+        return cmd, (body[1:] if cmd in p2p.BINARY else json.loads(body[1:]))
 
     def recv_until(self, want, timeout=10):
         deadline = time.time() + timeout
@@ -338,6 +338,22 @@ def test_two_requests_for_one_blob_share_the_answer(nodes, monkeypatch):
     for t in threads:
         t.join(30)
     assert got == [data, data]
+
+
+def test_a_refused_relay_does_not_lock_up_the_connection(nodes, monkeypatch):
+    """Refusing a sealed request it is too busy to carry, a node answered while holding the
+    peer's lock, and sending takes that lock: the connection's reader locked itself up for
+    good (the node stopped hearing that peer, and could not shut down)."""
+    monkeypatch.setattr(p2p, "RELAY_PER_PEER", 0)            # every request is refused as busy
+    a = nodes("a", make_genesis(Key.generate().address, "relay busy"))
+    peer = RawPeer(a, features=["relay"])
+    rid = b"\x01" * 8
+    to = Key.generate().address.encode()
+    peer.send("relay", rid + bytes([len(to)]) + to + b"\x00" * 100)
+    answer = peer.recv_until("relayed", timeout=5)
+    assert answer[:8] == rid and answer[8] == 1 and b"busy" in answer[9:]
+    peer.send("ping", {"n": 7})
+    assert peer.recv_until("pong", timeout=5) == {"n": 7}      # the connection still works
 
 
 # --- headers-first sync ------------------------------------------------------------------
