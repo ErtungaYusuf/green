@@ -84,7 +84,7 @@ from .tx import InvalidTx
 from .verify import ProcessChecker
 
 PROTOCOL_VERSION = 1
-AGENT = "green/0.23.1"
+AGENT = "green/0.23.2"
 
 MAX_OUTBOUND = 8               # outbound connections the node keeps
 BLOCK_RELAY_ONLY = 2           # ...of which relay blocks only
@@ -100,6 +100,10 @@ PONG_SECONDS = 300
 MAX_FRAME = 4 * 1024 * 1024    # blocks, headers, transactions; blobs only on request
 MAX_SEND_QUEUE = 64 * 1024 * 1024
 MAX_PEER_QUEUE = 1000          # messages waiting to be processed, per peer
+# What a node that falls behind drops instead of counting it against the peer: the
+# network carries these again (shares and transactions are announced by every peer
+# that has them), so dropping them costs nothing, while blocks and headers are kept.
+DROPPABLE = frozenset({"share", "tx", "dtx", "offers"})
 REKEY_FRAMES = 4096
 MAX_INV = 1000
 MAX_HEADERS = 2000
@@ -1151,6 +1155,9 @@ class P2P:
                     return
                 peer.scheduled = True
         if full:
+            if cmd in DROPPABLE:                    # we are behind, not the peer to blame
+                self.stats["dropped_when_busy"] = self.stats.get("dropped_when_busy", 0) + 1
+                return None
             return self._flooded(peer)
         self._ready.put(peer)
 

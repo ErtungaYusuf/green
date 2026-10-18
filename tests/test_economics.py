@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from green import params
-from green.chain import InvalidBlock, block_hash, make_genesis, share_id, solve, target_of
+from green.chain import BlobStore, Chain, InvalidBlock, block_hash, make_genesis, share_id, solve, target_of
 from green.crypto import Key
 from green.node import Node, http_get
 from helpers import T0, add, grind, mine, minted, new_chain, supply, tx
@@ -185,3 +185,41 @@ def test_nearly_all_of_the_emission_pays_for_work_not_luck():
         assert defaults.FEE_BURN_PERCENT > 0 and defaults.FEE_RESERVE_PERCENT + defaults.FEE_BURN_PERCENT < 100
     finally:
         importlib.reload(defaults)
+
+
+def test_a_burst_of_shares_on_one_parent_is_not_all_checked(tmp_path, shares_on):
+    """A new network's easy start produced shares faster than nodes could check them;
+    they fell behind and took their peers for attackers. Past what a block can hold,
+    shares on the same parent are let go unchecked."""
+    big = Key.generate()
+    node = Node(str(tmp_path / "n"), make_genesis(big.address, "burst"), port=free_port(), miner_key=big,
+                log=lambda m: None)
+    node.start()
+    try:
+        with node.lock:
+            share = make_share(node.chain, Key.generate())
+        fake = dict(share, transcript="00" * 32)             # work that does not check out
+        with pytest.raises(InvalidBlock):
+            node.submit_share(fake)                          # checked: the sender lied
+        with node.lock:
+            node._shares_on[share["prev"]] = params.MAX_BLOCK_SHARES
+        assert node.submit_share(fake) is None               # parent full: not even checked
+        with node.lock:
+            node._shares_on.clear()
+        assert node.submit_share(share) == share_id(share) and node._shares_on == {share["prev"]: 1}
+    finally:
+        node.stop()
+
+
+def test_a_network_chooses_its_starting_difficulty(monkeypatch):
+    key = Key.generate()
+    g = make_genesis(key.address, "harder", target=params.MAX_TARGET // 8)
+    chain = Chain(g, BlobStore())
+    assert chain.initial_target == params.MAX_TARGET // 8 == chain.expected_target(chain.tip)
+    add(chain, key)                                          # blocks are mined at that difficulty
+    assert target_of(chain.tip_header()) == params.MAX_TARGET // 8
+    monkeypatch.setattr(params, "INITIAL_TARGET", params.MAX_TARGET // 16)
+    with pytest.raises(InvalidBlock):
+        Chain(g, BlobStore())                                # easier than the protocol allows
+    with pytest.raises(ValueError):
+        make_genesis(key.address, "easy", target=params.MAX_TARGET // 8)

@@ -2,6 +2,14 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## 0.23.2
+
+- **Found on the local network: the network split in two within five minutes of starting.** A new network starts at a difficulty of ~200 work units a block, so with three GPU miners blocks came every second, and with 128 shares a block (since v0.23) more than 100 shares a second. The buyers' nodes, busy checking bought compute, could not keep up, took their honest peers for attackers ("flooding faster than it can be processed") and banned them for 24 hours: carol and erin went on alone at block 181 while the miners reached 275. Three fixes:
+  - A node that falls behind drops shares, transactions and offers (the network carries them again) instead of blaming the peer; only blocks and headers count. (`test_a_node_that_falls_behind_drops_shares_instead_of_blaming_peers`.)
+  - A node checks and relays at most MAX_BLOCK_SHARES (256) shares on the same parent block: more could never be paid, and only a burst produces them. (`test_a_burst_of_shares_on_one_parent_is_not_all_checked`.)
+  - A network chooses its starting difficulty in its genesis block (never easier than INITIAL_TARGET): `grn genesis --units-per-block N`, and the local network starts at 10,000 units a block, so it no longer pays out its first hour's coins in minutes. (`test_a_network_chooses_its_starting_difficulty`.)
+- Both tests fail without their fix.
+
 ## 0.23.1
 
 - A node that was killed (or crashed) left its 8 block-checking worker processes running, idle, holding its log file open: 40 of them had been left by local-network nodes stopped hours earlier. Workers now exit as soon as the node that started them is gone. (`test_workers_die_with_a_killed_node`, which fails without the fix.)

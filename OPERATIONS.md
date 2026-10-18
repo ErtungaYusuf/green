@@ -67,11 +67,11 @@ To start a new network:
 
 1. On the first computer, mine the genesis block and start a node that others can reach:
    ```bash
-   grn --data node genesis "my network"
    grn --data node wallet create
+   grn --data node genesis --msg "my network" --units-per-block 15000
    grn --data node node --mine --gpu --p2p-host 0.0.0.0 --portmap
    ```
-   `--p2p-host 0.0.0.0` accepts connections from other computers on the P2P port (8546; the HTTP API stays on this computer). `--portmap` asks a home router to forward the port; otherwise forward 8546/tcp by hand and allow it in the firewall.
+   `--units-per-block` sets the starting difficulty to what the first miners do in 15 s (units per second from `grn status`, times 15), so blocks do not rush out while the difficulty catches up. `--p2p-host 0.0.0.0` accepts connections from other computers on the P2P port (8546; the HTTP API stays on this computer). `--portmap` asks a home router to forward the port; otherwise forward 8546/tcp by hand and allow it in the firewall.
 2. Give the other computers `node/genesis.json` (it is public: it only names the network) and the first computer's address.
 3. On each other computer:
    ```bash

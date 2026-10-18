@@ -202,6 +202,7 @@ class Node:
         self._task_inflight: dict[str, dict] = {}
         self._own_waiting: dict[tuple, int] = {}   # (sender, nonce) of our pending protocol tx -> height first seen
         self.share_pool: dict[str, dict] = {}      # share id -> share (SPEC.md §3.5), for our templates
+        self._shares_on: dict[str, int] = {}        # parent block -> shares held that were mined on it
         self._share_cache: tuple = (None, -1, [])  # (tip, pool version, candidates)
         self._share_version = 0
         self._template = None                      # (key, made, header, txs, shares, share version)
@@ -460,6 +461,11 @@ class Node:
         with self.lock:
             if sid in self.share_pool:
                 return None
+            if self._shares_on.get(share.get("prev"), 0) >= params.MAX_BLOCK_SHARES:
+                # More shares on one parent than a block can hold come only from a burst
+                # (a new network's easy start); checking and relaying them all would swamp
+                # every node, and they could not all be paid anyway.
+                return None
             state = self.chain.state
             problem = self.chain.share_problem(share, self.chain.tip, state.share_seen)
             job = share["work"]["job"] if problem is None else None
@@ -476,12 +482,24 @@ class Node:
             except MissingData:
                 return None
         with self.lock:
+            if sid in self.share_pool:                   # another peer's copy got here first
+                return None
             self.share_pool[sid] = share
+            self._shares_on[share["prev"]] = self._shares_on.get(share["prev"], 0) + 1
             while len(self.share_pool) > MAX_SHARE_POOL:
-                del self.share_pool[min(self.share_pool, key=lambda k: self.share_pool[k]["height"])]
+                self._drop_share(min(self.share_pool, key=lambda k: self.share_pool[k]["height"]))
             self._share_version += 1
         self.p2p.announce_share(sid, share, source)
         return sid
+
+    def _drop_share(self, sid: str) -> None:
+        """Forget a share (under self.lock)."""
+        prev = self.share_pool.pop(sid)["prev"]
+        left = self._shares_on.get(prev, 1) - 1
+        if left > 0:
+            self._shares_on[prev] = left
+        else:
+            self._shares_on.pop(prev, None)
 
     def share_candidates(self) -> list:
         """Shares a block on our tip may include (oldest first: they expire first), at most MAX_BLOCK_SHARES."""
@@ -497,7 +515,7 @@ class Node:
                         and (job is None or job in state.jobs):
                     keep.append(sh)
                 elif sh["height"] <= self.chain.height - params.SHARE_WINDOW + 1 or sid in state.share_seen:
-                    del self.share_pool[sid]         # it can never be included any more
+                    self._drop_share(sid)            # it can never be included any more
             keep.sort(key=lambda sh: sh["height"])
             keep = keep[:params.MAX_BLOCK_SHARES]
             self._share_cache = (self.chain.tip, self._share_version, keep)

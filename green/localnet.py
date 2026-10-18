@@ -31,6 +31,13 @@ import urllib.error
 import urllib.request
 
 from . import params
+
+# The starting difficulty: work units a block takes. Three miners on a GPU at half
+# intensity do ~1,000 units/s, 15,000 per 15 s block; starting at the network-wide
+# default (~200 units) made blocks come every second for the first hour, paid out
+# that hour's coins in minutes and swamped the nodes with shares. The difficulty
+# still adjusts from here (ASERT), down for CPU-only machines.
+START_UNITS_PER_BLOCK = 10_000
 from .chain import block_hash, make_genesis
 from .node import http_get, http_post
 
@@ -91,7 +98,7 @@ def load(root: str) -> dict | None:
     return net
 
 
-def create(root: str, base_port: int = BASE_PORT, log=print) -> dict:
+def create(root: str, base_port: int = BASE_PORT, log=print, units_per_block: int = START_UNITS_PER_BLOCK) -> dict:
     """Wallets, a genesis block and the plan of the network. Carol mines the genesis
     block, so she starts with its reward and can buy compute at once."""
     from .cli import create_wallet
@@ -106,7 +113,8 @@ def create(root: str, base_port: int = BASE_PORT, log=print) -> dict:
                        "p2p": base_port + 101 + i, "compute": base_port + 201 + i if p["price"] else None})
     carol = next(p for p in people if p["name"] == "carol")
     log(f"Mining the genesis block of a new local network (reward to carol, {carol['address'][:16]}...)")
-    genesis = make_genesis(carol["address"], f"Green local network, {time.strftime('%Y-%m-%d %H:%M')}")
+    genesis = make_genesis(carol["address"], f"Green local network, {time.strftime('%Y-%m-%d %H:%M')}",
+                           target=min(params.INITIAL_TARGET, params.MAX_TARGET // max(1, units_per_block)))
     with open(os.path.join(root, "genesis.json"), "w", encoding="utf-8") as f:
         json.dump(genesis, f, indent=2)
     net = {"genesis": block_hash(genesis), "created": int(time.time()), "personas": people}
@@ -178,14 +186,15 @@ def _spawn(cmd: list[str], log_path: str) -> subprocess.Popen:
         out.close()
 
 
-def start(root: str, gpu: bool = True, base_port: int = BASE_PORT, log=print, intensity: int = 50) -> dict:
+def start(root: str, gpu: bool = True, base_port: int = BASE_PORT, log=print, intensity: int = 50,
+          units_per_block: int = START_UNITS_PER_BLOCK) -> dict:
     net = load(root)
     if net is None:
         taken = [base_port + 1 + i for i in range(len(PERSONAS)) if _answers({"api": base_port + 1 + i})]
         if taken:
             raise LocalnetError(f"port {taken[0]} is another network's node (another localnet folder?): stop it, "
                                 f"or use --base-port for a network of your own")
-        net = create(root, base_port, log)
+        net = create(root, base_port, log, units_per_block)
     started = {}
     for p in net["personas"]:
         if node_status(net, p) is not None:

@@ -623,3 +623,18 @@ def test_a_dns_seed_gives_many_addresses():
     def fails(*a, **k):
         raise OSError("no such name")
     assert seed_hosts("seed.example", 8546, resolve=fails) == []
+
+
+def test_a_node_that_falls_behind_drops_shares_instead_of_blaming_peers():
+    """Busy nodes counted honest peers' shares as flooding and banned them: the network split."""
+    import threading
+    from types import SimpleNamespace
+    from green.p2p import MAX_PEER_QUEUE, P2P
+    blamed = []
+    me = SimpleNamespace(stats={}, _flooded=blamed.append, _ready=None)
+    peer = SimpleNamespace(lock=threading.Lock(), in_q=[("x", b"")] * MAX_PEER_QUEUE, scheduled=True)
+    for cmd in ("share", "tx", "dtx", "offers"):
+        P2P._receive(me, peer, cmd, b"{}")
+    assert blamed == [] and me.stats["dropped_when_busy"] == 4
+    P2P._receive(me, peer, "headers", b"{}")              # what cannot be dropped still counts
+    assert blamed == [peer]

@@ -320,7 +320,10 @@ def cmd_genesis(args):
         if interactive and nonce % 25 == 0:
             print(f"  {nonce + 1} work units tried...", end="\r", flush=True)
 
-    genesis = make_genesis(address, args.msg, on_try=progress)
+    target = params.INITIAL_TARGET
+    if args.units_per_block:
+        target = min(target, params.MAX_TARGET // args.units_per_block)
+    genesis = make_genesis(address, args.msg, on_try=progress, target=target)
     with open(path, "w") as f:
         json.dump(genesis, f, indent=2)
     if interactive:
@@ -631,7 +634,8 @@ def cmd_localnet(args):
     try:
         if args.action == "start":
             print(f"Local network in {args.dir}:")
-            localnet.start(args.dir, gpu=not args.cpu, base_port=args.base_port, intensity=args.intensity)
+            localnet.start(args.dir, gpu=not args.cpu, base_port=args.base_port, intensity=args.intensity,
+                           units_per_block=args.units_per_block)
             print()
             localnet.print_status(localnet.status(args.dir), args.dir)
         elif args.action == "status":
@@ -1039,6 +1043,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("genesis", help="start a new network: mine the genesis block")
     s.add_argument("--msg", required=True, help="message written into the genesis block")
+    s.add_argument("--units-per-block", type=int, metavar="N",
+                   help="starting difficulty: about N work units a block (the miners' units/s times 15); "
+                        "the genesis block itself takes this much work to find")
     s.add_argument("--force", action="store_true")
     s.set_defaults(fn=cmd_genesis)
 
@@ -1150,6 +1157,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="each miner mines this percent of the time (default 50: three miners share one GPU)")
     s.add_argument("--base-port", type=int, default=18500,
                    help="ports used: base+1.. (API), base+101.. (P2P), base+201.. (compute); default 18500")
+    s.add_argument("--units-per-block", type=int, default=10_000, metavar="N",
+                   help="starting difficulty of a new network, in work units a block (default 10000)")
     s.set_defaults(fn=cmd_localnet)
 
     ms = sub.add_parser("multisig", help="k-of-n accounts").add_subparsers(dest="ms_cmd", required=True)

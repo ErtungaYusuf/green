@@ -212,13 +212,20 @@ def pay_block(s: State, hdr: dict, fees: int, shares: list) -> None:
         s.burned += burn
 
 
-def make_genesis(miner: str, msg: str, timestamp: int | None = None, on_try=None) -> dict:
-    """Mine the genesis block. It pays the first block's reward to `miner`."""
+def make_genesis(miner: str, msg: str, timestamp: int | None = None, on_try=None,
+                 target: int | None = None) -> dict:
+    """Mine the genesis block. It pays the first block's reward to `miner`. `target` is
+    the network's starting difficulty (at most INITIAL_TARGET, i.e. never easier): a
+    network that knows its miners starts where blocks come every 15 s, instead of
+    paying out its first hours' coins in minutes while the difficulty catches up."""
+    target = params.INITIAL_TARGET if target is None else target
+    if not 0 < target <= params.INITIAL_TARGET:
+        raise ValueError("the starting target must be positive and no easier than INITIAL_TARGET")
     blobs = BlobStore()
     first = initial_state().copy()
     header = {
         "version": versionbits.TOP_BITS, "height": 0, "prev": ZERO_HASH, "time": int(timestamp or time.time()),
-        "target": fmt_target(params.INITIAL_TARGET), "tx_root": merkle_root([]), "shares_root": merkle_root([]),
+        "target": fmt_target(target), "tx_root": merkle_root([]), "shares_root": merkle_root([]),
         "miner": miner, "work": {"job": None, "unit": None}, "nonce": 0, "msg": msg[:MAX_MSG_LEN],
     }
     pay_block(first, header, 0, [])
@@ -227,7 +234,7 @@ def make_genesis(miner: str, msg: str, timestamp: int | None = None, on_try=None
         transcript, ticket, _ = solve(header, blobs)
         if on_try:
             on_try(header["nonce"])
-        if ticket <= params.INITIAL_TARGET:
+        if ticket <= target:
             header["transcript"] = transcript
             return {"header": header, "txs": []}
         header["nonce"] += 1
@@ -341,13 +348,14 @@ class Chain:
         self.genesis_hash = g
         self.chain_id = g
         self.genesis = genesis
+        self.initial_target = target_of(genesis["header"])   # the network's starting difficulty
         if store is not None and store.get_meta("genesis") is not None:
             if store.get_meta("genesis") != g:
                 raise ValueError("this data directory belongs to another network (different genesis)")
             self._open(store)
             return
         self.blocks[g] = genesis
-        self.meta[g] = {"height": 0, "chainwork": work_for_target(params.INITIAL_TARGET)}
+        self.meta[g] = {"height": 0, "chainwork": work_for_target(self.initial_target)}
         base = self.apply_block(initial_state(), genesis).flattened()
         self.states[g] = base
         self.base_hash, self.base_height = g, 0
@@ -494,7 +502,7 @@ class Chain:
         interval before it), so block 1 has the genesis target."""
         prev = (lookup or self.header)(prev_hash)
         anchor_time = self.genesis["header"]["time"] - params.TARGET_BLOCK_SECONDS
-        return asert(params.INITIAL_TARGET, anchor_time, 0, prev["time"], prev["height"], params.ASERT_HALFLIFE)
+        return asert(self.initial_target, anchor_time, 0, prev["time"], prev["height"], params.ASERT_HALFLIFE)
 
     # -- validation --
 
@@ -557,7 +565,7 @@ class Chain:
         self._check_header_format(hdr)
         if hdr["height"] != 0 or hdr["prev"] != ZERO_HASH or genesis["txs"]:
             raise InvalidBlock("bad genesis")
-        if target_of(hdr) != params.INITIAL_TARGET or hdr["work"]["job"] is not None:
+        if not 0 < target_of(hdr) <= params.INITIAL_TARGET or hdr["work"]["job"] is not None:
             raise InvalidBlock("bad genesis")
         self._check_ticket(hdr, None)
 

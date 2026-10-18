@@ -39,7 +39,8 @@ def grn(*args, timeout=240):
 
 def test_five_people_start_a_network_buy_and_sell_and_stop(tmp_path):
     root, base = str(tmp_path / "ln"), free_base()
-    r = grn("localnet", "start", "--dir", root, "--base-port", str(base))
+    # An easy start (the default suits three GPU miners at 15 s a block): coins to buy in seconds.
+    r = grn("localnet", "start", "--dir", root, "--base-port", str(base), "--units-per-block", "300")
     assert r.returncode == 0, r.stdout + r.stderr
     net = localnet.load(root)
     try:
@@ -93,7 +94,7 @@ def test_reset_deletes_only_a_local_network(tmp_path):
         localnet.reset(str(real), log=lambda m: None)
     assert (real / "wallet.json").exists()
     ln = str(tmp_path / "ln")
-    localnet.create(ln, base_port=free_base(), log=lambda m: None)
+    localnet.create(ln, base_port=free_base(), log=lambda m: None, units_per_block=1)
     localnet.reset(ln, log=lambda m: None)
     assert not os.path.exists(ln)
     localnet.reset(ln, log=lambda m: None)                     # nothing there: nothing to do
@@ -103,7 +104,7 @@ def test_a_network_made_with_a_relative_path_works_from_anywhere(tmp_path, monke
     """`grn localnet start` in one folder, `grn app --localnet` from another."""
     from green import app as appmod
     monkeypatch.chdir(tmp_path)
-    localnet.create("ln", base_port=free_base(), log=lambda m: None)
+    localnet.create("ln", base_port=free_base(), log=lambda m: None, units_per_block=1)
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
