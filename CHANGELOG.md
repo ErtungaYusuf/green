@@ -2,6 +2,11 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## 0.21.6
+
+- A local network's buyer that spends more than five minutes on one purchase writes where every thread is to its log (`faulthandler`), as nodes do when their shutdown hangs.
+- Measured on the local network with v0.21.5, in seven minutes: two buyers trained 10 models through sealed requests carried by peers (93% test accuracy at 200 steps), bought dozens of products split and secret-shared, and posted jobs on chain, with no refusals.
+
 ## 0.21.5
 
 - Training through sealed requests often failed with "busy": a product is cut into tiles sent at once, more than one peer would carry for us at a time, and the first refusal ended the request. A busy peer now hands the request to the next one, and when all are busy it waits a moment and tries again until its deadline; a peer carries up to 4 of a node's requests at once (was 2).

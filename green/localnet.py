@@ -19,6 +19,7 @@ network is for trying things out, and its coins are worth nothing.
 `grn app --localnet` opens the app on it: mine, send coins, buy compute.
 """
 
+import faulthandler
 import json
 import os
 import shutil
@@ -346,6 +347,7 @@ def print_status(rows: list[dict], root: str) -> None:
 # --- the buyers ------------------------------------------------------------------------
 
 BUYER_GRACE = 15            # a buyer process ends once its node has been gone this long
+BUYER_STUCK = 300           # ...and reports where it is if one purchase takes longer than this
 LOW_BALANCE = params.YAPRAK_PER_COIN // 2      # below this a buyer buys coins from a miner...
 COINS_BOUGHT = 3 * params.YAPRAK_PER_COIN      # ...this many
 JOB_PRICE = params.YAPRAK_PER_COIN // 500      # per unit, for jobs posted on chain
@@ -386,11 +388,15 @@ def run_buyer(root: str, name: str) -> None:
             time.sleep(1)
             continue
         gone = None
+        # A purchase that takes over BUYER_STUCK seconds writes every thread's stack to the log.
+        faulthandler.dump_traceback_later(BUYER_STUCK, file=sys.stdout)
         try:
             _buy_once(app, me, net, stats, rng)
         except Exception as e:                   # keep going: the network is allowed to be busy
             _say(f"could not buy this time: {appmod.describe(e)}")
             time.sleep(10)
+        finally:
+            faulthandler.cancel_dump_traceback_later()
         with open(stats_path + ".tmp", "w", encoding="utf-8") as f:
             json.dump(stats, f)
         os.replace(stats_path + ".tmp", stats_path)
