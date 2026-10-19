@@ -231,3 +231,21 @@ def test_the_share_cap_drops_almost_nothing():
     lost = (1 - 1 / params.SHARE_FACTOR) ** nodemod.MAX_SHARES_PER_PARENT     # share of income dropped
     assert lost < 0.001
     assert nodemod.MAX_SHARE_POOL >= params.SHARE_FACTOR * params.SHARE_WINDOW     # the window's shares fit
+
+
+def test_a_node_that_does_not_mine_forgets_old_shares(tmp_path, shares_on):
+    big = Key.generate()
+    node = Node(str(tmp_path / "n"), make_genesis(big.address, "forget"), port=free_port(), miner_key=big,
+                log=lambda m: None)
+    node.start()                                             # not mining
+    try:
+        with node.lock:
+            share = make_share(node.chain, Key.generate())
+        assert node.submit_share(share) == share_id(share)
+        for _ in range(params.SHARE_WINDOW + 1):
+            with node.lock:
+                block, _ = mine(node.chain, big)
+            assert node.submit_block(block, relay=False) == "added"
+        assert node.share_pool == {} and node._shares_on == {}
+    finally:
+        node.stop()

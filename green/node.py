@@ -31,7 +31,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import params, sealed, tx as txmod, work
+from . import crypto as crypto_mod, params, sealed, tx as txmod, work
 from .chain import (BlobStore, Chain, InvalidBlock, MissingData, block_hash, fee_rate, seed_of, share_id,
                     target_of,
                     work_inputs)
@@ -102,6 +102,36 @@ def thread_stacks(frames: int = 12) -> dict:
     names = {t.ident: t.name for t in threading.enumerate()}
     return {names.get(tid, str(tid)): traceback.format_stack(frame)[-frames:]
             for tid, frame in sys._current_frames().items()}
+
+
+def memory_report(node) -> dict:
+    """What a node holds in memory, for finding growth (admin only): Python's allocated
+    blocks, the most common object types, and the sizes of the node's own collections."""
+    import collections
+    import gc
+    import sys
+    gc.collect()
+    kinds = collections.Counter(type(o).__name__ for o in gc.get_objects())
+    chain, p2p = node.chain, node.p2p
+    sizes = {"blocks": len(chain.blocks), "meta": len(chain.meta), "states": len(chain.states),
+             "verified_shares": len(chain.verified_shares), "verified_results": len(chain.verified_results),
+             "invalid": len(chain.invalid), "prechecked": len(chain.prechecked), "share_pool": len(node.share_pool),
+             "mempool": len(node.mempool), "batch_buf": len(node.batch_buf), "my_batches": len(node.my_batches),
+             "jobs_in_state": len(chain.state.jobs), "addresses": len(p2p.addrman), "peers": len(p2p.all_peers()),
+             "rejected": len(p2p.rejected), "tx_wait": len(p2p.tx_wait), "requested": len(p2p.requested),
+             "stempool": len(p2p.stempool), "sig_cache": len(crypto_mod._good_sigs)}
+    out = {"python_blocks": sys.getallocatedblocks(), "objects": sum(kinds.values()),
+           "top_types": dict(kinds.most_common(15)), "sizes": sizes}
+    import tracemalloc
+    if tracemalloc.is_tracing():                     # (PYTHONTRACEMALLOC=n): what grew since the last call,
+        snap = tracemalloc.take_snapshot()           # numpy's buffers included
+        prev, node._mem_snapshot = getattr(node, "_mem_snapshot", None), snap
+        out["traced_mb"] = round(tracemalloc.get_traced_memory()[0] / 2**20, 1)
+        if prev is not None:
+            out["grew"] = [{"kb": round(st.size_diff / 1024), "count": st.count_diff,
+                            "where": st.traceback.format()[-6:]}
+                           for st in snap.compare_to(prev, "traceback")[:12]]
+    return out
 
 
 def tx_role(t: dict, addr: str) -> str | None:
@@ -551,9 +581,18 @@ class Node:
                     self._restore_disconnected(abandoned)
                     self.log(f"[reorg] new heaviest chain, height {hdr['height']}")
                 self._rebuild_pending()
+                self._prune_shares()
                 self.p2p.on_new_tip()
                 self.tip_changed.notify_all()
             return status
+
+    def _prune_shares(self) -> None:
+        """Forget shares that can no longer be included: too old, or in a block (under
+        self.lock). Miners also do it when they build a template; a node that does not
+        mine kept every share it heard until its pool was full."""
+        floor, seen = self.chain.height - params.SHARE_WINDOW + 1, self.chain.state.share_seen
+        for sid in [s for s, sh in self.share_pool.items() if sh["height"] <= floor or s in seen]:
+            self._drop_share(sid)
 
     def _restore_disconnected(self, abandoned: list[str]) -> None:
         """After a reorg, put the transactions of abandoned blocks back in the mempool.
@@ -1710,12 +1749,14 @@ def make_handler(node: Node):
             q = parse_qs(u.query)
             if parts == ["status"]:
                 return self._send(200, node.status())
-            if parts[:1] == ["debug"] and parts[1:] in (["threads"], ["process"]):
+            if parts[:1] == ["debug"] and parts[1:] in (["threads"], ["process"], ["memory"]):
                 # For diagnosing a node that hangs, and for launchers (admin only).
                 if not (self._local() and self.headers.get(CLIENT_HEADER) and names_this_machine(self.headers.get("Host"))):
                     return self._send(403, {"error": f"admin endpoint: only from this machine, with an {CLIENT_HEADER} header"})
                 if parts[1] == "process":
                     return self._send(200, {"pid": os.getpid()})
+                if parts[1] == "memory":
+                    return self._send(200, memory_report(node))
                 return self._send(200, thread_stacks())
             if parts == ["supply"]:
                 return self._send(200, node.supply())

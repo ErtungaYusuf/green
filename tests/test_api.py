@@ -127,3 +127,31 @@ def test_log_file_gets_the_messages(tmp_path):
         h.close()
         logger.removeHandler(h)
     assert logging.getLogger("green").handlers == []
+
+
+def test_the_memory_report_is_for_this_machine_only(tmp_path):
+    import json as _json
+    import urllib.error
+    import urllib.request
+    from green.chain import make_genesis
+    from green.crypto import Key
+    from green.node import Node
+    key = Key.generate()
+    n = Node(str(tmp_path / "n"), make_genesis(key.address, "mem"), port=_free_port(), miner_key=key, log=lambda m: None)
+    n.start()
+    try:
+        req = urllib.request.Request(f"{n.url}/debug/memory", headers={"X-Green-Client": "1"})
+        r = _json.loads(urllib.request.urlopen(req, timeout=30).read())
+        assert r["python_blocks"] > 0 and "dict" in r["top_types"] and r["sizes"]["blocks"] == 1
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(f"{n.url}/debug/memory", timeout=30)     # no admin header
+        assert e.value.code == 403
+    finally:
+        n.stop()
+
+
+def _free_port():
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]

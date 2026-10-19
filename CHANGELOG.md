@@ -2,6 +2,11 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## 0.23.4
+
+- A node that does not mine never pruned its share pool (miners prune it when they build a block template): it filled to 16,384 shares (~50 MB on the local network's buyers) and then searched the whole pool for every new share. Every node now forgets shares that can no longer be included whenever its tip changes. (`test_a_node_that_does_not_mine_forgets_old_shares`, which fails without the fix.)
+- `GET /debug/memory` (admin, this machine only): Python's allocated blocks, the commonest object types and the sizes of the node's collections; with `PYTHONTRACEMALLOC` set, what grew since the last call, numpy's buffers included. Used to watch the local network's nodes for hours.
+
 ## 0.23.3
 
 Checked end to end before publishing:
