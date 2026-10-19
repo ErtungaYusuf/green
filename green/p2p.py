@@ -76,7 +76,7 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF, HKDFExpand
 
 from . import params, sealed, snapshot, tx as txmod, work
-from .chain import (MAX_JOB_BLOB, InvalidBlock, MissingData, block_hash, seed_of, share_id, target_of,
+from .chain import (MAX_JOB_BLOB, InvalidBlock, InvalidCheckpoint, MissingData, block_hash, seed_of, share_id, target_of,
                     work_for_target)
 from .crypto import address_of, canonical, hhex, is_hex, merkle_root
 from .crypto import verify as crypto_verify
@@ -84,7 +84,7 @@ from .tx import InvalidTx
 from .verify import ProcessChecker
 
 PROTOCOL_VERSION = 1
-AGENT = "green/0.23.4"
+AGENT = "green/0.24.0"
 
 MAX_OUTBOUND = 8               # outbound connections the node keeps
 BLOCK_RELAY_ONLY = 2           # ...of which relay blocks only
@@ -144,7 +144,7 @@ OFFER_TTL = 3600               # an offer older than this is dropped; providers 
 OFFER_MIN_BALANCE = 10_000_000  # yaprak a provider must hold for its offer to be relayed (0.1 GRN)
 OFFERS_PER_MESSAGE = 100
 OFFER_RATE = 0.2               # offers accepted per second per peer, after a burst of MAX_OFFERS
-FEATURES = ["dtx", "cmpct", "offers", "shares", "relay"]   # optional messages this node understands
+FEATURES = ["dtx", "cmpct", "offers", "shares", "relay", "checkpoints"]   # optional messages this node understands
 RELAY_SLOTS = 8                # sealed requests this node carries for others at once (green/sealed.py)...
 RELAY_PER_PEER = 4             # ...for any one peer
 RELAY_BYTES_PER_MINUTE = 256 * 1024 * 1024
@@ -152,7 +152,7 @@ RELAY_SECONDS = 150
 
 CMDS = ["version", "ping", "pong", "getaddr", "addr", "inv", "getdata", "notfound", "tx", "block",
         "getheaders", "headers", "getblob", "blob", "noblob", "getmempool", "getsnapinfo", "snapinfo",
-        "dtx", "cmpct", "getblocktxn", "blocktxn", "offers", "share", "relay", "relayed"]
+        "dtx", "cmpct", "getblocktxn", "blocktxn", "offers", "share", "relay", "relayed", "checkpoint"]
 BINARY = {"blob", "relay", "relayed"}          # raw payloads, not JSON
 CODE = {name: i + 1 for i, name in enumerate(CMDS)}
 NAME = {i: name for name, i in CODE.items()}
@@ -1100,6 +1100,11 @@ class P2P:
             offers = self.offer_list()
             for i in range(0, len(offers), OFFERS_PER_MESSAGE):
                 peer.send("offers", {"offers": offers[i:i + OFFERS_PER_MESSAGE]})
+        if "checkpoints" in peer.features:
+            with self.node.lock:
+                known = [c for c in (self.chain.checkpoint, self.chain.checkpoint_end) if c]
+            for cp in known:
+                peer.send("checkpoint", {"cp": cp})
         if peer.best_work > self._work_of(self.best):
             self._ask_headers(peer)
 
@@ -2242,6 +2247,53 @@ class P2P:
             self._path_for = None
             if self.best not in self.hindex and not self.chain.has_block(self.best):
                 self.best = max(list(self.hindex) + [self.chain.tip], key=self._work_of)
+
+    # -- checkpoints --
+
+    def announce_checkpoint(self, cp: dict, source: Peer | None = None) -> None:
+        for p in self.all_peers():
+            if p is not source and "checkpoints" in p.features:
+                p.send("checkpoint", {"cp": cp})
+
+    def _on_checkpoint(self, peer: Peer, m: dict) -> None:
+        try:
+            self.node.submit_checkpoint(m.get("cp"), source=peer)
+        except InvalidCheckpoint as e:
+            if "no checkpoints" not in str(e):           # a forgery, not a network that has none
+                raise Misbehaving(50, f"sent a bad checkpoint ({e})") from None
+
+    def on_checkpoint(self, cp: dict, source: Peer | None = None) -> None:
+        """A new checkpoint: forget the headers of chains that leave it out, and fetch the
+        checkpointed chain if we do not have its block yet."""
+        if cp.get("end"):
+            return
+        h, b = cp["height"], cp["block"]
+        with self.node.lock:
+            drop = []
+            for bh, e in self.hindex.items():
+                if e["header"]["height"] < h:
+                    continue
+                cur = bh
+                try:
+                    while self._lookup(cur)["height"] > h:
+                        cur = self._lookup(cur)["prev"]
+                except (KeyError, TypeError):
+                    continue
+                if cur != b:
+                    drop.append(bh)
+            for bh in drop:
+                del self.hindex[bh]
+                self.downloaded.pop(bh, None)
+            if drop:
+                self._path_for = None
+            if self.best not in self.hindex and not self.chain.has_block(self.best) or self.best in drop:
+                self.best = max(list(self.hindex) + [self.chain.tip], key=self._work_of)
+            missing = b not in self.chain.meta
+        if missing:
+            for p in ([source] if isinstance(source, Peer) else []) + self.all_peers():
+                p.headers_asked = 0.0
+                self._ask_headers(p)
+                break
 
     def on_new_tip(self) -> None:
         """Called by the node when its chain moves: keep `best` at least the tip."""

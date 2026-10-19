@@ -168,6 +168,15 @@ A deployment is `(name, bit, start, timeout, min_activation = 0, lock_in_on_time
 
 A rule added by a deployment applies to blocks whose state is ACTIVE and must only make fewer blocks valid. Unknown signal bits are valid. The example deployment `testdummy`, scheduled only on test networks, limits a header's `msg` to 100 characters while ACTIVE.
 
+### 5.6 Checkpoints (optional, for a young network)
+
+A network may name a checkpoint authority in its genesis message: the text `checkpoints <K> until <U>`, with `K` an Ed25519 public key (64 lowercase hex) and `U` a block height (the first match counts). Without it there are no checkpoints and §5.3 alone decides. With it:
+
+- A **checkpoint** is `{"height": h, "block": hash, "sig"}` with `sig = Ed25519(K, C(["green-checkpoint", chain_id, h, hash]))`, `1 <= h <= U`. The **end** is `{"end": true, "sig"}` with `sig = Ed25519(K, C(["green-checkpoint-end", chain_id]))`; after it no checkpoint is taken, and the last one taken stays.
+- A node keeps the checkpoint with the greatest height it has taken (and the end, if any) and passes new ones on. A checkpoint whose block the node knows must descend from the previous checkpoint's block, or it is refused.
+- While a node holds a checkpoint `(h, hash)`, a header at height `h` must have that hash, and a block above `h` must have it as its ancestor at `h`: no chain that leaves out the latest checkpoint is valid, whatever its chainwork. A new checkpoint whose block is on a side branch moves the node's tip to the most-work block descending from it.
+- The authority's node signs the block `CHECKPOINT_DEPTH` (3) below its tip every `CHECKPOINT_EVERY` (4) blocks. A majority of the work can then rewrite at most the blocks after the latest checkpoint, about a minute and a half, instead of MAX_REORG_DEPTH. The authority cannot make an invalid block valid, move coins or create them; it only chooses which valid chain is final, and only until `U` or the end.
+
 ## 6. Blocks
 
 A block is `{"header", "txs"}` plus `"shares"` when it includes any. It is valid if its header is valid (§5), its transactions match `tx_root` and its shares `shares_root`, its shares are valid (§3.5), it has at most MAX_BLOCK_TXS transactions with distinct txids, `len(C(txs)) <= MAX_BLOCK_BYTES` and at most MAX_BLOCK_SIGS signatures in total (1 per single-key transaction, `k` per multisig one, plus 1 per channel claim for its voucher), a job named in `work` exists in the parent state, every transaction applies in order (§3) followed by the events of §3.3, and the root of the resulting state equals `state_root` (§6.1). The genesis block has height 0, no transactions, no shares, filler work and a target `0 < target <= INITIAL_TARGET` (the network's starting difficulty, chosen when it is made); it is applied to the state whose reserve is TOTAL_SUPPLY and pays its finder's part (§3.5).
@@ -224,7 +233,7 @@ Not consensus: it decides how nodes talk, not which chain is valid. Default port
 2. Both compute the X25519 shared secret (all zeros is refused) and `okm = HKDF-SHA256(ikm = secret, salt = "grn-p2p-v1" ‖ genesis hash (32 bytes), info = initiator key ‖ responder key, 160 bytes)`, split into five 32-byte values: initiator→responder length key, initiator→responder body key, the same two responder→initiator, and the session id.
 3. A frame is `ChaCha20-Poly1305(length key, n, uint32_LE(len(body)))` (20 bytes) followed by `ChaCha20-Poly1305(body key, n, body)`, where the nonce `n` is 4 zero bytes ‖ uint64_LE(frame counter). After REKEY_FRAMES frames in a direction both of its keys become `HKDF-Expand-SHA256(key, "grn-p2p-rekey", 32)` and the counter restarts at 0.
 4. A body is one byte of message type followed by the payload: canonical JSON for every message except `blob`, whose payload is the raw blob.
-5. The first frame each way is `version`: `{"proto": 1, "agent", "id": node public key, "sig", "port": listening port or 0, "relay": wants transaction announcements, "height", "tip", "work": chainwork as a decimal string, "you": the address the sender sees for the receiver, "time", "first": lowest height it has block bodies for, "features": optional messages it understands}`. Features are `"dtx"` (message 19), `"cmpct"` (20 to 22), `"offers"` (23), `"shares"` (24) and `"relay"` (25, 26); a `cmpct` carries the block's shares whole; a node sends an optional message only to a peer that listed it, and ignores features it does not know. `sig = Ed25519(node key, "grn-p2p-auth-v1" ‖ session id ‖ ("I" if the sender initiated, else "R"))`. A connection is up once each side has checked the other's signature. Peers given as `<id>@host:port` must present that id.
+5. The first frame each way is `version`: `{"proto": 1, "agent", "id": node public key, "sig", "port": listening port or 0, "relay": wants transaction announcements, "height", "tip", "work": chainwork as a decimal string, "you": the address the sender sees for the receiver, "time", "first": lowest height it has block bodies for, "features": optional messages it understands}`. Features are `"dtx"` (message 19), `"cmpct"` (20 to 22), `"offers"` (23), `"shares"` (24), `"relay"` (25, 26) and `"checkpoints"` (27); a `cmpct` carries the block's shares whole; a node sends an optional message only to a peer that listed it, and ignores features it does not know. `sig = Ed25519(node key, "grn-p2p-auth-v1" ‖ session id ‖ ("I" if the sender initiated, else "R"))`. A connection is up once each side has checked the other's signature. Peers given as `<id>@host:port` must present that id.
 
 A node on another network derives different keys and fails at the first frame.
 
@@ -248,6 +257,7 @@ A node on another network derives different keys and fails at the first frame.
 | 21 `getblocktxn`, 22 `blocktxn` | `{"block", "idx": [indexes]}`, `{"block", "txs": [...]}` | the transactions of a compact block the receiver could not find, in the order asked |
 | 24 `share` | `{"share": header}` | a share (§3.5), checked (its work unit recomputed) before it is passed on; a fake one gets the sender banned |
 | 23 `offers` | `{"offers": [offer, ...]}` (at most 100) | providers selling compute (§12): `{"provider", "pub", "url", "price", "max_dim", "credit", "time", "sig"}` and since v0.21 optionally `"kx"` (the provider's X25519 key for sealed requests, 64 hex digits), `sig = Ed25519(pub, C(["grn-offer", chain_id, offer without sig]))`, `provider = address(pub)` |
+| 27 `checkpoint` | `{"cp": checkpoint or end}` | a checkpoint of the network's authority (§5.6), sent when the connection opens and whenever a newer one is taken; a forged one counts against the sender |
 | 25 `relay`, 26 `relayed` | raw: `id (8) ‖ len (1) ‖ provider address ‖ sealed request`; raw: `id (8) ‖ status (1: 0 carried, 1 refused) ‖ sealed answer or reason` | carry a sealed request (§12) to a provider on offer and bring back its answer; at most 4 MiB each way |
 
 ### 9.3 Behaviour of the reference node
@@ -271,6 +281,7 @@ A node on another network derives different keys and fails at the first frame.
 | FREIVALDS_PRIME, FREIVALDS_ROUNDS | 2^31 − 1, 4 |
 | TARGET_BLOCK_SECONDS, ASERT_HALFLIFE | 15, 1,800 |
 | MAX_TARGET, INITIAL_TARGET | 2^256 − 1, MAX_TARGET / 200 |
+| CHECKPOINT_EVERY, CHECKPOINT_DEPTH (policy of the authority's node) | 4, 3 |
 | MTP_WINDOW, MAX_FUTURE_SECONDS, MAX_REORG_DEPTH | 11, 60, 100 |
 | SNAPSHOT_INTERVAL (not consensus) | 2,880 |
 | SIGNAL_PERIOD, SIGNAL_THRESHOLD | 20,160, 18,144 (90%) |

@@ -32,7 +32,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import crypto as crypto_mod, params, sealed, tx as txmod, work
-from .chain import (BlobStore, Chain, InvalidBlock, MissingData, block_hash, fee_rate, seed_of, share_id,
+from .chain import (BlobStore, Chain, InvalidBlock, InvalidCheckpoint, MissingData, checkpoint_bytes, block_hash, fee_rate, seed_of, share_id,
                     target_of,
                     work_inputs)
 from .crypto import Key, hhex, merkle_proof, merkle_root
@@ -188,6 +188,7 @@ class Node:
                  host: str = "127.0.0.1", peers=(), miner_key: Key | None = None, log=print,
                  use_gpu: bool = False, p2p_port: int = 0, listen: bool = True, seeds=None,
                  fast_sync: bool = False, p2p_host: str | None = None, no_signal=(), debug=None,
+                 checkpoint_key: Key | None = None,
                  prune: bool = False, prune_keep: int = prunemod.PRUNE_KEEP_BLOCKS, dandelion: bool = True,
                  portmap: bool = False, portmap_gateway: tuple | None = None, verify_processes: bool = True):
         self.data_dir = data_dir
@@ -196,6 +197,7 @@ class Node:
         self.url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '::') else host}:{port}"
         self.log = log
         self.debug = debug                        # optional: detailed P2P messages (log level "debug")
+        self.checkpoint_key = checkpoint_key      # the founder's: this node signs the network's checkpoints
         # A full node must run the exact wasmtime the network is pinned to; on any
         # other version it could judge a task challenge differently and fork.
         from . import wasm
@@ -584,7 +586,40 @@ class Node:
                 self._prune_shares()
                 self.p2p.on_new_tip()
                 self.tip_changed.notify_all()
+                self._sign_checkpoint()
             return status
+
+    def _sign_checkpoint(self) -> None:
+        """The founder's node: sign the block CHECKPOINT_DEPTH below the tip every
+        CHECKPOINT_EVERY blocks while the network's checkpoint period lasts (under self.lock)."""
+        key, chain = self.checkpoint_key, self.chain
+        if key is None or chain.authority is None or chain.authority[0] != key.pub_hex or chain.checkpoint_end:
+            return
+        height = chain.height - params.CHECKPOINT_DEPTH
+        last = chain.checkpoint["height"] if chain.checkpoint else 0
+        if height < 1 or height < last + params.CHECKPOINT_EVERY or height > chain.authority[1]:
+            return
+        block = chain.main[height]
+        cp = {"height": height, "block": block, "sig": key.sign(checkpoint_bytes(chain.chain_id, height, block))}
+        if chain.accept_checkpoint(cp):
+            self.p2p.announce_checkpoint(cp)
+
+    def submit_checkpoint(self, cp, source=None) -> bool:
+        """A signed checkpoint (or the end of checkpoints) from a peer or the API: True if
+        it is new (it is then passed on). Raises InvalidCheckpoint for a forgery."""
+        with self.lock:
+            old_tip = self.chain.tip
+            new = self.chain.accept_checkpoint(cp)
+            if new and self.chain.tip != old_tip:
+                self.log(f"[checkpoint] moved to the checkpointed chain, height {self.chain.height}")
+                self._restore_disconnected(self.chain.branch(old_tip))
+                self._rebuild_pending()
+                self._prune_shares()
+                self.tip_changed.notify_all()
+        if new:
+            self.p2p.on_checkpoint(cp, source)
+            self.p2p.announce_checkpoint(cp, source)
+        return new
 
     def _prune_shares(self) -> None:
         """Forget shares that can no longer be included: too old, or in a block (under
@@ -1358,6 +1393,9 @@ class Node:
                 "warnings": self.warnings(),
                 "pruned": self.prune, "first_block": self.chain.first_block,
                 "reserve": self.chain.state.reserve, "burned": self.chain.state.burned,
+                "checkpoint": ({k: self.chain.checkpoint[k] for k in ("height", "block")}
+                               if self.chain.checkpoint else None),
+                "checkpoints_ended": self.chain.checkpoint_end is not None,
                 "shares_waiting": len(self.share_pool),
                 "next_emission": dict(zip(("finder", "per_share", "inclusion_cut"),
                                           params.emission(self.chain.state.reserve))),
@@ -1760,6 +1798,9 @@ def make_handler(node: Node):
                 return self._send(200, thread_stacks())
             if parts == ["supply"]:
                 return self._send(200, node.supply())
+            if parts == ["checkpoint"]:
+                with node.lock:
+                    return self._send(200, node.chain.checkpoint_status())
             if parts == ["metrics"]:
                 data = node.metrics().encode()
                 self.send_response(200)
@@ -1888,6 +1929,11 @@ def make_handler(node: Node):
             body = json.loads(self._body(MAX_JSON_BYTES) or b"null")
             if parts == ["tx"]:
                 return self._send(200, {"txid": node.submit_tx(body)})
+            if parts == ["checkpoint"]:                # signed: anyone may pass one on
+                try:
+                    return self._send(200, {"new": node.submit_checkpoint(body)})
+                except InvalidCheckpoint as e:
+                    return self._send(400, {"error": str(e)})
             if parts == ["peers"]:
                 self._admin()
                 return self._send(200, {"added": node.p2p.add_manual(body["addr"])})

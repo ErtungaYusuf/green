@@ -10,6 +10,7 @@ A blockchain prototype where miners do AI work (integer matrix multiplication) i
 - **GPU miner** (WebGPU/Vulkan) on AMD/NVIDIA/Intel GPUs: ~1,300 work units per second on an RX 9070 XT, against ~480 on one CPU core.
 - **Instant compute through payment channels:** anyone can pay miners to multiply matrices or train a model, product by product, each result checked on arrival.
 - Nodes talk over an **encrypted, authenticated peer-to-peer protocol**; every block header **commits to the whole ledger**, so a new node can start from a verified snapshot.
+- **Protected while young:** a new network can start with its founder's checkpoints, so even a majority of the mining power cannot rewrite more than the last minute and a half; the founder ends them once the network is large.
 - Everything runs on this computer. By default a node listens only on `127.0.0.1`.
 
 Interfaces, each a page in your browser and each its own repository: [green-hub](https://github.com/ErtungaYusuf/green-hub) (wallet, buying compute and mining in one), [green-wallet](https://github.com/ErtungaYusuf/green-wallet) and [green-miner](https://github.com/ErtungaYusuf/green-miner).

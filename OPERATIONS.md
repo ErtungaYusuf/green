@@ -82,6 +82,23 @@ To start a new network:
 
 For a public network the release fills in `SEED_NODES` (params.py) with long-running nodes and DNS names (a DNS seed answers with the addresses of many healthy nodes), so a new node needs nothing but the software. Each person's wallet lives on their own computer: it signs transactions there, and coins can only be spent with the key of the account that holds them.
 
+## Checkpoints: the founder protects a young network
+
+While a network is small, someone renting enough GPUs for an hour could out-mine it and rewrite recent blocks (a 51% attack). A network can start with checkpoints: its founder's node signs, about every minute, which block is final, and every node refuses any chain that leaves that block out, however much work it has. The founder cannot move or create coins or make an invalid block valid; they only decide which valid chain is final, until the period ends.
+
+1. Make the checkpoint key (encrypted with a password; back it up, and keep it apart from the wallet):
+   ```bash
+   grn --data node checkpoint key
+   ```
+2. Name it in the genesis block (it lasts a year of blocks unless you choose `--checkpoint-until`):
+   ```bash
+   grn --data node genesis --msg "my network" --checkpoints --units-per-block 15000
+   ```
+3. Run the founder's node with `--checkpoints` (the key's password from the terminal or `GREEN_CHECKPOINT_PASSWORD`). Other nodes need nothing: they learn the authority from the genesis block and the checkpoints from their peers. `grn checkpoint status` shows the latest.
+4. When the network has enough independent miners, end the period for good: `grn --data node checkpoint end --yes`. From then on the chain with the most work decides alone, as in Bitcoin. Do the same at once if the key may have been stolen: an end can never be undone, so a thief cannot use the key afterwards.
+
+If the founder's node is offline, nothing breaks: blocks after the last checkpoint follow the most work, as without checkpoints. A node that followed an attacker's chain for longer than the reorg window before it heard a checkpoint has to resync (`fast_sync`, or a new data folder).
+
 ## Behind a home router
 
 `portmap = true` asks the router to forward the P2P port (and the provider's port) with PCP or NAT-PMP, renews the mapping every half hour and removes it when the node stops; the log says whether the router agreed. Routers without PCP or NAT-PMP (or with it switched off) need a manual port forward. Behind carrier-grade NAT (the router's own address is in 100.64.0.0/10 or private) no mapping helps, and the node advertises nothing.

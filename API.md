@@ -10,6 +10,8 @@ This is the reference node's interface for wallets, tools and agents, not consen
 |---|---|
 | `GET /status` | `coin`, `genesis` (network id), `height`, `tip`, `time`, `chainwork` (string), `target`, `units_per_block`, `peers` (their P2P addresses), `p2p` (`node_id`, `listen`, `inbound`, `outbound`, `known_addresses`, `headers_ahead`, `best_header_height`, `blocks_in_flight`, `fast_sync`, `stats`), `mempool`, `mining`, `miner`, `units_per_second`, `stats`, `warnings` (e.g. an unknown rule change signalled by most recent blocks), `pruned`, `first_block` (lowest height whose body this node has) |
 | `GET /chain?from=<height>` | `{"hashes": [...]}`: up to 5,000 main-chain block hashes from that height |
+| `GET /checkpoint` | the network's checkpoints (SPEC.md §5.6): `{"authority", "until", "checkpoint": {"height", "block", "sig"} or null, "ended", "end"}`; `authority` is null on a network without them |
+| `POST /checkpoint` | pass on a signed checkpoint or end (anyone may: the signature decides); `{"new": bool}`, 400 for a forgery |
 | `GET /debug/memory` | admin (this machine, with the client header): what the node holds in memory: Python's allocated blocks, the commonest object types, the sizes of its collections; with `PYTHONTRACEMALLOC=n` also the allocation sites that grew since the previous call |
 | `GET /block/<hash>` | the block `{"header": {...}, "txs": [...]}` (old blocks come from the store; 404 for blocks below the snapshot a fast-synced node started from) |
 | `GET /height/<n>` | the main-chain block at height n |

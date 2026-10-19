@@ -8,6 +8,7 @@ is persisted atomically and a restart loads the base plus recent diffs.
 
 import heapq
 import os
+import re
 import threading
 import time
 
@@ -25,6 +26,11 @@ BASE_MARGIN = 32
 # reaches back MTP_WINDOW blocks). Older blocks are read from the store.
 HEADER_KEEP = 64
 MAX_MSG_LEN = 200
+# Checkpoints (SPEC.md §5.6): a network may name, in its genesis message, a key whose
+# signed checkpoints every node follows until a height (or until the key signs an end):
+# "checkpoints <Ed25519 public key, hex> until <height>". While they last, no chain
+# that leaves out the latest checkpoint is accepted, however much work it has.
+CHECKPOINT_RE = re.compile(r"checkpoints ([0-9a-f]{64}) until ([0-9]{1,10})")
 MAX_CACHE = 100_000
 MAX_JOB_BLOB = txmod.job_blob_size([params.MAX_JOB_UNITS_PER_DIM] * 3)
 JOB_CACHE = 8
@@ -131,6 +137,26 @@ class BlobStore:
             while len(self._jobs) > JOB_CACHE:
                 del self._jobs[next(iter(self._jobs))]
         return cached
+
+
+# --- Checkpoints ---------------------------------------------------------------
+
+class InvalidCheckpoint(ValueError):
+    pass
+
+
+def checkpoint_authority(genesis: dict) -> tuple[str, int] | None:
+    """(public key, last height) named by the genesis message, or None."""
+    m = CHECKPOINT_RE.search(genesis["header"].get("msg", ""))
+    return (m.group(1), int(m.group(2))) if m else None
+
+
+def checkpoint_bytes(chain_id: str, height: int, block: str) -> bytes:
+    return canonical(["green-checkpoint", chain_id, height, block])
+
+
+def checkpoint_end_bytes(chain_id: str) -> bytes:
+    return canonical(["green-checkpoint-end", chain_id])
 
 
 # --- Block helpers -------------------------------------------------------------
@@ -349,6 +375,9 @@ class Chain:
         self.chain_id = g
         self.genesis = genesis
         self.initial_target = target_of(genesis["header"])   # the network's starting difficulty
+        self.authority = checkpoint_authority(genesis)        # (key, until) or None
+        self.checkpoint = store.get_meta("checkpoint", None) if store is not None else None
+        self.checkpoint_end = store.get_meta("checkpoint_end", None) if store is not None else None
         if store is not None and store.get_meta("genesis") is not None:
             if store.get_meta("genesis") != g:
                 raise ValueError("this data directory belongs to another network (different genesis)")
@@ -484,6 +513,74 @@ class Chain:
             bh = self.blocks[bh]["header"]["prev"]
         return out
 
+    def ancestor_at(self, bh: str, height: int) -> str | None:
+        """The block at `height` on the branch ending at `bh` (None if not known here)."""
+        while bh in self.meta and self.meta[bh]["height"] > height:
+            if self.on_main(bh):
+                return self.main[height] if height < len(self.main) else None
+            bh = self.blocks[bh]["header"]["prev"] if bh in self.blocks else None
+        return bh if bh in self.meta and self.meta[bh]["height"] == height else None
+
+    # -- checkpoints --
+
+    def accept_checkpoint(self, cp: dict) -> bool:
+        """Take a signed checkpoint (or the end of checkpoints); True if it is new. Raises
+        InvalidCheckpoint for a forgery or one this network cannot take. A new checkpoint
+        moves the tip onto its branch if the main chain left it out (a heavier chain an
+        attacker mined, or one built before the checkpoint was heard)."""
+        if self.authority is None:
+            raise InvalidCheckpoint("this network has no checkpoints")
+        key, until = self.authority
+        if not isinstance(cp, dict):
+            raise InvalidCheckpoint("malformed checkpoint")
+        if cp.get("end") is True:
+            if not (isinstance(cp.get("sig"), str) and verify(key, checkpoint_end_bytes(self.chain_id), cp["sig"])):
+                raise InvalidCheckpoint("bad signature")
+            if self.checkpoint_end is not None:
+                return False
+            self.checkpoint_end = {"end": True, "sig": cp["sig"]}
+            if self.store is not None:
+                self.store.set_meta("checkpoint_end", self.checkpoint_end)
+            return True
+        h, b, sig = cp.get("height"), cp.get("block"), cp.get("sig")
+        if not (_is_int(h) and h > 0 and is_hex(b, 64) and isinstance(sig, str)):
+            raise InvalidCheckpoint("malformed checkpoint")
+        if not verify(key, checkpoint_bytes(self.chain_id, h, b), sig):
+            raise InvalidCheckpoint("bad signature")
+        if self.checkpoint_end is not None or h > until:
+            return False                             # the checkpoint period is over
+        cur = self.checkpoint
+        if cur is not None and h <= cur["height"]:
+            return False
+        if cur is not None and b in self.meta and self.ancestor_at(b, cur["height"]) not in (None, cur["block"]):
+            raise InvalidCheckpoint("does not extend the previous checkpoint")
+        self.checkpoint = {"height": h, "block": b, "sig": sig}
+        if self.store is not None:
+            self.store.set_meta("checkpoint", self.checkpoint)
+        self._follow_checkpoint()
+        return True
+
+    def _follow_checkpoint(self) -> None:
+        """Put the tip on the checkpoint's branch: the most work block that descends from it."""
+        cp = self.checkpoint
+        h, b = cp["height"], cp["block"]
+        if b not in self.meta or self.on_main(b):
+            return
+        best = max((k for k in self.states if self.meta[k]["height"] >= h and self.ancestor_at(k, h) == b),
+                   key=lambda k: self.meta[k]["chainwork"], default=None)
+        if best is None:
+            return                                   # its branch left the reorg window here: resync
+        if self.store is None:
+            self._set_tip(best)
+            return
+        with self.store.transaction():
+            self._set_tip(best)
+
+    def checkpoint_status(self) -> dict:
+        key, until = self.authority if self.authority else (None, None)
+        return {"authority": key, "until": until, "checkpoint": self.checkpoint,
+                "ended": self.checkpoint_end is not None, "end": self.checkpoint_end}
+
     def median_time_past(self, block_hash_: str, lookup=None) -> int:
         get = lookup or self.header
         times = []
@@ -588,6 +685,9 @@ class Chain:
             raise InvalidBlock("timestamp too far in the future", permanent=False)
         if target_of(hdr) != self.expected_target(hdr["prev"], lookup):
             raise InvalidBlock("wrong difficulty target")
+        cp = self.checkpoint
+        if cp is not None and hdr["height"] == cp["height"] and hhex(canonical(hdr)) != cp["block"]:
+            raise InvalidBlock("conflicts with the checkpoint", permanent=False)
 
     def work_transcript(self, hdr: dict) -> str:
         """Recompute a header's work unit without any ledger state (thread safe).
@@ -1261,6 +1361,10 @@ class Chain:
                 fork = self.blocks[fork]["header"]["prev"]
             if self.meta[fork]["height"] < self.height - params.MAX_REORG_DEPTH:
                 raise InvalidBlock("fork branches off too deep", permanent=False)
+            cp = self.checkpoint
+            if cp is not None and self.meta[prev_hash]["height"] + 1 > cp["height"] \
+                    and self.ancestor_at(prev_hash, cp["height"]) != cp["block"]:
+                raise InvalidBlock("conflicts with the checkpoint", permanent=False)
             self._check_activated_rules(block)
             parent_state = self._state_of(prev_hash)
             job_id = block["header"]["work"]["job"]

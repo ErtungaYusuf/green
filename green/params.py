@@ -197,6 +197,13 @@ HD_COIN_TYPE = 7777
 
 DEFAULT_PORT = 8545               # HTTP API for wallets and tools
 DEFAULT_P2P_PORT = 8546           # encrypted node-to-node protocol (green/p2p.py)
+# Checkpoints (green/chain.py): the founder's node signs the block CHECKPOINT_DEPTH below
+# its tip every CHECKPOINT_EVERY blocks, so a majority attacker can only rewrite the last
+# minute or two; by default the period lasts a year of blocks unless the founder ends it.
+CHECKPOINT_EVERY = 4
+CHECKPOINT_DEPTH = 3
+CHECKPOINT_DEFAULT_BLOCKS = 365 * 86400 // TARGET_BLOCK_SECONDS
+
 # Nodes to ask for addresses when the address book is empty. Filled in when a
 # public network launches; "host:port" or "<node id>@host:port". A host that is a
 # DNS name is resolved and each address it answers with is tried (DNS seeds).

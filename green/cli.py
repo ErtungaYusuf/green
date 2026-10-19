@@ -320,6 +320,18 @@ def cmd_genesis(args):
         if interactive and nonce % 25 == 0:
             print(f"  {nonce + 1} work units tried...", end="\r", flush=True)
 
+    if args.checkpoints:
+        key_file = checkpoint_key_path(args.data)            # (not `path`: that is where the genesis goes)
+        if not os.path.exists(key_file):
+            raise CliError(f"--checkpoints needs a checkpoint key: grn --data {args.data} checkpoint key")
+        with open(key_file, encoding="utf-8") as f:
+            pub = json.load(f)["pub"]
+        until = args.checkpoint_until or params.CHECKPOINT_DEFAULT_BLOCKS
+        args.msg = f"{args.msg} | checkpoints {pub} until {until}"
+        if len(args.msg) > 200:
+            raise CliError("the message is too long with the checkpoint key in it (200 characters at most)")
+        print(f"Checkpoints: signed by {pub[:16]}... until block {until} (or until you end them)")
+        print(f"Message: {args.msg!r}")
     target = params.INITIAL_TARGET
     if args.units_per_block:
         target = min(target, params.MAX_TARGET // args.units_per_block)
@@ -332,6 +344,78 @@ def cmd_genesis(args):
     print(f"Hash: {block_hash(genesis)}")
     print(f"Saved: {path}")
     print(f"Now start the node: python -m green --data {args.data} node --mine")
+
+
+CHECKPOINT_KEY_FILE = "checkpoint_key.json"
+CHECKPOINT_PASSWORD_ENV = "GREEN_CHECKPOINT_PASSWORD"
+
+
+def checkpoint_key_path(data: str) -> str:
+    return os.path.join(data, CHECKPOINT_KEY_FILE)
+
+
+def load_checkpoint_key(data: str) -> Key:
+    """The founder's checkpoint key (its password from GREEN_CHECKPOINT_PASSWORD or the terminal)."""
+    path = checkpoint_key_path(data)
+    if not os.path.exists(path):
+        raise CliError(f"no checkpoint key in {data}: make one with: grn --data {data} checkpoint key")
+    with open(path, encoding="utf-8") as f:
+        record = json.load(f)
+    if "secret" in record:
+        key = Key.from_hex(record["secret"])
+    else:
+        password = os.environ.get(CHECKPOINT_PASSWORD_ENV)
+        if password is None:
+            if not sys.stdin.isatty():
+                raise CliError(f"checkpoint key password required: set {CHECKPOINT_PASSWORD_ENV} or use a terminal")
+            password = getpass.getpass("Checkpoint key password: ")
+        try:
+            key = Key.from_hex(decrypt_secret(record["encrypted"], password))
+        except WrongPassword:
+            raise CliError("wrong checkpoint key password") from None
+    if key.pub_hex != record["pub"]:
+        raise CliError(f"{path} is corrupt: the key does not match its public key")
+    return key
+
+
+def cmd_checkpoint(args):
+    from .chain import checkpoint_end_bytes
+    if args.action == "key":
+        path = checkpoint_key_path(args.data)
+        if os.path.exists(path):
+            raise CliError(f"{path} already exists")
+        os.makedirs(args.data, exist_ok=True)
+        key = Key.generate()
+        record = {"pub": key.pub_hex}
+        if args.no_password:
+            record["secret"] = key.secret_hex()
+        else:
+            password = os.environ.get(CHECKPOINT_PASSWORD_ENV) or ask_password(confirm=True)
+            record["encrypted"] = encrypt_secret(key.secret_hex(), password)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(record, f, indent=1)
+        print(f"Checkpoint key: {path}")
+        print(f"Public key: {key.pub_hex}")
+        print("Back it up and keep it secret: whoever holds it decides which chain is final until the "
+              "checkpoint period ends. Next: grn genesis --msg \"...\" --checkpoints")
+    elif args.action == "status":
+        st = api_get(args, "/checkpoint")
+        if st["authority"] is None:
+            print("This network has no checkpoints: the chain with the most work is the chain.")
+            return
+        print(f"Authority : {st['authority']}")
+        print(f"Until     : block {st['until']}" + ("  (ended by the authority)" if st["ended"] else ""))
+        cp = st["checkpoint"]
+        print(f"Latest    : " + (f"block {cp['height']} {cp['block'][:16]}..." if cp else "none yet"))
+    else:                                           # end
+        if not args.yes:
+            raise CliError("this ends the checkpoint period for good: from then on the chain with the most work "
+                           "decides alone. Run again with --yes to do it.")
+        key = load_checkpoint_key(args.data)
+        chain_id = api_get(args, "/status")["genesis"]
+        r = api_post(args, "/checkpoint", {"end": True, "sig": key.sign(checkpoint_end_bytes(chain_id))})
+        print("The checkpoint period is over: every node now follows the chain with the most work."
+              if r.get("new") else "The checkpoint period had already ended.")
 
 
 def cmd_node(args):
@@ -348,6 +432,7 @@ def cmd_node(args):
             json.dump(genesis, f, indent=2)
 
     key = require_wallet(args.data)
+    checkpoint_key = load_checkpoint_key(args.data) if args.checkpoints else None
     logger = setup_logging(args.log_level, args.log_file)
     log = logger.info
 
@@ -355,7 +440,11 @@ def cmd_node(args):
                 debug=logger.debug if logger.isEnabledFor(logging.DEBUG) else None,
                 use_gpu=args.gpu, p2p_port=args.p2p_port, listen=not args.no_listen, fast_sync=args.fast_sync,
                 p2p_host=args.p2p_host, no_signal=args.no_signal, prune=args.prune, prune_keep=args.prune_keep,
-                dandelion=not args.no_dandelion, portmap=args.portmap)
+                dandelion=not args.no_dandelion, portmap=args.portmap, checkpoint_key=checkpoint_key)
+    if checkpoint_key is not None:
+        if node.chain.authority is None or node.chain.authority[0] != checkpoint_key.pub_hex:
+            raise CliError("this node's checkpoint key is not the one this network's genesis names")
+        log(f"Signing this network's checkpoints (until block {node.chain.authority[1]})")
     if not 1 <= args.intensity <= 100:
         raise CliError("--intensity is a percentage, 1..100")
     node.intensity = args.intensity
@@ -443,7 +532,7 @@ CONFIG_KEYS = {"port": int, "host": str, "p2p_port": int, "p2p_host": str, "peer
                "report": (int, float), "log_level": str, "log_file": str, "prune": bool, "prune_keep": int,
                "pool_port": int, "pool_host": str, "pool_fee": int, "no_dandelion": bool,
                "provide_port": int, "provide_host": str, "provide_url": str, "provide_price": int,
-               "portmap": bool, "intensity": int}
+               "portmap": bool, "intensity": int, "checkpoints": bool}
 
 
 def load_config(data: str) -> dict:
@@ -1043,6 +1132,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("genesis", help="start a new network: mine the genesis block")
     s.add_argument("--msg", required=True, help="message written into the genesis block")
+    s.add_argument("--checkpoints", action="store_true",
+                   help="this folder's checkpoint key signs which blocks are final while the network is young "
+                        "(grn checkpoint key makes one)")
+    s.add_argument("--checkpoint-until", type=int, metavar="HEIGHT",
+                   help="last block a checkpoint may name (default: a year of blocks)")
     s.add_argument("--units-per-block", type=int, metavar="N",
                    help="starting difficulty: about N work units a block (the miners' units/s times 15); "
                         "the genesis block itself takes this much work to find")
@@ -1056,6 +1150,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--p2p-host", help="address the P2P port listens on (default: same as --host); "
                                       "e.g. 0.0.0.0 to be reachable by other nodes while the API stays local")
     s.add_argument("--no-listen", action="store_true", help="do not accept connections from other nodes")
+    s.add_argument("--checkpoints", action="store_true",
+                   help="sign this network's checkpoints with the folder's checkpoint key (the founder's node)")
     s.add_argument("--portmap", action="store_true",
                    help="ask the home router to forward the P2P port (and the --provide-port) with PCP or "
                         "NAT-PMP, so other nodes and buyers can reach this one")
@@ -1230,6 +1326,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("job")
     s.add_argument("--fee", default="0")
     s.set_defaults(fn=cmd_job_cancel)
+
+    s = sub.add_parser("checkpoint", help="the founder's checkpoints: make the key, see them, end them")
+    s.add_argument("action", choices=["key", "status", "end"],
+                   help="key: make this folder's checkpoint key; status: the network's checkpoints; "
+                        "end: end the checkpoint period for good (with --yes)")
+    s.add_argument("--no-password", action="store_true", help="key: store it unencrypted (testing only)")
+    s.add_argument("--yes", action="store_true", help="end: really end the checkpoint period")
+    s.set_defaults(fn=cmd_checkpoint)
 
     s = sub.add_parser("supply", help="audit that every coin is accounted for")
     s.set_defaults(fn=cmd_supply)

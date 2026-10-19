@@ -18,6 +18,7 @@ What each one solves, how they compare in numbers, and where Green still falls s
 | What the work produces | nothing else | a clock (PoH), replicated execution | matrix products buyers paid for |
 | Block / slot time | 600 s | 400 ms slots | 15 s |
 | Difficulty | every 2016 blocks, x4 clamp | n/a (leader schedule) | every block, ASERT (half-life 30 min) |
+| Majority attack | rewrites any depth with >50% of the hash rate | needs >1/3 of the stake to halt, >2/3 to finalize | while young: only blocks after the founder's latest checkpoint (~1.5 min); after that, at most 100 blocks (~25 min) |
 | Confirmation | probabilistic; 6 blocks ≈ 60 min | optimistic in under a second, finalized after 32 slots (≈ 13 s) | probabilistic; 6 blocks ≈ 90 s (the §11 math is per block, so 40x faster than Bitcoin at the same depth) |
 | Throughput on chain | ~7 transfers/s | thousands of transactions/s measured (60M compute units per block) | **200 transfers/s** limit (3,000 per block); one core checks ~8,000/s cold, ~20,000/s with signatures cached |
 | Off chain | Lightning | none needed at its speed | payment channels for compute (each result checked, paid per product) |
