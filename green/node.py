@@ -58,6 +58,11 @@ BUMP_AFTER_BLOCKS = 3         # our own protocol transaction still waiting after
 MAX_BUMP_FEE = 10_000_000     # ...up to this (0.1 GRN), so a fee spike cannot drain the wallet
 BUMP_SECONDS = 5.0
 MAX_SHARE_POOL = 16_384       # shares waiting to be included (~SHARE_FACTOR per block of the window)
+# Shares mined on one parent block that a node checks and relays. The count before a
+# block is random (geometric, mean SHARE_FACTOR): capped at a block's MAX_BLOCK_SHARES it
+# would drop 13% of all shares, which later blocks of the window would have paid; at 4x
+# it drops 0.03%, and still bounds a flood on one parent.
+MAX_SHARES_PER_PARENT = 4 * params.MAX_BLOCK_SHARES
 TEMPLATE_SECONDS = 5          # the miner rebuilds its block template at least this often
 MINING_THREADS = max(1, min(4, (os.cpu_count() or 2) - 1))   # threads that prepare (CPU: compute) tries
 SHARE_TEMPLATE_SECONDS = 1    # ...and for new shares at most this often
@@ -207,6 +212,8 @@ class Node:
         self._share_version = 0
         self._template = None                      # (key, made, header, txs, shares, share version)
         self._inflight_units = set()               # job units being tried right now (not yet buffered)
+        self._committing: set = set()              # units taken from the buffer, their commit not yet in the mempool
+        self._options: list | None = None          # open units for the batch of tries being built
         self._task_unrunnable: set[str] = set()
         self.running = True
 
@@ -461,11 +468,8 @@ class Node:
         with self.lock:
             if sid in self.share_pool:
                 return None
-            if self._shares_on.get(share.get("prev"), 0) >= params.MAX_BLOCK_SHARES:
-                # More shares on one parent than a block can hold come only from a burst
-                # (a new network's easy start); checking and relaying them all would swamp
-                # every node, and they could not all be paid anyway.
-                return None
+            if self._shares_on.get(share.get("prev"), 0) >= MAX_SHARES_PER_PARENT:
+                return None                              # a flood on one parent: let it go unchecked
             state = self.chain.state
             problem = self.chain.share_problem(share, self.chain.tip, state.share_seen)
             job = share["work"]["job"] if problem is None else None
@@ -663,27 +667,38 @@ class Node:
         for job_id, buf in self.batch_buf.items():
             busy.update((job_id, txmod.unit_key(u)) for u in buf["units"])
         busy |= self._inflight_units                 # (the miner's batches are in flight a moment)
+        busy |= self._committing                     # (and a batch between the buffer and the mempool)
         if self.pool is not None:
             busy |= self.pool.assigned_keys()        # handed to pool miners
         return busy
 
-    def _choose_work(self, busy: set) -> dict:
-        """Prefer the best-paying unit we can commit to; fall back to filler work. `busy`:
-        (job, unit key) pairs not to pick; the chosen one is added to it."""
+    def _work_options(self, busy: set) -> list:
+        """The best-paying open units we can commit to, as (job, unit) pairs not in `busy`."""
         state = self.chain.state
         best_price, options = 0, []
         for job_id, job in state.jobs.items():
-            if job["price"] < best_price or not self._my_bond_ok(job):
+            if job["price"] < best_price:
                 continue
-            units = [u for u in state.open_units(job_id) if (job_id, txmod.unit_key(u)) not in busy]
+            units = state.open_units(job_id)         # (a finished job answers at once)
+            if not units or not self._my_bond_ok(job):
+                continue
+            units = [u for u in units if (job_id, txmod.unit_key(u)) not in busy]
             if not units:
                 continue
             if job["price"] > best_price:
                 best_price, options = job["price"], []
             options += [(job_id, u) for u in units]
+        return options
+
+    def _choose_work(self, busy: set) -> dict:
+        """Prefer the best-paying unit we can commit to; fall back to filler work. `busy`:
+        (job, unit key) pairs not to pick; the chosen one is added to it. Within one batch
+        of tries the options are worked out once (self._options): scanning every job for
+        every try made a miner 4x slower once a few hundred finished jobs piled up."""
+        options = self._options if self._options is not None else self._work_options(busy)
         if not options:
             return {"job": None, "unit": None}
-        job_id, unit = random.choice(options)
+        job_id, unit = options.pop(random.randrange(len(options)))
         busy.add((job_id, txmod.unit_key(unit)))
         return {"job": job_id, "unit": unit}
 
@@ -750,11 +765,15 @@ class Node:
             tip = self.chain.tip
             busy = self._busy_units()
             headers = []
-            for _ in range(count if not ahead else 0):
-                header = dict(base, work=self._choose_work(busy), nonce=random.getrandbits(48))
-                if header["work"]["job"] is not None:
-                    self._inflight_units.add((header["work"]["job"], txmod.unit_key(header["work"]["unit"])))
-                headers.append(header)
+            self._options = self._work_options(busy) if count and not ahead else None
+            try:
+                for _ in range(count if not ahead else 0):
+                    header = dict(base, work=self._choose_work(busy), nonce=random.getrandbits(48))
+                    if header["work"]["job"] is not None:
+                        self._inflight_units.add((header["work"]["job"], txmod.unit_key(header["work"]["unit"])))
+                    headers.append(header)
+            finally:
+                self._options = None
         if ahead:
             # The chain's clock (each block after the median of the last 11) ran ahead of ours,
             # as it does when blocks come many per second: a block now would be refused as
@@ -887,8 +906,15 @@ class Node:
                         (job_id, txmod.unit_key(u)) not in busy for u in state.open_units(job_id))
                     if len(buf["units"]) >= params.MAX_BATCH_UNITS or not more or now - buf["started"] >= BATCH_SECONDS:
                         ready.append((job_id, self.batch_buf.pop(job_id)))
+                        # Out of the buffer and not yet in the mempool, the units must still
+                        # count as taken, or a pool miner (or our own) is handed them again.
+                        self._committing.update((job_id, txmod.unit_key(u)) for u in ready[-1][1]["units"])
             for job_id, buf in ready:
-                self._commit_batch(job_id, buf)
+                try:
+                    self._commit_batch(job_id, buf)
+                finally:                             # committed (mempool) or put back (buffer) by now
+                    with self.lock:
+                        self._committing.difference_update((job_id, txmod.unit_key(u)) for u in buf["units"])
 
     def _rebuffer(self, job_id: str, items: list) -> None:
         """Units pool miners computed that did not fit this batch wait for the next one

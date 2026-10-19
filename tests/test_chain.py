@@ -558,3 +558,19 @@ def test_a_block_holds_far_more_than_the_old_500_transactions():
     block, _ = add(chain, alice, txs)
     assert len(block["txs"]) == 600 and all(chain.state.balance(f) == 1 for f in friends)
     assert params.MAX_BLOCK_TXS >= 3000 and params.MAX_BLOCK_SIGS >= 2 * params.MAX_BLOCK_TXS
+
+
+def test_finished_jobs_cost_a_miner_nothing(monkeypatch):
+    """Finished jobs stay in the state until their buyer cancels them; a miner listed every
+    one's units for every try, and became 4x slower once a few hundred had piled up."""
+    alice = Key.generate()
+    chain = new_chain(alice)
+    s = chain.state.copy()
+    for i in range(300):
+        s.jobs[f"{i:064x}"] = {"buyer": alice.address, "dims": [1, 2, 1], "price": 1000, "escrow": 0,
+                               "done": {"0,0,0": "x", "0,1,0": "x"}, "reserved": {}, "delivered": {},
+                               "batches": {}, "closes_at": None, "closed": False}
+    listed = []
+    real = txmod.all_units
+    monkeypatch.setattr(txmod, "all_units", lambda dims: listed.append(dims) or real(dims))
+    assert all(s.open_units(j) == [] for j in s.jobs) and listed == []

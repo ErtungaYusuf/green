@@ -11,6 +11,7 @@ import pytest
 from green import params
 from green.chain import BlobStore, Chain, InvalidBlock, block_hash, make_genesis, share_id, solve, target_of
 from green.crypto import Key
+from green import node as nodemod
 from green.node import Node, http_get
 from helpers import T0, add, grind, mine, minted, new_chain, supply, tx
 
@@ -188,9 +189,8 @@ def test_nearly_all_of_the_emission_pays_for_work_not_luck():
 
 
 def test_a_burst_of_shares_on_one_parent_is_not_all_checked(tmp_path, shares_on):
-    """A new network's easy start produced shares faster than nodes could check them;
-    they fell behind and took their peers for attackers. Past what a block can hold,
-    shares on the same parent are let go unchecked."""
+    """Past MAX_SHARES_PER_PARENT, shares on the same parent are let go unchecked; below
+    it they are all kept, since later blocks of the window pay them."""
     big = Key.generate()
     node = Node(str(tmp_path / "n"), make_genesis(big.address, "burst"), port=free_port(), miner_key=big,
                 log=lambda m: None)
@@ -202,7 +202,7 @@ def test_a_burst_of_shares_on_one_parent_is_not_all_checked(tmp_path, shares_on)
         with pytest.raises(InvalidBlock):
             node.submit_share(fake)                          # checked: the sender lied
         with node.lock:
-            node._shares_on[share["prev"]] = params.MAX_BLOCK_SHARES
+            node._shares_on[share["prev"]] = nodemod.MAX_SHARES_PER_PARENT
         assert node.submit_share(fake) is None               # parent full: not even checked
         with node.lock:
             node._shares_on.clear()
@@ -223,3 +223,11 @@ def test_a_network_chooses_its_starting_difficulty(monkeypatch):
         Chain(g, BlobStore())                                # easier than the protocol allows
     with pytest.raises(ValueError):
         make_genesis(key.address, "easy", target=params.MAX_TARGET // 8)
+
+
+def test_the_share_cap_drops_almost_nothing():
+    """Shares before a block are geometric with mean SHARE_FACTOR: the per-parent cap must
+    sit far enough out that honest shares are not lost (later blocks pay the backlog)."""
+    lost = (1 - 1 / params.SHARE_FACTOR) ** nodemod.MAX_SHARES_PER_PARENT     # share of income dropped
+    assert lost < 0.001
+    assert nodemod.MAX_SHARE_POOL >= params.SHARE_FACTOR * params.SHARE_WINDOW     # the window's shares fit

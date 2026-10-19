@@ -312,3 +312,69 @@ def test_a_batch_pays_at_most_31_contributors_and_the_rest_wait(tmp_path):
         assert len(left["units"]) == 40 - 31 and set(left["by"]) == set(people) - paid
     finally:
         node.close()
+
+
+def test_a_unit_being_handed_in_is_not_given_to_a_second_miner(selling_pool):
+    """The pool released a unit before the node had its result, and a miner asking for
+    work in that moment got it again: computed twice, the second miner paid nothing."""
+    node, pool, operator = selling_pool
+    url = f"http://127.0.0.1:{pool.port}"
+    rng = np.random.default_rng(3)
+    a = rng.integers(-128, 128, size=(params.UNIT, params.UNIT), dtype=np.int8)
+    b = rng.integers(-128, 128, size=(params.UNIT, params.UNIT), dtype=np.int8)
+    job_id = post_job_on(node, operator, a, b)
+    pool.useful = False                          # a helper mines the job's block, without taking its unit
+    helper = PoolMiner(url, Key.generate().address, log=lambda m: None)
+    t = threading.Thread(target=helper.run, args=(60,), daemon=True)
+    t.start()
+    wait_until(lambda: job_id in node.chain.state.jobs, "the job on chain")
+    helper.stop()
+    t.join(15)
+    pool.useful = True
+    first, second = Key.generate().address, Key.generate().address
+    (job, unit), = pool.assign(first)
+    seen_meanwhile = []
+    original = node._buffer_result
+
+    def slow_handover(*args, **kw):              # someone asks for work while the result is handed in
+        seen_meanwhile.extend(pool.assign(second))
+        return original(*args, **kw)
+    node._buffer_result = slow_handover
+    result = base64.b64encode(txmod.encode_result(unit_result(a, b, unit))).decode()
+    assert pool.submit_result({"address": first, "job": job, "unit": unit, "result": result})["accepted"]
+    assert [job, unit] not in seen_meanwhile and [job, list(unit)] not in seen_meanwhile
+    assert pool.assign(second) == [] and pool.stats["useful_units"] == 1
+
+
+def test_units_on_their_way_to_a_commit_stay_taken(selling_pool):
+    """Between leaving the buffer and reaching the mempool, a batch's units looked free."""
+    node, pool, operator = selling_pool
+    url = f"http://127.0.0.1:{pool.port}"
+    rng = np.random.default_rng(4)
+    a = rng.integers(-128, 128, size=(params.UNIT, params.UNIT), dtype=np.int8)
+    b = rng.integers(-128, 128, size=(params.UNIT, params.UNIT), dtype=np.int8)
+    job_id = post_job_on(node, operator, a, b)
+    pool.useful = False
+    helper = PoolMiner(url, Key.generate().address, log=lambda m: None)
+    t = threading.Thread(target=helper.run, args=(60,), daemon=True)
+    t.start()
+    wait_until(lambda: job_id in node.chain.state.jobs, "the job on chain")
+    helper.stop()
+    t.join(15)
+    pool.useful = True
+    miner = Key.generate().address
+    (job, unit), = pool.assign(miner)
+    taken_while_committing = []
+    original = node.submit_tx
+
+    def watch(tx, *args, **kw):
+        if tx.get("type") == "job_commit" and tx.get("job") == job:
+            with node.lock:
+                taken_while_committing.append((job, txmod.unit_key(unit)) in node._busy_units())
+        return original(tx, *args, **kw)
+    node.submit_tx = watch
+    result = base64.b64encode(txmod.encode_result(unit_result(a, b, unit))).decode()
+    assert pool.submit_result({"address": miner, "job": job, "unit": unit, "result": result})["accepted"]
+    wait_until(lambda: taken_while_committing, "the batch's commit")
+    assert taken_while_committing[0] is True
+    assert not node._committing                       # released once the commit is in the mempool

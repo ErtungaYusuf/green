@@ -48,7 +48,7 @@ Status as of v0.21 (October 2026). 274 automated tests; eighteen internal securi
 
 ## 3. Difficulty and issuance
 
-**Done.** Per-block ASERT difficulty since v0.6: in simulation with miners that come and go, the old windowed rule ran 37% slow and drifted 9.3 hours behind schedule in 6,000 blocks; ASERT held 15.0 s and zero drift (`bench/difficulty_sim.py`). Issuance (v0.17): a fixed 21M GRN, all of it in the protocol's reserve at genesis; each block pays out 1/2^24 of the reserve (~1.25 GRN at first, a smooth curve with no halvings), half of all fees flow back in, and 80% of each block's emission pays shares (tickets 32 times easier than a block) so miners are paid in proportion to their work. Every node can audit the supply (`grn supply`, `GET /supply`): balances, escrow, bonds, channel funds and the reserve must add up to the fixed supply, exactly (`tests/test_economics.py`).
+**Done.** Per-block ASERT difficulty since v0.6: in simulation with miners that come and go, the old windowed rule ran 37% slow and drifted 9.3 hours behind schedule in 6,000 blocks; ASERT held 15.0 s and zero drift (`bench/difficulty_sim.py`). Issuance (v0.17): a fixed 21M GRN, all of it in the protocol's reserve at genesis; each block pays out 1/2^24 of the reserve (~1.25 GRN at first, a smooth curve with no halvings). Since v0.23, 99% of each block's emission pays shares (tickets 128 times easier than a block, ~128 a block) so miners are paid in proportion to their work, and of every fee 50% goes to the miner, 30% back into the reserve and 20% is burned. Every node can audit the supply (`grn supply`, `GET /supply`): balances, escrow, bonds, channel funds and the reserve must add up to the fixed supply minus what was burned, exactly (`tests/test_economics.py`).
 
 **Evidence:** `test_asert_matches_the_formula`, `test_difficulty_follows_the_schedule_every_block`, `test_emission_matches_bitcoin_schedule`, the supply audit on a live node (`test_supply_audit_and_metrics_on_a_live_node`), and two fuzz tests that check conservation of money at every block.
 
@@ -180,7 +180,7 @@ Since v0.12: a transaction and address index kept consistent through reorgs (`/v
 
 ## 19. Economics and launch
 
-**Today:** a fixed supply with no premine (the genesis block's reward is the only one not mined in competition, ~0.25 GRN), paid out from the reserve with no halvings and no inflation, half of every fee recycled into the reserve, data fees against storage spam, bonds and forfeits in both markets.
+**Today:** a fixed supply with no premine (the genesis block's reward is the only one not mined in competition, ~0.0125 GRN), paid out from the reserve with no halvings and no inflation, 30% of every fee recycled into the reserve and 20% burned, fees of 0.000005 GRN per signature, data fees against storage spam, bonds and forfeits in both markets.
 
 **Missing:** a fair-launch plan (announced genesis date, open-source release beforehand, no founder allocation); a public testnet run long enough to observe fees, delivery and disputes under real use; economic modeling of miner incentives when compute demand is low or bursty.
 

@@ -81,6 +81,11 @@ class InvalidTx(Exception):
     pass
 
 
+class BadSignature(InvalidTx):
+    """A signature that does not verify. Unlike other refusals this never depends on the
+    node's state or policy: an honest node checks it before it relays anything."""
+
+
 class FutureNonce(InvalidTx):
     """The sender has an earlier transaction this node has not seen yet: valid later, perhaps."""
 
@@ -163,7 +168,7 @@ def _check_auth(tx: dict, chain_id: str) -> None:
         if not is_hex(pub, 64):
             raise InvalidTx("bad public key")
         if not verify(pub, signing_bytes(tx, chain_id), sig):
-            raise InvalidTx("bad signature")
+            raise BadSignature("bad signature")
         return
     if not is_multisig(pub):
         raise InvalidTx(f"bad multisig account: k of n sorted distinct keys, 2 <= n <= {params.MAX_MULTISIG_KEYS}")
@@ -174,7 +179,7 @@ def _check_auth(tx: dict, chain_id: str) -> None:
         raise InvalidTx(f"a {pub['k']}-of-{len(pub['keys'])} account needs exactly {pub['k']} signatures")
     message = signing_bytes(tx, chain_id)
     if not all(verify(key, message, s) for key, s in present):
-        raise InvalidTx("bad signature")
+        raise BadSignature("bad signature")
 
 
 def commitment(addr: str, job_id: str, bitmap: str, root: str) -> str:

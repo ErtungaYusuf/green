@@ -84,7 +84,7 @@ from .tx import InvalidTx
 from .verify import ProcessChecker
 
 PROTOCOL_VERSION = 1
-AGENT = "green/0.23.2"
+AGENT = "green/0.23.3"
 
 MAX_OUTBOUND = 8               # outbound connections the node keeps
 BLOCK_RELAY_ONLY = 2           # ...of which relay blocks only
@@ -1548,6 +1548,9 @@ class P2P:
             self.node.submit_tx(t, source=peer, stem=True)
         except txmod.FutureNonce:
             pass                                     # its predecessor has not reached us yet
+        except txmod.BadSignature:
+            self.rejected.add(tid)
+            raise Misbehaving(50, "relayed a transaction with a bad signature") from None
         except (InvalidTx, MissingData):
             self.rejected.add(tid)                   # policy can differ between nodes: no penalty
 
@@ -1672,6 +1675,9 @@ class P2P:
         except txmod.FutureNonce:
             pass                                     # not "rejected": once its predecessor arrives, the
                                                      # next announcement of it is fetched again
+        except txmod.BadSignature:
+            self.rejected.add(tid)
+            raise Misbehaving(50, "relayed a transaction with a bad signature") from None
         except (InvalidTx, MissingData):
             self.rejected.add(tid)                   # policy can differ between nodes: no penalty
 

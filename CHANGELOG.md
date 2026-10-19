@@ -2,11 +2,22 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## 0.23.3
+
+Checked end to end before publishing:
+- **A peer that relays a transaction with a bad signature is penalized** (two strikes ban it). Every refusal used to be treated as a policy difference between nodes, so junk cost the sender nothing while each bad signature cost us a check; with fees of 0.000005 GRN that mattered more. An honest node checks signatures before it relays, so a bad one is proof; refusals that depend on state (nonce, balance) or policy still carry no penalty. (`test_a_relayed_bad_signature_counts_against_the_peer_but_policy_does_not`.)
+- **The per-parent share cap of v0.23.2 would have cost miners ~13% of their share income.** The number of shares before a block is random (geometric, mean 128); 13% of blocks see more than 256, and later blocks of the window pay that backlog. The cap is now 1,024, which drops 0.03%. (`test_the_share_cap_drops_almost_nothing`, which fails with the old cap.)
+- **Miners slowed down 4-5x within hours.** A job stays in the state after all its units are delivered, until its buyer cancels it, and a miner listed every job's units for every try to pick its work: after five hours of the local network's buyers posting jobs (257, all finished), a GPU miner did ~80 units a second instead of ~440. A finished job now answers at once, and the options are worked out once per batch of tries instead of once per try; restarted on the same chain, the miners went back to ~440 a second. (`test_finished_jobs_cost_a_miner_nothing`, which fails without the fix.)
+- The signature cache no longer keeps the vouchers a provider checks once (30,000 an hour on the local network) and holds 50,000 signatures instead of 200,000, still 8 full blocks.
+- **A pool could hand the same unit to two miners.** It released a unit the moment it accepted the result, before the node had taken the result in, and a miner asking for work in between got that unit again: computed twice, the second miner's work thrown away unpaid. Found as a test that failed one run in ten; the unit is now held until the node has the result. The same gap was there a step later: a batch's units, taken out of the buffer to be committed, looked free until the commit reached the mempool; they now count as taken until then. (`test_a_unit_being_handed_in_is_not_given_to_a_second_miner`, `test_units_on_their_way_to_a_commit_stay_taken`; each fails without its fix every time.)
+- Every `grn` command written in the documentation was parsed with the real command line: three said `wallet create` (it is `wallet new`). The multi-computer steps of OPERATIONS.md were followed with two nodes (wallets, genesis, `--peer`, mining, a payment from one to the other, a restart that finds its peer again from `peers.json`, supply audit, clean stop), and the four repositories, cloned fresh, pass all their tests.
+- PRODUCTION.md still described the economics of v0.17; the README links the three interfaces.
+
 ## 0.23.2
 
 - **Found on the local network: the network split in two within five minutes of starting.** A new network starts at a difficulty of ~200 work units a block, so with three GPU miners blocks came every second, and with 128 shares a block (since v0.23) more than 100 shares a second. The buyers' nodes, busy checking bought compute, could not keep up, took their honest peers for attackers ("flooding faster than it can be processed") and banned them for 24 hours: carol and erin went on alone at block 181 while the miners reached 275. Three fixes:
   - A node that falls behind drops shares, transactions and offers (the network carries them again) instead of blaming the peer; only blocks and headers count. (`test_a_node_that_falls_behind_drops_shares_instead_of_blaming_peers`.)
-  - A node checks and relays at most MAX_BLOCK_SHARES (256) shares on the same parent block: more could never be paid, and only a burst produces them. (`test_a_burst_of_shares_on_one_parent_is_not_all_checked`.)
+  - A node checks and relays at most 1,024 shares on the same parent block (4 x MAX_BLOCK_SHARES; v0.23.2 had 256, which would have dropped ~13% of all shares, since the count before a block is random and later blocks of the window pay the rest). (`test_a_burst_of_shares_on_one_parent_is_not_all_checked`.)
   - A network chooses its starting difficulty in its genesis block (never easier than INITIAL_TARGET): `grn genesis --units-per-block N`, and the local network starts at 10,000 units a block, so it no longer pays out its first hour's coins in minutes. (`test_a_network_chooses_its_starting_difficulty`.)
 - Both tests fail without their fix.
 

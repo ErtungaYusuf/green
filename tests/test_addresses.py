@@ -80,3 +80,12 @@ def test_odd_values_are_not_addresses_or_hex():
         assert not is_address(v)
     assert is_hex("00ff", 4) and not is_hex("00FF", 4) and not is_hex("00f", 4) and not is_hex("00fg", 4)
     assert not is_hex("00f\n", 4) and not is_hex(b"00ff", 4) and not is_hex(None, 4)
+
+
+def test_signatures_checked_once_stay_out_of_the_cache():
+    from green import crypto
+    k = Key.generate()
+    crypto._good_sigs.clear()
+    assert crypto.verify(k.pub_hex, b"voucher 7", k.sign(b"voucher 7"), cache=False)
+    assert not crypto._good_sigs
+    assert crypto.verify(k.pub_hex, b"tx", k.sign(b"tx")) and len(crypto._good_sigs) == 1

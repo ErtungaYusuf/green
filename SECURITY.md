@@ -339,6 +339,14 @@ Residual risks: payments still link the buyer's address to the provider on chain
 - **D2: A finder premium no longer protects anything.** With 1% for the block itself, withholding a found block (to mine on it in secret) forgoes the shares other miners keep publishing, and a block that loses a race still pays as a share. Including shares earns 5% of each; leaving them out earns nothing (their pay stays in the reserve).
 - **D3: Burning cannot create coins.** The supply audit is now `balances + locked + reserve = TOTAL_SUPPLY − burned`, checked by `GET /supply`; `burned` only grows, by a fixed share of the fees of each block. (`test_no_coin_is_created_and_fees_go_back_or_burn`, `test_nearly_all_of_the_emission_pays_for_work_not_luck`.)
 
+## Twenty-first review: before publishing (v0.23.3)
+
+- **E1: Bad signatures were free to relay.** A peer could send transactions with invalid signatures without penalty; each costs a check. Now a peer relaying one gets 50 points (banned at 100). Only signature failures count: nonce, balance and policy refusals can differ between honest nodes.
+- **E2: A burst fix that underpaid miners.** v0.23.2 capped shares per parent at one block's worth; the count before a block is geometric (mean 128), so 13% of blocks exceed 256 and ~13% of share income would have been dropped. Now 1,024 (0.03%).
+- **E4: A pool's units handed out twice.** Two gaps let a unit look free while its result was on its way (accepted by the pool but not yet in the node's buffer; out of the buffer but its commit not yet in the mempool): a second miner computed it for nothing. Closed; one test each, which fails every time without its fix. Found because a test failed one run in ten.
+- **E5: Finished jobs slowed every miner** (found by watching the local network for hours): work selection scanned all jobs, finished ones included, for every try. Fixed in the node. Still open: finished jobs stay in the state until their buyer cancels, so the ledger grows with every job; closing a job by itself once every unit is delivered and settled is a consensus change for a later version.
+- **E3: Busy is not malicious** (v0.23.2): a node that falls behind drops shares, transactions and offers instead of banning the peers that send them; only blocks and headers count against a peer.
+
 ## Still open (needed before production)
 
 The full list, by area, is in [PRODUCTION.md](PRODUCTION.md).
@@ -347,4 +355,5 @@ The full list, by area, is in [PRODUCTION.md](PRODUCTION.md).
 - Data privacy: a miner sees the matrices of the units it computes (see [DESIGN.md](DESIGN.md) §9). The fix is secure hardware (TEE) or secret sharing.
 - The residual risks of the network layer listed above.
 - Data availability of WASM outputs and matmul manifests (above).
+- Finished jobs stay in the state until their buyer cancels them (E5): the ledger grows with every job posted. A job should close by itself once every unit is delivered and settled (a consensus change).
 - Matmul results reach the buyer through a direct fetch from up to four random peers; a real network needs a content-routing layer (e.g. a DHT) so the buyer can always find the miner's data.

@@ -638,3 +638,28 @@ def test_a_node_that_falls_behind_drops_shares_instead_of_blaming_peers():
     assert blamed == [] and me.stats["dropped_when_busy"] == 4
     P2P._receive(me, peer, "headers", b"{}")              # what cannot be dropped still counts
     assert blamed == [peer]
+
+
+def test_a_relayed_bad_signature_counts_against_the_peer_but_policy_does_not():
+    """Cheap fees must not make junk free to send: a bad signature is proof the peer did not
+    check what it relays; a refusal that depends on our state or policy is not."""
+    import threading
+    from types import SimpleNamespace
+    import pytest
+    from green import tx as txmod
+    from green.p2p import Misbehaving, P2P
+    key = Key.generate()
+    good = txmod.make_tx(key, "ab" * 32, "transfer", 0, to=Key.generate().address, amount=10**6)
+    forged = dict(good, amount=10**8)                      # the signature no longer matches
+    node = SimpleNamespace(lock=threading.Lock())
+    me = SimpleNamespace(node=node, tx_wait={}, rejected=set())
+
+    def submit(t, source=None, stem=False):
+        txmod.check_format(t, "ab" * 32)
+        raise txmod.InvalidTx("insufficient balance")      # a state-dependent refusal
+    node.submit_tx = submit
+    peer = SimpleNamespace(known=set(), last_tx=0)
+    P2P._on_tx(me, peer, {"tx": good})                     # no penalty
+    with pytest.raises(Misbehaving):
+        P2P._on_tx(me, peer, {"tx": forged})
+    assert txmod.txid(forged) in me.rejected

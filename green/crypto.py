@@ -157,11 +157,13 @@ class Key:
 # not checked again when its block comes (Bitcoin's sigcache). Only successes are kept,
 # keyed by a hash of key, signature and message together: a hit means exactly this
 # triple verified before. Bounded; emptied when full.
-SIG_CACHE_SIZE = 200_000
+SIG_CACHE_SIZE = 50_000        # a transaction is checked again within a few blocks; 8 full blocks' worth
 _good_sigs: set[bytes] = set()
 
 
-def verify(pub_hex: str, message: bytes, sig_hex: str) -> bool:
+def verify(pub_hex: str, message: bytes, sig_hex: str, cache: bool = True) -> bool:
+    """Ed25519. `cache=False` for signatures that will not be checked again (a provider's
+    vouchers), so they do not crowd out the transactions the cache is for."""
     if not is_hex(pub_hex, 64) or not is_hex(sig_hex, 128):
         return False
     key = h(bytes.fromhex(pub_hex) + bytes.fromhex(sig_hex) + message)    # 32 + 64 bytes, then the message
@@ -171,9 +173,10 @@ def verify(pub_hex: str, message: bytes, sig_hex: str) -> bool:
         Ed25519PublicKey.from_public_bytes(bytes.fromhex(pub_hex)).verify(bytes.fromhex(sig_hex), message)
     except (InvalidSignature, ValueError):
         return False
-    if len(_good_sigs) >= SIG_CACHE_SIZE:
-        _good_sigs.clear()
-    _good_sigs.add(key)
+    if cache:
+        if len(_good_sigs) >= SIG_CACHE_SIZE:
+            _good_sigs.clear()
+        _good_sigs.add(key)
     return True
 
 

@@ -54,7 +54,7 @@ from .crypto import hhex, is_address, is_hex
 from .node import COMMIT_INFLIGHT_CAP, BoundedServer, http_get, http_post
 from .tx import InvalidTx
 
-SHARE_FACTOR = 1024            # pool shares are this much easier than blocks (32 times easier than
+SHARE_FACTOR = 1024            # pool shares are this much easier than blocks (8 times easier than
                                # protocol shares, so payouts follow miners' work closely)
 WINDOW_SHARES = 1000           # PPLNS window
 TEMPLATE_SECONDS = 10          # templates are refreshed this often (and on every new block)
@@ -222,12 +222,19 @@ class Pool:
         if not work.freivalds_check(ua, ub, c, os.urandom(32)):
             raise ValueError("the result is wrong (Freivalds check)")
         with self.lock:
-            if self.assigned.get(key, {}).get("addr") != addr:
+            a = self.assigned.get(key)
+            if a is None or a["addr"] != addr:
                 raise ValueError("the assignment expired")
-            del self.assigned[key]
+            a["until"] = float("inf")                # held until the node has the result: released
+                                                     # earlier, the unit went to a second miner meanwhile
+        try:
+            node._buffer_result({"job": job_id, "unit": list(unit)}, c, by=addr)
+        finally:
+            with self.lock:
+                self.assigned.pop(key, None)         # the node's buffer marks it busy from now on
+        with self.lock:
             self.stats["useful_units"] += 1
             self.units_by[addr] = self.units_by.get(addr, 0) + 1
-        node._buffer_result({"job": job_id, "unit": list(unit)}, c, by=addr)
         return {"accepted": True}
 
     def job_blob(self, job_id: str) -> bytes | None:

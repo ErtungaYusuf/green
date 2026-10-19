@@ -105,8 +105,8 @@ MAX_JOB_UNITS = MAX_JOB_UNITS_PER_DIM ** 3
 # --- Fees and the compute market -----------------------------------------------
 # The base fee is per signature a validator checks, as on Solana (5,000 lamports =
 # 0.000005 SOL): 500 yaprak = 0.000005 GRN. Kept low on purpose; when blocks fill,
-# transactions compete by fee per byte (the priority fee), and half of every fee goes
-# back to the reserve (Solana burns half of its base fees).
+# transactions compete by fee per byte (the priority fee). Of every fee 30% goes back
+# to the reserve and 20% is burned (Solana burns half of its base fees).
 MIN_TX_FEE = 500               # per signature: 1 for a plain transaction, k for k-of-n
 # With fees this low, opening ledger entries must not be: a transfer to an address that
 # holds nothing must send at least this much (Solana's rent-exempt minimum plays the

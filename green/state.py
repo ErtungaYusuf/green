@@ -395,6 +395,9 @@ class State:
         job = self.jobs[job_id]
         if job["closed"] or job["closes_at"] is not None:
             return []
+        d = job["dims"]
+        if len(job["done"]) >= d[0] * d[1] * d[2]:   # finished: answered without listing its units
+            return []
         return [u for u in txmod.all_units(job["dims"])
                 if txmod.unit_key(u) not in job["done"] and txmod.unit_key(u) not in job["reserved"]]
 

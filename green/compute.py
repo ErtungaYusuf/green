@@ -267,7 +267,7 @@ class Provider:
         if total is None or total <= held:
             return held
         if not (type(total) is int and total <= ch["amount"] and isinstance(sig, str)
-                and verify(ch["pub"], txmod.voucher_bytes(self.node.chain.chain_id, cid, total), sig)):
+                and verify(ch["pub"], txmod.voucher_bytes(self.node.chain.chain_id, cid, total), sig, cache=False)):
             raise PaymentRequired("the voucher is not valid for this channel")
         with self.lock:
             if not e["voucher"] or total > e["voucher"][0]:
