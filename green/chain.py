@@ -78,9 +78,13 @@ class BlobStore:
         if self.path:
             file = os.path.join(self.path, key)
             if not os.path.exists(file):
-                with open(file + ".tmp", "wb") as f:
+                # A temporary name of this writer's own: two threads storing the same blob at
+                # once (a block's transactions and a peer's answer) shared one, and the second
+                # rename found it gone. Content-addressed, so whichever rename lands is right.
+                tmp = f"{file}.{os.getpid()}.{threading.get_ident()}.tmp"
+                with open(tmp, "wb") as f:
                     f.write(data)
-                os.replace(file + ".tmp", file)
+                os.replace(tmp, file)
         else:
             self._mem[key] = data
         return key

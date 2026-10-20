@@ -209,3 +209,28 @@ def test_a_data_folder_of_another_network_is_refused(tmp_path):
     with pytest.raises(ValueError, match="another network"):
         Chain(make_genesis(b.address, "net B", timestamp=T0), BlobStore(), store=store)
     store.close()
+
+
+def test_one_blob_stored_by_several_threads_at_once(tmp_path):
+    """Found by the local network's soak test: two threads storing the same blob shared
+    one temporary file name, and the second rename failed (FileNotFoundError), so a
+    compact block's transactions were lost. 200 rounds of 4 threads failed ~half."""
+    import os
+    import threading
+    from green.chain import BlobStore
+    store, errors = BlobStore(str(tmp_path / "blobs")), []
+    for _ in range(100):
+        data = os.urandom(100_000)
+
+        def put():
+            try:
+                store.put(data)
+            except Exception as e:
+                errors.append(e)
+        threads = [threading.Thread(target=put) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert store.get(store.put(data)) == data
+    assert errors == [] and all(not name.endswith(".tmp") for name in os.listdir(tmp_path / "blobs"))
