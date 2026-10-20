@@ -11,7 +11,7 @@ Every release so far is a consensus change: nodes of different versions do not f
 - **Security: compact blocks are checked before they are rebuilt** (SECURITY.md N2): a header with no work behind it could make a node hash its whole mempool under its lock, as often as a peer sent one. The header and its work unit are checked first, and a peer that sends one without work is banned.
 - **Fuzz tests** (`tests/test_fuzz.py`): random signed transactions must be refused only with InvalidTx and, when accepted, take exactly their fee out of circulation; random messages to every P2P handler may only be refused.
 - **A pool caps the units one IP address holds** (32; SECURITY.md N4): made-up payout addresses let one stranger hold every unit a pool could sell.
-- Documented, not yet fixed: how deep a WASM task may recurse depends on the machine's native stack, not on fuel, so a crafted task could get different verdicts on x86-64 and ARM nodes (SECURITY.md, "W-stack").
+- **Consensus: a WASM task's verdict no longer depends on the machine** (SECURITY.md W-stack, SPEC.md §7). How deep a program could recurse was set by the native stack, not fuel, so a crafted task could finish on x86-64 and trap on ARM and split the network on a challenge. Every module now runs instrumented with a deterministic stack limit (green/wasm_stack.py, as in Substrate and NEAR), on a 2 MiB native stack it never comes near, in a thread of its own; the engine's WebAssembly proposals are pinned (tail calls, multi-memory, memory64, GC, exceptions and others off).
 - **A request for a blob the node lacks no longer scans the state** (SECURITY.md N3): 30 ms under the node's lock per `getblob`, free for the asker. The cheap tests (do we hold it, is the peer's budget left) come first.
 
 ## 0.24.0

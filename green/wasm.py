@@ -14,7 +14,11 @@ Determinism and safety come from the engine configuration:
     WebAssembly;
   * no WASI and no host imports, so the guest has no clock, no randomness, no
     I/O, no threads -- nothing nondeterministic and no way out of the sandbox;
-  * a hard memory cap stops memory bombs.
+  * a hard memory cap stops memory bombs;
+  * a stack limit counted in the module itself (green/wasm_stack.py), far below the
+    native stack, so how deep a program may recurse is the same on every machine;
+  * every WebAssembly proposal not listed below is off, so the instruction set is
+    exactly the one wasm_stack.py decodes.
 
 ABI: the host writes the input at IN_PTR, then calls
     green_run(in_ptr: i32, in_len: i32) -> i64
@@ -24,13 +28,20 @@ memory. No multi-value or reference-type features are needed.
 
 import atexit
 import hashlib
+import threading
 
-from . import params
+from . import params, wasm_stack
 
 IN_PTR = 0x10000                 # input is written at 64 KiB, leaving page 0 for the guest
 DEFAULT_MAX_MEMORY = 256 << 20   # 256 MiB
 DEFAULT_FUEL = params.MAX_TASK_FUEL
 ENTRY = "green_run"
+# Native stack for WASM code, and the thread that runs it. wasm_stack.STACK_LIMIT
+# (65,536 slots) needs at most 1 MiB even if every slot were a spilled v128 (16 bytes);
+# the worst measured on x86-64 is 3.6 bytes a slot (tests/test_wasm.py), so this
+# native limit is never what stops a program.
+MAX_WASM_STACK = 2 << 20          # the most wasmtime allows (its async stack size)
+THREAD_STACK = MAX_WASM_STACK + (16 << 20)
 WASM_MAGIC = b"\x00asm\x01\x00\x00\x00"
 _SECTION_IMPORT, _SECTION_EXPORT = 2, 7
 _EXPORT_FUNC, _EXPORT_MEMORY = 0, 2
@@ -74,7 +85,7 @@ def result_hash(output: bytes) -> str:
     return hashlib.blake2b(output, digest_size=32).hexdigest()
 
 
-def _engine():
+def _engine(max_wasm_stack: int = MAX_WASM_STACK):
     import wasmtime
 
     cfg = wasmtime.Config()
@@ -85,6 +96,13 @@ def _engine():
     cfg.wasm_multi_value = True
     cfg.wasm_simd = True                           # fixed-width SIMD is deterministic
     cfg.wasm_relaxed_simd = False                  # relaxed SIMD is NOT deterministic
+    # Everything else off: the instruction set must be the one wasm_stack.py decodes.
+    # (Reference types stay on: wasmtime's component-model-async needs them.)
+    for name in ("wasm_tail_call", "wasm_multi_memory", "wasm_memory64", "wasm_gc",
+                 "wasm_function_references", "wasm_exceptions", "wasm_wide_arithmetic", "wasm_custom_page_sizes",
+                 "wasm_stack_switching", "wasm_component_model", "gc_support"):
+        setattr(cfg, name, False)
+    cfg.max_wasm_stack = max_wasm_stack
     return wasmtime.Engine(cfg)
 
 
@@ -171,6 +189,56 @@ def validate_module(module_bytes: bytes) -> None:
         raise ComputeError("malformed module sections") from None
     if exports.get(ENTRY) != _EXPORT_FUNC or exports.get("memory") != _EXPORT_MEMORY:
         raise ComputeError(f"module must export function '{ENTRY}' and memory 'memory'")
+    _instrumented(module_bytes)                    # refused now, not when a challenge re-runs it
+
+
+_INSTRUMENTED: dict[str, bytes] = {}
+_INSTRUMENTED_LOCK = threading.Lock()
+
+
+def _instrumented(module_bytes: bytes) -> bytes:
+    """The module with its deterministic stack limit (cached by its hash)."""
+    key = program_id(module_bytes)
+    with _INSTRUMENTED_LOCK:
+        done = _INSTRUMENTED.get(key)
+    if done is not None:
+        return done
+    try:
+        done = wasm_stack.instrument(module_bytes)
+    except (wasm_stack.Uninstrumentable, IndexError) as e:
+        raise ComputeError(f"module cannot be given a stack limit: {e}") from None
+    with _INSTRUMENTED_LOCK:
+        if len(_INSTRUMENTED) > 64:
+            _INSTRUMENTED.clear()
+        _INSTRUMENTED[key] = done
+    return done
+
+
+_THREAD_LOCK = threading.Lock()
+
+
+def _on_big_stack(fn):
+    """Run fn() in a thread whose native stack holds MAX_WASM_STACK with room to spare
+    (a worker thread's own stack can be as small as 512 KiB, on macOS)."""
+    box = {}
+
+    def target():
+        try:
+            box["value"] = fn()
+        except BaseException as e:                     # handed back to the caller
+            box["error"] = e
+    with _THREAD_LOCK:
+        old = threading.stack_size()
+        threading.stack_size(THREAD_STACK)
+        try:
+            t = threading.Thread(target=target, name="wasm", daemon=True)
+            t.start()
+        finally:
+            threading.stack_size(old)
+    t.join()
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
 
 
 def run(module_bytes: bytes, input_bytes: bytes, fuel: int = DEFAULT_FUEL,
@@ -180,6 +248,18 @@ def run(module_bytes: bytes, input_bytes: bytes, fuel: int = DEFAULT_FUEL,
     The same arguments always give the same return value on any machine, which
     is what makes a result verifiable by re-execution.
     """
+    if not module_bytes.startswith(WASM_MAGIC):
+        raise ComputeError("not a WebAssembly module")
+    try:
+        import wasmtime
+        wasmtime.Module.validate(engine(), module_bytes)
+    except Exception as e:
+        raise ComputeError(f"invalid module: {str(e).splitlines()[0]}") from None
+    instrumented = _instrumented(module_bytes)
+    return _on_big_stack(lambda: _run(instrumented, input_bytes, fuel, max_memory))
+
+
+def _run(module_bytes: bytes, input_bytes: bytes, fuel: int, max_memory: int) -> tuple[bytes, int]:
     import wasmtime
 
     try:

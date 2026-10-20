@@ -213,7 +213,9 @@ Not consensus, but defined here so that nodes can exchange them. A snapshot of t
 
 ## 7. WASM execution
 
-Tasks run on wasmtime WASMTIME_VERSION (a consensus constant) with fuel metering, NaN canonicalization, threads and relaxed SIMD disabled, and no imports. The host writes the input at address 65,536 (growing memory if needed), calls `green_run(65536, len)`, and reads `(out_ptr, out_len) = (ret >> 32, ret & 0xFFFFFFFF)` from the i64 return value. A trap, running out of fuel, or an output outside memory is a failed run. A claimed output is right iff the run succeeds and `hex(H(output))` equals it. Adjudication cost is `fuel + program_bytes · COMPILE_COST_PER_BYTE`, at most MAX_BLOCK_ADJUDICATION per block.
+Tasks run on wasmtime WASMTIME_VERSION (a consensus constant) with fuel metering, NaN canonicalization and no imports. The proposals enabled are exactly: bulk memory, multi-value, reference types and fixed-width SIMD (plus what core WebAssembly 2.0 always has: sign extension, saturating conversions, mutable globals); threads, relaxed SIMD, tail calls, multi-memory, memory64, GC, function references, exceptions, wide arithmetic, custom page sizes and stack switching are disabled.
+
+**Stack limit (since v0.24.1).** The module that runs is not the posted one but its instrumented form, which every node derives the same way (green/wasm_stack.py): each defined function f gets `cost(f) = params + locals + H(f) + 2 + 16`, where `H(f)` is the most values f's operand stack ever holds (the standard validation algorithm counting values, with unreachable code reset to its frame's height), 2 for the check below and 16 for the frame. A new global `(mut i32) = 0` is appended (index = number of existing globals; a global section is created before the first section that follows it if there is none). Every `call f` becomes `global.get g; i32.const cost(f); i32.add; global.set g; global.get g; i32.const STACK_LIMIT; i32.gt_u; if; unreachable; end; call f; global.get g; i32.const cost(f); i32.sub; global.set g`, and every `call_indirect` the same with the largest cost of any function. Nothing else changes, so a program that stays under the limit computes what it did; the extra instructions consume fuel like any other. A module the instrumentation cannot decode is invalid at `task_post`. `STACK_LIMIT` = 65,536, and the native stack (`max_wasm_stack`, 2 MiB) is always far larger than the limit needs, so how deep a program recurses is the same on every machine. The host writes the input at address 65,536 (growing memory if needed), calls `green_run(65536, len)`, and reads `(out_ptr, out_len) = (ret >> 32, ret & 0xFFFFFFFF)` from the i64 return value. A trap, running out of fuel, or an output outside memory is a failed run. A claimed output is right iff the run succeeds and `hex(H(output))` equals it. Adjudication cost is `fuel + program_bytes · COMPILE_COST_PER_BYTE`, at most MAX_BLOCK_ADJUDICATION per block.
 
 ## 8. Not consensus (policy of the reference node)
 
@@ -296,6 +298,7 @@ A node on another network derives different keys and fails at the first frame.
 | MAX_BLOCK_JOB_RESPONSES, BOND_DIVISOR, CANCEL_DELAY | 32, 10, 40 |
 | `bond_for(price)` | ceil(price / BOND_DIVISOR) |
 | WASMTIME_VERSION | 49.0.0 |
+| STACK_LIMIT (WASM) | 65,536 slots |
 | MAX_GUARD_PERIOD | 100,000,000 |
 | MAX_MULTISIG_KEYS, MAX_BLOCK_SIGS | 16, 6,000 |
 | MAX_PAYEES, MAX_PAYEE_WEIGHT | 32, 2^32 |
