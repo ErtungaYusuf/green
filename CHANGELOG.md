@@ -9,6 +9,9 @@ Every release so far is a consensus change: nodes of different versions do not f
 - Both are consensus changes.
 - **Security: a node carrying a sealed request followed the provider's redirect** into its own network (cloud metadata, a router, its own API) and handed the answer back (SECURITY.md N1). No HTTP request of the package follows redirects any more.
 - **Security: compact blocks are checked before they are rebuilt** (SECURITY.md N2): a header with no work behind it could make a node hash its whole mempool under its lock, as often as a peer sent one. The header and its work unit are checked first, and a peer that sends one without work is banned.
+- **Fuzz tests** (`tests/test_fuzz.py`): random signed transactions must be refused only with InvalidTx and, when accepted, take exactly their fee out of circulation; random messages to every P2P handler may only be refused.
+- **A pool caps the units one IP address holds** (32; SECURITY.md N4): made-up payout addresses let one stranger hold every unit a pool could sell.
+- Documented, not yet fixed: how deep a WASM task may recurse depends on the machine's native stack, not on fuel, so a crafted task could get different verdicts on x86-64 and ARM nodes (SECURITY.md, "W-stack").
 - **A request for a blob the node lacks no longer scans the state** (SECURITY.md N3): 30 ms under the node's lock per `getblob`, free for the asker. The cheap tests (do we hold it, is the peer's budget left) come first.
 
 ## 0.24.0

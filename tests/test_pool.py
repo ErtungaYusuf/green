@@ -378,3 +378,28 @@ def test_units_on_their_way_to_a_commit_stay_taken(selling_pool):
     wait_until(lambda: taken_while_committing, "the batch's commit")
     assert taken_while_committing[0] is True
     assert not node._committing                       # released once the commit is in the mempool
+
+
+def test_one_client_cannot_hold_every_unit(selling_pool, monkeypatch):
+    """Payout addresses cost nothing: a stranger naming four made-up addresses held all
+    16 units of a job (8 each) and an honest miner got none, again whenever they
+    expired. What one IP address holds is capped; local clients (a local network's
+    miners) are exempt."""
+    node, pool, operator = selling_pool
+    monkeypatch.setattr(poolmod, "UNITS_PER_CLIENT", 8)
+    n = params.UNIT
+    one = np.ones((n, 16 * n), dtype=np.int8)
+    job_id = post_job_on(node, operator, one, one.T.copy())
+    pool.useful = False                          # a helper mines the job's block, without taking its units
+    m = PoolMiner(f"http://127.0.0.1:{pool.port}", Key.generate().address, log=lambda m: None)
+    t = threading.Thread(target=m.run, args=(60,), daemon=True)
+    t.start()
+    wait_until(lambda: job_id in node.chain.state.jobs, "the job on chain")
+    m.stop()
+    t.join(15)
+    pool.useful = True
+    hoarded = sum(len(pool.assign(Key.generate().address, client="1.2.3.4")) for _ in range(4))
+    assert hoarded == 8
+    assert len(pool.assign(Key.generate().address, client="5.6.7.8")) == 8     # an honest miner gets work
+    pool.assigned.clear()
+    assert sum(len(pool.assign(Key.generate().address, client="127.0.0.1")) for _ in range(2)) == 16

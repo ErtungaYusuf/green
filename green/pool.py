@@ -52,6 +52,7 @@ from .chain import (MAX_JOB_BLOB, BlobStore, InvalidBlock, MissingData, block_ha
                     target_of, work_inputs)
 from .crypto import hhex, is_address, is_hex
 from .node import COMMIT_INFLIGHT_CAP, BoundedServer, http_get, http_post
+from .p2p import is_local
 from .tx import InvalidTx
 
 SHARE_FACTOR = 1024            # pool shares are this much easier than blocks (8 times easier than
@@ -63,6 +64,7 @@ FEE_PERCENT = 1                # the pool operator's share of each block and eac
 BAD_SHARE_LIMIT = 20           # invalid shares or results from one client before it is refused for a while
 BAD_SHARE_PAUSE = 600
 UNITS_PER_MINER = 8            # useful units a miner holds at a time
+UNITS_PER_CLIENT = 4 * UNITS_PER_MINER   # ...and one IP address, whatever payout addresses it names
 ASSIGN_SECONDS = 120           # a unit not returned by then goes to someone else
 MAX_SHARE_BODY = 64 * 1024
 MAX_RESULT_BODY = 512 * 1024   # one unit's result (256 KiB) in base64, plus the envelope
@@ -88,7 +90,7 @@ class Pool:
         self.current: str | None = None
         self.seen: set[str] = set()                           # seeds of accepted shares (no double counting)
         self.bad: dict[str, list] = {}                        # client -> [count, until]
-        self.assigned: dict[tuple, dict] = {}                 # (job, unit key) -> {"addr", "unit", "until"}
+        self.assigned: dict[tuple, dict] = {}                 # (job, unit key) -> {"addr", "unit", "until", "client"}
         self.units_by: dict[str, int] = {}                    # address -> results accepted
         self.stats = {"shares": 0, "rejected": 0, "blocks": 0, "useful_units": 0, "useful_shares": 0}
         self.server = None
@@ -145,10 +147,14 @@ class Pool:
         with self.lock:
             return {k for k, a in self.assigned.items() if a["until"] >= now}
 
-    def assign(self, addr: str) -> list:
+    def assign(self, addr: str, client: str = "") -> list:
         """The open units `addr` should compute: those it holds, topped up to
         UNITS_PER_MINER from the best-paying jobs, as far as the pool's balance can
-        bond them (units nobody can bond would be computed for nothing)."""
+        bond them (units nobody can bond would be computed for nothing). Payout
+        addresses cost nothing, so what one `client` (IP address) holds is capped too:
+        otherwise one stranger naming new addresses held every unit, unpaid and
+        uncomputed, and asked again when they expired. Local clients are exempt (a
+        local network's miners share one address)."""
         if not self.useful or not is_address(addr):
             return []
         node = self.node
@@ -173,6 +179,8 @@ class Pool:
                         funds -= params.bond_for(state.jobs[k[0]]["price"])
                 mine = [[k[0], a["unit"]] for k, a in self.assigned.items() if a["addr"] == addr]
                 room = min(UNITS_PER_MINER - len(mine), COMMIT_INFLIGHT_CAP - in_flight - len(self.assigned))
+                if client and not is_local(client):
+                    room = min(room, UNITS_PER_CLIENT - sum(a["client"] == client for a in self.assigned.values()))
                 for job_id, job in jobs:
                     bond = params.bond_for(job["price"])
                     for u in open_units[job_id]:
@@ -181,7 +189,8 @@ class Pool:
                         key = (job_id, txmod.unit_key(u))
                         if key in busy or key in self.assigned:
                             continue
-                        self.assigned[key] = {"addr": addr, "unit": list(u), "until": now + ASSIGN_SECONDS}
+                        self.assigned[key] = {"addr": addr, "unit": list(u), "until": now + ASSIGN_SECONDS,
+                                              "client": client}
                         mine.append([job_id, list(u)])
                         funds -= bond
                         room -= 1
@@ -399,7 +408,7 @@ def _handler(pool: Pool):
             u = urlparse(self.path)
             if u.path == "/template":
                 addr = parse_qs(u.query).get("address", [""])[0]
-                return self._send(200, _public(pool.template(), pool.assign(addr)))
+                return self._send(200, _public(pool.template(), pool.assign(addr, self.client_address[0])))
             if u.path.startswith("/job/"):
                 data = pool.job_blob(u.path[len("/job/"):])
                 if data is None:
