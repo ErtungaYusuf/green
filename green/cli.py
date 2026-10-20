@@ -392,7 +392,9 @@ def cmd_checkpoint(args):
         else:
             password = os.environ.get(CHECKPOINT_PASSWORD_ENV) or ask_password(confirm=True)
             record["encrypted"] = encrypt_secret(key.secret_hex(), password)
-        with open(path, "w", encoding="utf-8") as f:
+        # Readable by its owner only, like the wallet: it decides which chain is final.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(record, f, indent=1)
         print(f"Checkpoint key: {path}")
         print(f"Public key: {key.pub_hex}")

@@ -233,6 +233,10 @@ def test_the_founders_commands_from_key_to_end(tmp_path, capsys):
     d = str(tmp_path / "founder")
     assert cli.main(["--data", d, "checkpoint", "key", "--no-password"]) == 0
     pub = json.load(open(cli.checkpoint_key_path(d)))["pub"]
+    import os
+    import stat
+    if os.name == "posix":                                    # its owner's only, like the wallet
+        assert stat.S_IMODE(os.stat(cli.checkpoint_key_path(d)).st_mode) == 0o600
     assert cli.main(["--data", d, "wallet", "new", "--no-password"]) == 0
     assert cli.main(["--data", d, "genesis", "--msg", "founded", "--checkpoints", "--checkpoint-until", "5000"]) == 0
     genesis = json.load(open(f"{d}/genesis.json"))
