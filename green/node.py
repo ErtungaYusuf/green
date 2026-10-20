@@ -344,6 +344,7 @@ class Node:
             # budget must wait for a later block, not be dropped.
             s.adjudication_used = 0
             s.responses_used = 0
+            s.data_used = 0
             if tid == must_keep:
                 self.chain.apply_tx(s, t, height)
                 keep[tid] = t
@@ -391,7 +392,7 @@ class Node:
         for tid, e in self.p2p.stempool.items():
             if tid == skip or local_only and not e["local"]:
                 continue
-            s.adjudication_used = s.responses_used = 0
+            s.adjudication_used = s.responses_used = s.data_used = 0
             try:
                 self.chain.apply_tx(s, e["tx"], height)
             except (InvalidTx, MissingData):
@@ -420,7 +421,7 @@ class Node:
                     for e in self.p2p.stempool.values()):
                 return False
             s = self._stem_view(skip=tid)
-            s.adjudication_used = s.responses_used = 0
+            s.adjudication_used = s.responses_used = s.data_used = 0
             self.chain.apply_tx(s, t, self.chain.height + 1)
         return self.p2p.stem_tx(t, tid, source)
 
@@ -441,6 +442,7 @@ class Node:
                 # (tests/test_atomicity.py), and no layer is added per transaction.
                 self._pending.adjudication_used = 0
                 self._pending.responses_used = 0
+                self._pending.data_used = 0
                 self.chain.apply_tx(self._pending, t, self.chain.height + 1)
                 self.mempool[tid] = t
                 return True

@@ -251,6 +251,7 @@ class State:
         # state.copy(), so they reset exactly at block boundaries.
         self.adjudication_used = 0
         self.responses_used = 0
+        self.data_used = 0
         # The lattice hash of this state's content, valid once commit() has run
         # (a parentless state starts as the empty ledger with no open disputes).
         self.lattice = parent.lattice if parent else _lattice([entry_bytes("meta", "open_disputes", 0)], [])

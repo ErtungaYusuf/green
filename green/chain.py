@@ -383,6 +383,9 @@ class Chain:
         self.authority = checkpoint_authority(genesis)        # (key, until) or None
         self.checkpoint = store.get_meta("checkpoint", None) if store is not None else None
         self.checkpoint_end = store.get_meta("checkpoint_end", None) if store is not None else None
+        # A signed checkpoint whose block this node does not have yet: taken once the block
+        # arrives and is found to extend the current checkpoint (never enforced before).
+        self.pending_checkpoint: dict | None = None
         if store is not None and store.get_meta("genesis") is not None:
             if store.get_meta("genesis") != g:
                 raise ValueError("this data directory belongs to another network (different genesis)")
@@ -557,13 +560,38 @@ class Chain:
         cur = self.checkpoint
         if cur is not None and h <= cur["height"]:
             return False
-        if cur is not None and b in self.meta and self.ancestor_at(b, cur["height"]) not in (None, cur["block"]):
+        if b not in self.meta:
+            # Not checkable yet, so not enforced yet: enforcing a checkpoint on a block nobody
+            # has would halt the network for good, and one on a branch nobody has seen could
+            # finalize a fork below the last checkpoint (a stolen key could do either).
+            pend = self.pending_checkpoint
+            if pend is not None and h <= pend["height"]:
+                return False
+            self.pending_checkpoint = {"height": h, "block": b, "sig": sig}
+            return True
+        if self.meta[b]["height"] != h:
+            raise InvalidCheckpoint("the block is not at that height")
+        if cur is not None and self.ancestor_at(b, cur["height"]) != cur["block"]:
             raise InvalidCheckpoint("does not extend the previous checkpoint")
+        if self.pending_checkpoint is not None and self.pending_checkpoint["height"] <= h:
+            self.pending_checkpoint = None
         self.checkpoint = {"height": h, "block": b, "sig": sig}
         if self.store is not None:
             self.store.set_meta("checkpoint", self.checkpoint)
         self._follow_checkpoint()
         return True
+
+    def _take_pending_checkpoint(self, bh: str) -> None:
+        """The block a pending checkpoint names has arrived: take the checkpoint if it
+        extends the current one, forget it otherwise."""
+        pend = self.pending_checkpoint
+        if pend is None or pend["block"] != bh:
+            return
+        self.pending_checkpoint = None
+        try:
+            self.accept_checkpoint(pend)
+        except InvalidCheckpoint:
+            pass
 
     def _follow_checkpoint(self) -> None:
         """Put the tip on the checkpoint's branch: the most work block that descends from it."""
@@ -583,7 +611,7 @@ class Chain:
 
     def checkpoint_status(self) -> dict:
         key, until = self.authority if self.authority else (None, None)
-        return {"authority": key, "until": until, "checkpoint": self.checkpoint,
+        return {"authority": key, "until": until, "checkpoint": self.checkpoint, "pending": self.pending_checkpoint,
                 "ended": self.checkpoint_end is not None, "end": self.checkpoint_end}
 
     def median_time_past(self, block_hash_: str, lookup=None) -> int:
@@ -844,9 +872,13 @@ class Chain:
             escrow = tx["price"] * mu * ku * nu
             if bal < escrow + fee:
                 raise InvalidTx("insufficient balance for escrow")
-            a, b = self.blobs.job(tx["job"], txmod.job_blob_size(tx["dims"]))
+            data = txmod.job_blob_size(tx["dims"])
+            if s.data_used + data > params.MAX_BLOCK_DATA:     # before anything is fetched
+                raise InvalidTx("block data budget exhausted, try the next block")
+            a, b = self.blobs.job(tx["job"], data)
             if txmod.job_dims_units(a, b) != tx["dims"]:
                 raise InvalidTx("dims do not match the job data")
+            s.data_used += data
             s.set_balance(addr, bal - escrow - fee)
             s.jobs[tx["job"]] = {"buyer": addr, "dims": list(tx["dims"]), "price": tx["price"],
                                  "escrow": escrow, "done": {}, "delivered": {}, "reserved": {},
@@ -1013,7 +1045,11 @@ class Chain:
                 raise InvalidTx(f"input larger than {params.MAX_TASK_INPUT_BYTES} bytes")
             if fee < txmod.task_post_fee(len(prog), len(inp)):
                 raise InvalidTx(f"fee must be at least {txmod.task_post_fee(len(prog), len(inp))}")
+            data = len(prog) * params.PROGRAM_DATA_WEIGHT + len(inp)
+            if s.data_used + data > params.MAX_BLOCK_DATA:     # before the program is validated
+                raise InvalidTx("block data budget exhausted, try the next block")
             self._validate_program(tx["prog"], prog)
+            s.data_used += data
             s.set_balance(addr, bal - tx["price"] - fee)
             s.tasks[task_id] = {"buyer": addr, "prog": tx["prog"], "input": tx["input"],
                                 "prog_size": len(prog), "fuel": tx["fuel"], "price": tx["price"],
@@ -1415,12 +1451,14 @@ class Chain:
         if self.store is None:
             if self.meta[bh]["chainwork"] > self.meta[self.tip]["chainwork"]:
                 self._set_tip(bh)
+            self._take_pending_checkpoint(bh)
             return "added"
         with self.store.transaction():          # the block, its diff and any tip/base move, atomically
             self.store.put_block(bh, block, height, self.meta[bh]["chainwork"])
             self.store.put_diff(bh, height, new_state.diff())
             if self.meta[bh]["chainwork"] > self.meta[self.tip]["chainwork"]:
                 self._set_tip(bh)
+        self._take_pending_checkpoint(bh)
         return "added"
 
     def _set_tip(self, bh: str) -> None:

@@ -160,6 +160,13 @@ MAX_TASK_PROGRAM_BYTES = 1 << 20  # ~0.11 s to compile
 MAX_TASK_INPUT_BYTES = 4 << 20
 COMPILE_COST_PER_BYTE = 200       # adjudication cost units per program byte
 MAX_BLOCK_ADJUDICATION = 1_500_000_000   # cost units per block, ~1 s worst case
+# Data a block's posts make every validator fetch and check: a job's matrices (up to
+# 33.5 MB) and a task's program and input. Without a cap, a block of 3,000 posts named
+# gigabytes. A program counts PROGRAM_DATA_WEIGHT times its size: validating and
+# instrumenting it costs ~0.4 s per MiB (green/wasm_stack.py), so a block holds at most
+# 2 MiB of new programs.
+MAX_BLOCK_DATA = 64 << 20
+PROGRAM_DATA_WEIGHT = 32
 ADJUDICATION_FEE_PER_MUNIT = 1_000       # yaprak per million cost units, paid by the challenger
 TASK_RESERVE_BLOCKS = 20          # a commit reserves the task for this long
 TASK_CHALLENGE_BLOCKS = 40        # window to dispute a revealed result

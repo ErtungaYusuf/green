@@ -333,3 +333,48 @@ def test_money_is_conserved_through_random_task_activity():
 def test_wasm_engine_version_is_pinned():
     assert wasm.installed_version() == params.WASMTIME_VERSION
     wasm.check_engine()
+
+
+def test_a_block_can_name_only_so_much_new_data(monkeypatch):
+    """Every validator fetches and checks the data a block's posts name: a job's
+    matrices, a task's program (validated and instrumented, so it weighs more) and
+    input. A block of thousands of posts used to name gigabytes. Past MAX_BLOCK_DATA a
+    post waits for the next block, and a block that crams it in is invalid; the budget
+    is checked before anything is fetched."""
+    import numpy as np
+    miner, buyer = Key.generate(), Key.generate()
+    chain = new_chain(miner)
+    fund(chain, miner, buyer, 10**8)
+    job_bytes = txmod.job_blob_size([1, 1, 1])
+    monkeypatch.setattr(params, "MAX_BLOCK_DATA", 2 * job_bytes)
+    rng = np.random.default_rng(5)
+    posts = []
+    for i in range(3):
+        a = rng.integers(-128, 128, size=(params.UNIT, params.UNIT), dtype=np.int8)
+        job = chain.blobs.put(txmod.encode_job(a, a))
+        posts.append(tx(chain, buyer, "job_post", job=job, dims=[1, 1, 1], price=10, nonce=i))
+    _, chosen, _ = chain.build_template(miner.address, posts)
+    assert chosen == posts[:2]                                           # the third waits
+    block, _ = mine(chain, miner, posts[:2])
+    block["txs"] = posts
+    from green.crypto import merkle_root
+    block["header"]["tx_root"] = merkle_root([txmod.txid(t) for t in posts])
+    block, _ = grind(chain, block["header"], posts)
+    with pytest.raises(InvalidBlock, match="budget"):
+        chain.add_block(block)
+    s = chain.state.copy()                                               # over the budget: refused
+    for t in posts[:2]:                                                  # without fetching anything
+        chain.apply_tx(s, t, chain.height + 1)
+    unknown = tx(chain, buyer, "job_post", job="ab" * 32, dims=[1, 1, 1], price=10, nonce=2)
+    with pytest.raises(InvalidTx, match="budget"):
+        chain.apply_tx(s, unknown, chain.height + 1)
+    first = tx(chain, buyer, "job_post", job="ab" * 32, dims=[1, 1, 1], price=10, nonce=0)
+    with pytest.raises(MissingData):                                     # (with room, it would fetch)
+        chain.apply_tx(chain.state.copy(), first, chain.height + 1)
+    # A program weighs PROGRAM_DATA_WEIGHT times its size.
+    monkeypatch.setattr(params, "MAX_BLOCK_DATA", len(SUM) * params.PROGRAM_DATA_WEIGHT + 4)
+    t1, t2 = post_tx(chain, buyer, data=b"abcd", nonce=0), post_tx(chain, buyer, data=b"abce", nonce=1)
+    s = chain.state.copy()
+    chain.apply_tx(s, t1, chain.height + 1)
+    with pytest.raises(InvalidTx, match="budget"):
+        chain.apply_tx(s, t2, chain.height + 1)

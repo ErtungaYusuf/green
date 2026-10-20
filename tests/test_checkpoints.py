@@ -106,6 +106,64 @@ def test_checkpoints_only_move_forward_along_one_chain():
     assert chain.checkpoint["height"] == 2
 
 
+def test_a_checkpoint_on_a_block_nobody_has_halts_nothing():
+    """A stolen key signs a checkpoint on a made-up block. Enforced at once, it made
+    every next block "conflict with the checkpoint", for good: ending the period keeps
+    the last checkpoint. A checkpoint is enforced only once its block is here."""
+    founder = Key.generate()
+    chain, miner = network(founder)
+    for _ in range(4):
+        add(chain, miner)
+    chain.accept_checkpoint(sign(founder, chain, 3, chain.main[3]))
+    assert chain.accept_checkpoint(sign(founder, chain, 5, "ab" * 32)) is True     # passed on, not enforced
+    assert chain.checkpoint["height"] == 3 and chain.pending_checkpoint["block"] == "ab" * 32
+    chain.accept_checkpoint({"end": True, "sig": founder.sign(checkpoint_end_bytes(chain.chain_id))})
+    for _ in range(3):
+        add(chain, miner)                                                 # the network goes on
+
+
+def test_a_checkpoint_on_a_branch_nobody_has_seen_cannot_undo_the_last_one():
+    """A stolen key and a private branch forked below the last checkpoint: signed
+    before the branch was seen, its checkpoint used to be taken unchecked, and the
+    branch then replaced the checkpointed block. Now it waits for its block, which
+    never comes in: the branch leaves the last checkpoint out."""
+    founder, thief = Key.generate(), Key.generate()
+    chain, miner = network(founder)
+    for _ in range(4):
+        add(chain, miner)
+    shadow = Chain(chain.block(chain.main[0]), BlobStore())             # the thief's own node
+    shadow.add_block(chain.block(chain.main[1]))
+    rival = []
+    for _ in range(4):
+        block, _ = mine(shadow, thief, t=T0 + 10 * (shadow.height + 1) + 7)
+        assert shadow.add_block(block) == "added"
+        rival.append(block)                                               # heights 2..5 off block 1
+    honest_2 = chain.main[2]
+    chain.accept_checkpoint(sign(founder, chain, 2, honest_2))
+    chain.accept_checkpoint(sign(founder, chain, 3, block_hash(rival[1])))
+    for block in rival:
+        try:
+            chain.add_block(block)
+        except InvalidBlock:
+            pass                                                          # past the checkpoint: refused
+    assert chain.checkpoint["block"] == honest_2 and not chain.has_block(block_hash(rival[1]))
+    assert block_hash(chain.block_at(2)) == honest_2 and chain.ancestor_at(chain.tip, 2) == honest_2
+
+
+def test_a_checkpoint_heard_before_its_block_is_taken_when_the_block_arrives():
+    founder = Key.generate()
+    chain, miner = network(founder)
+    for _ in range(3):
+        add(chain, miner)
+    follower = Chain(chain.block(chain.main[0]), BlobStore())
+    for h in (1, 2):
+        follower.add_block(chain.block(chain.main[h]))
+    cp = sign(founder, chain, 3, chain.main[3])
+    assert follower.accept_checkpoint(cp) is True and follower.checkpoint is None
+    follower.add_block(chain.block(chain.main[3]))
+    assert follower.checkpoint == cp and follower.pending_checkpoint is None
+
+
 def test_the_founder_ends_the_checkpoint_period():
     founder = Key.generate()
     chain, miner = network(founder)

@@ -2033,7 +2033,7 @@ class P2P:
             raise Misbehaving(BAN_SCORE, "header whose work unit does not check out")
         with self.node.lock:
             last = new[-1]
-            if self.hindex[last]["work"] > self._work_of(self.best):
+            if self._prefer(last):
                 self.best = last
             peer.best_work = max(peer.best_work, self.hindex[last]["work"])
             peer.best_height = max(peer.best_height, self.hindex[last]["header"]["height"])
@@ -2325,6 +2325,9 @@ class P2P:
                 self._path_for = None
             if self.best not in self.hindex and not self.chain.has_block(self.best) or self.best in drop:
                 self.best = max(list(self.hindex) + [self.chain.tip], key=self._work_of)
+            if b in self.hindex and self._prefer(b):
+                self.best = b                        # headers that extend it take over from here
+                self._path_for = None
             missing = b not in self.chain.meta
         if missing:
             for p in ([source] if isinstance(source, Peer) else []) + self.all_peers():
@@ -2332,10 +2335,41 @@ class P2P:
                 self._ask_headers(p)
                 break
 
+    def _checkpoint_target(self) -> dict | None:
+        """The checkpoint downloads should head for: a pending one (its block not here
+        yet) before the one in force."""
+        return self.chain.pending_checkpoint or self.chain.checkpoint
+
+    def _has_checkpoint(self, bh: str, cp: dict) -> bool:
+        """Whether the header chain ending at `bh` keeps the checkpoint (or is below it)."""
+        cur = bh
+        try:
+            while True:
+                hdr = self._lookup(cur)
+                if hdr["height"] <= cp["height"]:
+                    return hdr["height"] < cp["height"] or cur == cp["block"]
+                cur = hdr["prev"]
+        except (KeyError, TypeError):
+            return False
+
+    def _prefer(self, cand: str, ties: bool = False) -> bool:
+        """Whether `cand` should replace `best` as the header chain to download: one that
+        keeps the checkpoint beats one that leaves it out, then the most work. A node
+        that hears a checkpoint whose block it lacks (one joining while an attacker
+        offers a heavier chain) downloads the founder's chain instead of the heavier one,
+        and takes the checkpoint once its block arrives."""
+        cp = self._checkpoint_target()
+        if cp is not None:
+            keeps, best_keeps = self._has_checkpoint(cand, cp), self._has_checkpoint(self.best, cp)
+            if keeps != best_keeps:
+                return keeps
+        work, best = self._work_of(cand), self._work_of(self.best)
+        return work > best or ties and work >= best
+
     def on_new_tip(self) -> None:
         """Called by the node when its chain moves: keep `best` at least the tip."""
         with self.node.lock:
-            if self._work_of(self.chain.tip) >= self._work_of(self.best):
+            if self._prefer(self.chain.tip, ties=True):
                 self.best = self.chain.tip
                 self._path_for = None
 
