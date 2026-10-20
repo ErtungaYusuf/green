@@ -361,7 +361,8 @@ A young proof-of-work network has little work behind it, and Green's work runs o
 ## Twenty-third review: a bond paid past the guardian (v0.24.1)
 
 - **G1: A guarded account could pay anyone past its guardian's limit.** Bonds did not count as spending, because they come back to an honest sender; but a sender that wants them gone can lose them on purpose, and they go to someone else. An agent with a limit of 100,000 committed to one unit of a job its accomplice posted at a high price and never revealed: the 4,000,000 bond went to the accomplice (the job's buyer), 40 times the limit, and the accomplice cancelled the job to get its escrow back. The WASM market had the same hole twice (a worker's bond goes to the buyer, a wrong challenger's to the worker). Every bond now counts against the limit when it is locked. An honest guarded miner needs a limit that covers its bonds. (`test_a_bond_counts_as_spending`, `test_task_bonds_count_as_spending`; each of the three checks fails its test when removed.)
-- Still by design: a guarded account directs its own income (a block's `miner`, a commit's or a claim's `payees`); the guard caps what leaves its balance, not where coins it has not received yet go.
+- **G2: Earnings split past the guardian.** The same account could send its earnings to anyone with `payees`: a channel claim of 900,000 split 1:9 with an accomplice sent 810,000 away under a limit of 50,000, and a batch's payment the same way. The part of a claim or a batch's payment that its payees give to others now counts as spending; earnings the account keeps cost nothing. (`test_earnings_sent_to_others_count_as_spending`; each of the two checks fails it when removed.)
+- Not covered, and cannot be: a block's `miner` is not signed by any account, so whoever runs the mining hardware chooses where its rewards go; a guard governs an account's transactions, not the computers behind it.
 
 ## Still open (needed before production)
 

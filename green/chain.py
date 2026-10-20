@@ -307,6 +307,11 @@ def payouts(miner, total: int) -> list[tuple[str, int]]:
     return out
 
 
+def routed_away(payees, addr: str, total: int) -> int:
+    """What a payee list sends to others out of `total` that `addr` earns."""
+    return sum(amount for payee, amount in payouts(payees, total) if payee != addr)
+
+
 def min_prune_keep() -> int:
     """The fewest block bodies a pruned node may keep: every block a reorg can
     replace, plus the ones held in memory below the base."""
@@ -822,6 +827,7 @@ class Chain:
                 raise InvalidTx("the claim does not cover its fee")
             if not verify(ch["pub"], txmod.voucher_bytes(self.chain_id, tx["channel"], tx["total"]), tx["voucher"]):
                 raise InvalidTx("voucher not signed by the channel's buyer")
+            spent = self._guard_spend(guard, spent, routed_away(tx.get("payees", addr), addr, pay - fee))
             # The fee comes out of the claim, so a new provider needs no balance.
             ch["paid"] = tx["total"]
             for payee, amount in payouts(tx.get("payees", addr), pay - fee):
@@ -867,7 +873,8 @@ class Chain:
             bond = params.bond_for(job["price"]) * len(units)
             if bal < bond + fee:
                 raise InvalidTx("insufficient balance for bond")
-            spent = self._guard_bond(guard, spent, bond)
+            spent = self._guard_spend(guard, spent, bond + routed_away(tx.get("payees", addr), addr,
+                                                                      job["price"] * len(units)))
             s.set_balance(addr, bal - bond - fee)
             expires = height + params.RESERVE_BLOCKS
             job["batches"][bid] = {"miner": addr, "units": tx["units"], "count": len(units),
@@ -1023,7 +1030,7 @@ class Chain:
             bond = params.task_bond(task["price"])
             if bal < bond + fee:
                 raise InvalidTx("insufficient balance for bond")
-            spent = self._guard_bond(guard, spent, bond)
+            spent = self._guard_spend(guard, spent, bond)
             if r is not None:
                 s.credit(task["buyer"], r["bond"])          # previous worker never revealed
             s.set_balance(addr, s.balance(addr) - bond - fee)
@@ -1066,7 +1073,7 @@ class Chain:
             cbond = params.task_bond(task["price"])
             if bal < cbond + fee:
                 raise InvalidTx("insufficient balance for challenge bond")
-            spent = self._guard_bond(guard, spent, cbond)
+            spent = self._guard_spend(guard, spent, cbond)
             if s.adjudication_used + cost > params.MAX_BLOCK_ADJUDICATION:
                 raise InvalidTx("block adjudication budget exhausted, try the next block")
             honest = self._adjudicate(task)     # may raise MissingData: nothing is changed yet
@@ -1093,16 +1100,18 @@ class Chain:
         s.nonces[addr] = tx["nonce"] + 1
 
     @staticmethod
-    def _guard_bond(guard: dict | None, spent: int, bond: int) -> int:
-        """A bond counts against a guard's limit like any spending: a sender that never
-        reveals, leaves a dispute unanswered or challenges an honest result loses it to
-        someone else (the buyer, the challenger, the worker), so an uncounted bond would
-        let a guarded account pay anyone past its guardian."""
+    def _guard_spend(guard: dict | None, spent: int, amount: int) -> int:
+        """Count `amount` against a guard's limit on top of the outflow. Two kinds of
+        value only the ledger can price: a bond, which a sender that never reveals,
+        leaves a dispute unanswered or challenges an honest result loses to someone else
+        (the buyer, the challenger, the worker); and the part of the sender's own
+        earnings (a batch's payment, a channel claim) its `payees` send to others.
+        Uncounted, either would let a guarded account pay anyone past its guardian."""
         if guard is None:
             return spent
-        if spent + bond > guard["limit"]:
+        if spent + amount > guard["limit"]:
             raise InvalidTx(f"over the guardian's spending limit ({guard['limit']} per {guard['period']} blocks)")
-        return spent + bond
+        return spent + amount
 
     @staticmethod
     def _batch(s: State, tx: dict):

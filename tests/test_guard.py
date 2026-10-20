@@ -101,6 +101,40 @@ def test_task_bonds_count_as_spending(world):
     rejected(chain, challenge(chain, agent, honest), "spending limit")
 
 
+def test_earnings_sent_to_others_count_as_spending(world):
+    """What a guarded account earns is its own, but the part of it its payees send to
+    someone else leaves through the account: a channel claim or a batch's payment
+    split with an accomplice counts against the limit; kept, it costs nothing."""
+    chain, producer, agent, guardian, shop = world
+    add(chain, producer, [pay(chain, producer, shop, 5 * 10**7)])
+    accomplice = Key.generate()
+    limit = 5 * 10**4
+    add(chain, producer, [guard(chain, agent, guardian, limit=limit, period=10_000)])
+
+    t = tx(chain, shop, "channel_open", provider=agent.address, amount=10**6,
+           expires=chain.height + 1 + params.MIN_CHANNEL_BLOCKS)
+    add(chain, producer, [t])
+    cid = txmod.txid(t)
+
+    def claim(total, **kw):
+        voucher = txmod.sign_voucher(shop, chain.chain_id, cid, total)
+        return tx(chain, agent, "channel_claim", channel=cid, total=total, voucher=voucher, **kw)
+
+    split = sorted([[agent.address, 1], [accomplice.address, 9]])
+    rejected(chain, claim(900_000, payees=split), "spending limit")             # 810k to the accomplice
+    mostly_kept = sorted([[agent.address, 99], [accomplice.address, 1]])
+    add(chain, producer, [claim(900_000, payees=mostly_kept)])                   # ~9k away: within it
+    assert 0 < chain.state.balance(accomplice.address) < limit
+    add(chain, producer, [claim(1_000_000)])                                    # kept: only the fee counts
+
+    rng = np.random.default_rng(3)
+    _, _, job = post_job(chain, shop, rng, dims=(1, 1, 1), price=10**5)          # pays 100k, bond 10k
+    unit, zero = [[0, 0, 0]], [np.zeros((N, N), np.int64)]
+    rejected(chain, commit(chain, agent, job, unit, zero, payees=split)[0], "spending limit")
+    add(chain, producer, [commit(chain, agent, job, unit, zero)[0]])
+    assert supply(chain) == minted(chain)
+
+
 def test_the_account_can_only_tighten_its_own_guard(world):
     chain, producer, agent, guardian, shop = world
     add(chain, producer, [guard(chain, agent, guardian, limit=10**6, period=100)])
