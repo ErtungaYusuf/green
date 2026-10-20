@@ -1081,9 +1081,16 @@ class Node:
             job = self.chain.state.jobs.get(job_id)
             bal = self._pending.balance(addr)
             nonce = self._pending.nonce(addr)
+            pend = self._pending.jobs.get(job_id)
+            taken = set(pend["reserved"]) | set(pend["done"]) if pend else set()
         if job is None:
             return
         items = list(zip(buf["units"], buf["results"], buf.get("by") or [None] * len(buf["units"])))
+        # Units another miner committed while we computed them (small jobs, several miners):
+        # left out, or the whole batch was refused and its other units thrown away.
+        items = [x for x in items if txmod.unit_key(x[0]) not in taken]
+        if not items:
+            return
         # Units we cannot bond stay lottery tickets; selling them waits for funds.
         n = min(len(items), params.MAX_BATCH_UNITS,
                 max(0, (bal - params.MIN_TX_FEE) // params.bond_for(job["price"])))

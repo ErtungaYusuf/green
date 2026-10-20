@@ -403,3 +403,31 @@ def test_one_client_cannot_hold_every_unit(selling_pool, monkeypatch):
     assert len(pool.assign(Key.generate().address, client="5.6.7.8")) == 8     # an honest miner gets work
     pool.assigned.clear()
     assert sum(len(pool.assign(Key.generate().address, client="127.0.0.1")) for _ in range(2)) == 16
+
+
+def test_a_unit_someone_else_committed_first_does_not_sink_the_batch(tmp_path):
+    """Seen 30 times in the local network's soak: miners compute the units of a small
+    job at once, one commits first, and the others' commits were refused whole ("unit
+    is reserved by another commitment"), every other unit of the batch thrown away.
+    The units taken meanwhile are left out and the rest is committed."""
+    operator, buyer, rival = Key.generate(), Key.generate(), Key.generate()
+    logs = []
+    node = Node(str(tmp_path / "n"), make_genesis(operator.address, "race", timestamp=T0), port=free_port(),
+                miner_key=operator, log=logs.append)
+    try:
+        chain = node.chain
+        add(chain, operator, [tx(chain, operator, "transfer", to=k.address, amount=40_000_000, nonce=i)
+                              for i, k in enumerate((buyer, rival))])
+        a, b, job_id = post_job(chain, buyer, np.random.default_rng(4), dims=(1, 4, 1), price=1000)
+        node._rebuild_pending()
+        units = txmod.all_units([1, 4, 1])
+        first, _ = commit(chain, rival, job_id, [units[0]], [unit_result(a, b, units[0])])
+        node.submit_tx(first, stem=False)                       # the rival's commit, already in the mempool
+        for u in units:
+            node._buffer_result({"job": job_id, "unit": u}, unit_result(a, b, u))
+        node._commit_batch(job_id, node.batch_buf.pop(job_id))
+        mine = [t for t in node.mempool.values() if t["type"] == "job_commit" and t["pub"] == operator.pub_hex]
+        assert len(mine) == 1 and txmod.bitmap_units(mine[0]["units"], [1, 4, 1]) == units[1:]
+        assert not any("could not commit" in line for line in logs)
+    finally:
+        node.close()
