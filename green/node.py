@@ -51,6 +51,12 @@ REQUEST_TIMEOUT = 15
 MAX_MEMPOOL = 20_000          # several full blocks
 MAX_MEMPOOL_PER_SENDER = 100   # one key cannot fill the mempool on its own
 RBF_MIN_BUMP_PERCENT = 10     # a replacement must pay this much more than the transaction it replaces
+# A replacement rebuilds the pending state from the whole mempool under the node's lock
+# (~0.36 s with 20,000 transactions), while each one costs its sender only the bump.
+# Replacements are rate-limited node-wide; past the limit they are refused, without
+# penalty, and are tried again later (the node's own bumps too).
+RBF_PER_SECOND = 2
+RBF_BURST = 20
 REVEAL_CONFIRMATIONS = 2      # wait until the commit has this many confirmations
 COMMIT_INFLIGHT_CAP = 2 * params.MAX_BATCH_UNITS   # units a miner sells at once; the rest are lottery-only
 BATCH_SECONDS = 2.0           # commit a partly filled batch after this long
@@ -210,6 +216,7 @@ class Node:
         self.tip_changed = threading.Condition(self.lock)   # wakes API clients waiting for a block
         self._waiters = 0
         self.mempool: dict[str, dict] = {}
+        self._rbf_tokens, self._rbf_time = float(RBF_BURST), time.monotonic()
         self.miner_key = miner_key
         self.no_signal = set(no_signal)           # deployments this miner chooses not to signal
         self.dandelion = dandelion                # our own transactions take a stem first (p2p.py)
@@ -478,6 +485,12 @@ class Node:
         need = prev["fee"] + max(params.MIN_TX_FEE, prev["fee"] * RBF_MIN_BUMP_PERCENT // 100)
         if t["fee"] < need:
             raise InvalidTx(f"replacement fee too low: must be at least {need}")
+        now = time.monotonic()
+        self._rbf_tokens = min(float(RBF_BURST), self._rbf_tokens + (now - self._rbf_time) * RBF_PER_SECOND)
+        self._rbf_time = now
+        if self._rbf_tokens < 1:
+            raise InvalidTx("too many replacements right now: try again in a moment")
+        self._rbf_tokens -= 1
         saved = dict(self.mempool), self._pending
         self.mempool = {(tid if k == old else k): (t if k == old else v) for k, v in self.mempool.items()}
         try:

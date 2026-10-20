@@ -81,6 +81,27 @@ def test_replace_by_fee(node):
     assert n.pending_nonce(a.address) == first["nonce"] + 1
 
 
+def test_replacements_are_rate_limited(node, monkeypatch):
+    """Each replacement rebuilds the pending state from the whole mempool under the
+    node's lock (~0.36 s with 20,000 transactions) and costs its sender only the bump:
+    a few a second stalled the node. Past the node-wide limit a replacement is refused
+    (no penalty) and goes through a moment later."""
+    import time
+    n, (_, a, b, *_) = node
+    monkeypatch.setattr(nodemod, "RBF_BURST", 2)
+    monkeypatch.setattr(nodemod, "RBF_PER_SECOND", 4)
+    n._rbf_tokens, n._rbf_time = 2.0, time.monotonic()
+    n.submit_tx(tx(n.chain, a, "transfer", to=b.address, amount=5, fee=FEE))
+    for i in range(2):
+        n.submit_tx(tx(n.chain, a, "transfer", to=b.address, amount=5, fee=(2 + 2 * i) * FEE))
+    late = tx(n.chain, a, "transfer", to=b.address, amount=5, fee=6 * FEE)
+    with pytest.raises(InvalidTx, match="too many replacements"):
+        n.submit_tx(late)
+    time.sleep(0.3)
+    n.submit_tx(late)
+    assert list(n.mempool.values()) == [late]
+
+
 def test_invalid_replacement_changes_nothing(node):
     n, (_, a, b, *_) = node
     first = tx(n.chain, a, "transfer", to=b.address, amount=5)
