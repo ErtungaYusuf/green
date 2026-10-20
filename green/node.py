@@ -38,7 +38,7 @@ from .chain import (BlobStore, Chain, InvalidBlock, InvalidCheckpoint, MissingDa
 from .crypto import Key, hhex, merkle_proof, merkle_root
 from . import prune as prunemod, snapshot
 from .chain import min_prune_keep
-from .p2p import P2P
+from .p2p import NO_REDIRECTS, P2P
 from .state import State
 from .store import Store
 from .tx import InvalidTx, make_tx
@@ -153,7 +153,7 @@ def _read_limited(resp, limit: int) -> bytes:
 
 
 def http_get(url: str, timeout: float = 5.0, raw: bool = False, limit: int = MAX_RESPONSE_BYTES):
-    with urllib.request.urlopen(url, timeout=timeout) as r:
+    with NO_REDIRECTS.open(url, timeout=timeout) as r:
         data = _read_limited(r, limit)
     return data if raw else json.loads(data)
 
@@ -173,7 +173,7 @@ def http_post(url: str, body, timeout: float = 5.0, raw: bool = False):
     data = body if raw else json.dumps(body).encode()
     headers = {"Content-Type": "application/octet-stream" if raw else "application/json", CLIENT_HEADER: "1"}
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with NO_REDIRECTS.open(req, timeout=timeout) as r:
         return json.loads(_read_limited(r, MAX_RESPONSE_BYTES))
 
 

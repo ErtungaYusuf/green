@@ -158,6 +158,18 @@ CODE = {name: i + 1 for i, name in enumerate(CMDS)}
 NAME = {i: name for name, i in CODE.items()}
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None                                  # the 3xx itself is raised as an HTTPError
+
+
+# Every HTTP request this package makes goes where its caller pointed it and nowhere else.
+# urllib follows redirects by default (a POST answered 302 becomes a GET, any host, with
+# our headers): a provider on offer could send a node that carries a sealed request to
+# 127.0.0.1 or 169.254.169.254, and the node would hand the answer back to the requester.
+NO_REDIRECTS = urllib.request.build_opener(_NoRedirect)
+
+
 class Misbehaving(Exception):
     def __init__(self, score: int, reason: str):
         super().__init__(reason)
@@ -1354,18 +1366,38 @@ class P2P:
             if self.chain.has_block(bh) or bh in self.chain.invalid or bh in self.partial or bh in self.downloaded:
                 return
             orphan = hdr.get("prev") not in self.chain.blocks
-            if not orphan:
-                key = compact_key(bh, salt)
-                pool: dict[str, tuple] = {}
-                clash = set()
-                for tid, t in list(self.node.mempool.items()) + [(k, e["tx"]) for k, e in self.stempool.items()]:
-                    sid = short_id(key, tid)
-                    if sid in pool and pool[sid][0] != tid:
-                        clash.add(sid)
-                    pool[sid] = (tid, t)
         if orphan:
             self.on_orphan(peer)                     # fetch the headers that lead to it
             return
+        # The header and its work first: rebuilding hashes the whole mempool under the
+        # node's lock (~17 ms with 20,000 transactions) and keeps a slot in `partial`, and
+        # a made-up header would cost its sender nothing. Its work costs a real block.
+        try:
+            with self.node.lock:
+                self.chain.validate_header(hdr)
+            transcript = self.chain.work_transcript(hdr)
+        except InvalidBlock as e:
+            raise Misbehaving(BAN_SCORE if e.permanent else 10, f"compact block with a bad header ({e})") from None
+        except MissingData:                          # its job's data: the whole block brings the rest
+            with self.node.lock:
+                self.requested[bh] = (peer, time.time())
+                peer.inflight_blocks[bh] = time.time()
+            peer.send("getdata", {"items": [["block", bh]]})
+            return
+        if not self.chain.work_ok(hdr, transcript):
+            raise Misbehaving(BAN_SCORE, "compact block without its work")
+        with self.node.lock:
+            if len(self.chain.prechecked) > 10_000:
+                self.chain.prechecked.clear()
+            self.chain.prechecked.add(bh)
+            key = compact_key(bh, salt)
+            pool: dict[str, tuple] = {}
+            clash = set()
+            for tid, t in list(self.node.mempool.items()) + [(k, e["tx"]) for k, e in self.stempool.items()]:
+                sid = short_id(key, tid)
+                if sid in pool and pool[sid][0] != tid:
+                    clash.add(sid)
+                pool[sid] = (tid, t)
         missing = []
         slots = iter(ids)
         for i in range(n):
@@ -1833,7 +1865,7 @@ class P2P:
         try:
             req = urllib.request.Request(url.rstrip("/") + "/sealed", data=data, method="POST",
                                          headers={"Content-Type": "application/octet-stream"})
-            with urllib.request.urlopen(req, timeout=RELAY_SECONDS - 10) as r:
+            with NO_REDIRECTS.open(req, timeout=RELAY_SECONDS - 10) as r:
                 out = r.read(sealed.MAX_SEALED + 1)
             if len(out) > sealed.MAX_SEALED:
                 raise ValueError("answer too large")

@@ -7,6 +7,8 @@ Every release so far is a consensus change: nodes of different versions do not f
 - **Security: a guarded account could pay anyone past its guardian's limit** by losing a bond on purpose (SECURITY.md G1). A job commit never revealed pays its bond to the job's buyer, a WASM worker's to the task's buyer, a wrong challenger's to the worker; none of them counted against the limit, so an agent with a limit of 100,000 moved 4,000,000 to an accomplice in one transaction. Bonds of `job_commit`, `task_commit` and `task_challenge` now count as spending (SPEC.md §1). (`test_a_bond_counts_as_spending`, `test_task_bonds_count_as_spending`, which fail without the fix.)
 - **Security: a guarded account could split its earnings with anyone** through `payees` on a channel claim or a job commit (SECURITY.md G2): 810,000 of a 900,000 claim went to an accomplice under a limit of 50,000. The part its payees give to others now counts as spending; earnings it keeps do not. (`test_earnings_sent_to_others_count_as_spending`, which fails without the fix.)
 - Both are consensus changes.
+- **Security: a node carrying a sealed request followed the provider's redirect** into its own network (cloud metadata, a router, its own API) and handed the answer back (SECURITY.md N1). No HTTP request of the package follows redirects any more.
+- **Security: compact blocks are checked before they are rebuilt** (SECURITY.md N2): a header with no work behind it could make a node hash its whole mempool under its lock, as often as a peer sent one. The header and its work unit are checked first, and a peer that sends one without work is banned.
 
 ## 0.24.0
 

@@ -50,6 +50,7 @@ import numpy as np
 from . import params, sealed, tx as txmod, work
 from .crypto import Key, is_hex, verify
 from .node import BoundedServer, http_get, http_post
+from .p2p import NO_REDIRECTS
 from .chain import MissingData
 from .tx import InvalidTx, make_tx
 
@@ -529,7 +530,7 @@ def relay_post(node_url: str, provider: str, data: bytes, timeout: float = 300) 
                                  headers={"Content-Type": "application/octet-stream", CLIENT_HEADER: "1",
                                           "X-Relay-To": provider})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with NO_REDIRECTS.open(req, timeout=timeout) as r:
             return r.read(sealed.MAX_SEALED + 1)
     except urllib.error.HTTPError as e:
         try:

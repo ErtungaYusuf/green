@@ -166,3 +166,65 @@ def test_requests_travel_sealed_through_a_peer(tmp_path, monkeypatch):
         p.stop()
         mine.stop()
         seller.stop()
+
+
+def test_a_carrier_never_follows_a_redirect_into_its_own_network(tmp_path):
+    """A provider on offer answers the sealed request it is carried with a redirect to an
+    address inside the carrier's network (cloud metadata, a router, the node's own API).
+    urllib follows redirects by default, so the carrier fetched it and handed the answer
+    back to whoever asked; now the redirect is the answer, and nothing else is fetched."""
+    import http.server
+    import threading
+
+    fetched = []
+
+    class Inside(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            fetched.append(self.path)
+            body = b"credentials"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    inside = http.server.HTTPServer(("127.0.0.1", 0), Inside)
+
+    class Redirecting(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{inside.server_port}/latest/meta-data/")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    evil = http.server.HTTPServer(("127.0.0.1", 0), Redirecting)
+    for server in (inside, evil):
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    buyer, miner = Key.generate(), Key.generate()
+    genesis = make_genesis(buyer.address, "redirect")
+    seller = Node(str(tmp_path / "s"), genesis, port=free_port(), miner_key=miner, log=lambda m: None)
+    seller.start(mine=True)
+    mine = Node(str(tmp_path / "b"), genesis, port=free_port(), log=lambda m: None, peers=[seller.p2p.address])
+    mine.start()
+    p = Provider(seller, miner, url=f"http://127.0.0.1:{evil.server_port}")
+    p.start()
+    try:
+        wait_until(lambda: [o["provider"] for o in mine.p2p.offer_list()] == [miner.address], "the offer")
+        with pytest.raises(OSError, match="answered 302"):
+            mine.p2p.relay(miner.address, b"\x00" * 64, timeout=20)
+        assert fetched == []
+        with pytest.raises(OSError):                               # the clients' requests too
+            compute.http_post(f"http://127.0.0.1:{evil.server_port}/voucher", {})
+        assert fetched == []
+    finally:
+        p.stop()
+        mine.stop()
+        seller.stop()
+        evil.shutdown()
+        inside.shutdown()

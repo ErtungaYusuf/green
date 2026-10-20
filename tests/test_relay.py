@@ -193,6 +193,22 @@ def test_a_bad_compact_block_falls_back_to_the_whole_block(nodes):
     assert n.p2p.stats["cmpct_fallbacks"] == 1 and raw.node_id in {p.node_id for p in n.p2p.all_peers()}
 
 
+def test_a_compact_block_without_its_work_is_refused_before_rebuilding(nodes):
+    """Rebuilding hashes the whole mempool under the node's lock and holds the block's
+    slots in `partial`: a header with a valid parent but no real work used to get all
+    of that (and a getblocktxn back) for free. Its work is checked first now."""
+    miner = Key.generate()
+    n = nodes("n", make_genesis(miner.address, "no work"))
+    raw = RawPeer(n, features=["cmpct"])
+    with n.lock:
+        header, _, _ = n.chain.build_template(miner.address, [])
+    header["transcript"] = "00" * 32                       # made up: no work behind it
+    raw.send("cmpct", {"header": header, "salt": "00" * 8, "ids": ["00" * p2p.SHORT_ID_BYTES] * 3000, "fill": []})
+    assert raw.closed()
+    assert n.p2p.partial == {} and n.p2p.stats["cmpct_txs_requested"] == 0
+    assert n.p2p.is_banned("127.0.0.1", raw.node_id)
+
+
 def test_the_nodes_own_protocol_transactions_skip_the_stem(nodes):
     """Commits, reveals and challenges have deadlines and the loops that send them
     look for them in the mempool: they are announced directly."""
