@@ -57,6 +57,15 @@ RBF_MIN_BUMP_PERCENT = 10     # a replacement must pay this much more than the t
 # penalty, and are tried again later (the node's own bumps too).
 RBF_PER_SECOND = 2
 RBF_BURST = 20
+# Transactions heard before their predecessor (a later nonce of the same sender) are
+# kept a while and tried again once it arrives: their senders announce them once, so
+# refused, they were lost (seen on the local network: three channel opens after a job
+# post, whose data the miners had to fetch first, never reached the miners). Only
+# senders with coins, nonces at most MAX_MEMPOOL_PER_SENDER ahead, signatures checked.
+DATA_TXS = ("job_post", "task_post", "job_respond")   # validators fetch data from the sender for these
+MAX_ORPHANS = 1000
+MAX_ORPHANS_PER_SENDER = 25
+ORPHAN_SECONDS = 600
 REVEAL_CONFIRMATIONS = 2      # wait until the commit has this many confirmations
 COMMIT_INFLIGHT_CAP = 2 * params.MAX_BATCH_UNITS   # units a miner sells at once; the rest are lottery-only
 BATCH_SECONDS = 2.0           # commit a partly filled batch after this long
@@ -217,6 +226,7 @@ class Node:
         self._waiters = 0
         self.mempool: dict[str, dict] = {}
         self._rbf_tokens, self._rbf_time = float(RBF_BURST), time.monotonic()
+        self.orphans: dict[tuple, tuple] = {}     # (sender, nonce) -> (tx, source peer, stem, time)
         self.miner_key = miner_key
         self.no_signal = set(no_signal)           # deployments this miner chooses not to signal
         self.dandelion = dandelion                # our own transactions take a stem first (p2p.py)
@@ -375,6 +385,12 @@ class Node:
             raise InvalidTx("unencodable transaction") from None
         if stem is None:
             stem = source is None and self.dandelion
+        if stem and source is None and isinstance(t, dict) and t.get("type") in DATA_TXS:
+            # Its data is ours alone and only shared once the transaction is in our mempool
+            # (is_public_blob): on a stem, no node could fetch it, every node refused the
+            # transaction, and the sender's later ones waited behind it for good. Serving
+            # the data reveals where it came from anyway, so a stem would hide nothing.
+            stem = False
         announce_skip = source
         if stem:
             try:
@@ -390,6 +406,46 @@ class Node:
         if self._with_blobs(lambda: self._add_tx(t, tid), source):
             self.p2p.announce_tx(tid, announce_skip)
         return tid
+
+    def keep_orphan(self, t: dict, source=None, stem: bool = False) -> bool:
+        """Keep a transaction refused only because its sender's earlier one has not reached
+        us yet (FutureNonce); retry_orphans submits it when its turn comes."""
+        try:
+            who = txmod.sender(t)
+        except (TypeError, KeyError, ValueError):
+            return False
+        with self.lock:
+            next_nonce = self._pending.nonce(who)
+            if not next_nonce < t["nonce"] <= next_nonce + MAX_MEMPOOL_PER_SENDER:
+                return False
+            if not self.chain.state.balance(who) and not any(txmod.sender(m) == who for m in self.mempool.values()):
+                return False                     # a sender with nothing: free to make, so not kept
+            if sum(k[0] == who for k in self.orphans) >= MAX_ORPHANS_PER_SENDER:
+                return False
+            while len(self.orphans) >= MAX_ORPHANS:
+                del self.orphans[next(iter(self.orphans))]
+            self.orphans[(who, t["nonce"])] = (t, source, stem, time.time())
+            return True
+
+    def retry_orphans(self) -> int:
+        """Submit the kept transactions whose predecessor is now in the mempool or a block;
+        drop the expired ones. Returns how many went in."""
+        added, now = 0, time.time()
+        while True:
+            with self.lock:
+                for k in [k for k, v in self.orphans.items() if now - v[3] > ORPHAN_SECONDS]:
+                    del self.orphans[k]
+                due = [(k, v) for k, v in self.orphans.items() if k[1] == self._pending.nonce(k[0])]
+                if not due:
+                    return added
+                for k, _ in due:
+                    del self.orphans[k]
+            for k, (t, source, stem, _) in due:
+                try:
+                    self.submit_tx(t, source=source, stem=stem)
+                    added += 1
+                except (InvalidTx, MissingData, OSError):
+                    pass
 
     def _stem_view(self, local_only: bool = False, skip: str | None = None) -> State:
         """A scratch state: the mempool's plus the stem transactions (only ours if

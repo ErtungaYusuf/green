@@ -268,3 +268,51 @@ def test_a_future_nonce_is_not_marked_rejected(nodes):
     assert txmod.txid(second) not in n.p2p.rejected      # so a later announcement fetches it
     raw.send("tx", {"tx": second})
     wait_for(lambda: txmod.txid(second) in n.mempool, what="the second, once it can be accepted")
+
+
+def test_a_transaction_heard_before_its_predecessor_is_not_lost(nodes):
+    """Its sender announces it once: refused as a future nonce, it was gone for good
+    (on the local network, channel opens after a job post whose data the miners had to
+    fetch first never reached them). It is kept and goes in once its predecessor does,
+    with no second announcement."""
+    miner, payee = Key.generate(), Key.generate()
+    n = nodes("n", make_genesis(miner.address, "orphans"))
+    raw = RawPeer(n)
+    txs = [make_tx(miner, n.chain.chain_id, "transfer", i, to=payee.address, amount=1 + i) for i in range(3)]
+    raw.send("tx", {"tx": txs[2]})
+    raw.send("tx", {"tx": txs[1]})
+    wait_for(lambda: len(n.orphans) == 2, what="both kept")
+    raw.send("tx", {"tx": txs[0]})
+    wait_for(lambda: all(txmod.txid(t) in n.mempool for t in txs), what="all three in, in order")
+    assert n.orphans == {}
+    # Kept only for senders with coins: a fresh key's future nonces cost nothing to make.
+    stranger = Key.generate()
+    raw.send("tx", {"tx": make_tx(stranger, n.chain.chain_id, "transfer", 5, to=payee.address, amount=1)})
+    time.sleep(0.5)
+    assert n.orphans == {}
+
+
+def test_a_job_posted_through_our_own_node_reaches_the_network(nodes):
+    """A job post names data only its sender has, and a node shares data only for
+    transactions in its mempool. Sent on a Dandelion stem (every transaction from our
+    own API was), the post sat outside the sender's mempool: no node could fetch the
+    data, every node refused it, and the sender's later transactions waited behind it
+    (the local network's lost channel opens). Data-carrying posts skip the stem."""
+    import numpy as np
+    miner = Key.generate()
+    genesis = make_genesis(miner.address, "data posts")
+    a = nodes("a", genesis)
+    e = nodes("e", genesis, key=miner, peers=[a.p2p.address])
+    wait_for(lambda: connected(e, a) and connected(a, e), what="the nodes to connect")
+    rng = np.random.default_rng(1)
+    m = rng.integers(-128, 128, (2 * p2p.params.UNIT, 2 * p2p.params.UNIT), dtype=np.int8)
+    job = http_post(f"{e.url}/blob", txmod.encode_job(m, m), raw=True)["hash"]
+    dims = [2, 2, 2]
+    post = make_tx(miner, e.chain.chain_id, "job_post", 0, txmod.min_fee({"type": "job_post", "dims": dims}),
+                   job=job, dims=dims, price=10)
+    after = make_tx(miner, e.chain.chain_id, "transfer", 1, to=Key.generate().address, amount=1)
+    http_post(f"{e.url}/tx", post)
+    http_post(f"{e.url}/tx", after)
+    wait_for(lambda: txmod.txid(post) in a.mempool and txmod.txid(after) in a.mempool, timeout=30,
+             what="the post and the transaction after it at the other node")
+    assert a.blobs.has(job)

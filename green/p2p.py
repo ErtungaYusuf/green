@@ -1584,7 +1584,7 @@ class P2P:
         try:
             self.node.submit_tx(t, source=peer, stem=True)
         except txmod.FutureNonce:
-            pass                                     # its predecessor has not reached us yet
+            self.node.keep_orphan(t, peer, stem=True)   # its predecessor has not reached us yet
         except txmod.BadSignature:
             self.rejected.add(tid)
             raise Misbehaving(50, "relayed a transaction with a bad signature") from None
@@ -1710,8 +1710,7 @@ class P2P:
         try:
             self.node.submit_tx(t, source=peer)
         except txmod.FutureNonce:
-            pass                                     # not "rejected": once its predecessor arrives, the
-                                                     # next announcement of it is fetched again
+            self.node.keep_orphan(t, peer)           # not "rejected": tried again once its predecessor is in
         except txmod.BadSignature:
             self.rejected.add(tid)
             raise Misbehaving(50, "relayed a transaction with a bad signature") from None
@@ -2495,6 +2494,8 @@ class P2P:
 
     def _tick(self) -> None:
         now = time.time()
+        if self.node.orphans:
+            self.node.retry_orphans()               # transactions whose predecessor has arrived
         peers = self.all_peers()
         for p in peers:
             if now - p.last_recv > IDLE_SECONDS or (p.ping_nonce is not None and now - p.ping_sent > PONG_SECONDS):
