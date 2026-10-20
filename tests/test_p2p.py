@@ -340,6 +340,26 @@ def test_two_requests_for_one_blob_share_the_answer(nodes, monkeypatch):
     assert got == [data, data]
 
 
+def test_asking_for_blobs_we_lack_costs_us_nothing(nodes, monkeypatch):
+    """Whether a blob is public is found by scanning the mempool and every delivered
+    batch under the node's lock (~30 ms on a busy node). A peer asking for hashes we do
+    not have, or past its upload budget, must not make us run it."""
+    a = nodes("a", make_genesis(Key.generate().address, "blob scan"))
+    scans = []
+    monkeypatch.setattr(a, "is_public_blob", lambda blob: scans.append(blob) or True)
+    raw = RawPeer(a)
+    for _ in range(50):
+        h = random.randbytes(32).hex()
+        raw.send("getblob", {"hash": h, "max": 1 << 20})
+        assert raw.recv_until("noblob") == {"hash": h}
+    assert scans == []
+    h = a.blobs.put(b"x" * 1000)
+    for peer in a.p2p.all_peers():
+        peer.blob_budget, peer.blob_time = -1e9, time.time()        # spent for a long while
+    raw.send("getblob", {"hash": h, "max": 1 << 20})
+    assert raw.recv_until("noblob") == {"hash": h} and scans == []
+
+
 def test_a_refused_relay_does_not_lock_up_the_connection(nodes, monkeypatch):
     """Refusing a sealed request it is too busy to carry, a node answered while holding the
     peer's lock, and sending takes that lock: the connection's reader locked itself up for

@@ -1761,11 +1761,16 @@ class P2P:
 
     def _on_getblob(self, peer: Peer, m: dict) -> None:
         h, limit = m["hash"], m["max"]
-        data = self.node.blobs.get(h) if is_hex(h, 64) and self.node.is_public_blob(h) else None
         now = time.time()
         peer.blob_budget = min(float(BLOB_UPLOAD_PER_MINUTE),
                                peer.blob_budget + (now - peer.blob_time) * BLOB_UPLOAD_PER_MINUTE / 60)
         peer.blob_time = now
+        # The cheap tests first: whether a blob is public scans the mempool and every
+        # delivered batch under the node's lock (~30 ms on a busy node), so a stream of
+        # requests for hashes we do not have, or past the budget, must not reach it.
+        data = None
+        if is_hex(h, 64) and peer.blob_budget > 0 and self.node.blobs.has(h) and self.node.is_public_blob(h):
+            data = self.node.blobs.get(h)
         if data is None or not isinstance(limit, int) or len(data) > limit or len(data) > peer.blob_budget:
             peer.send("noblob", {"hash": h})
             return

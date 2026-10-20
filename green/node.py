@@ -1879,7 +1879,8 @@ def make_handler(node: Node):
                 return self._send(200, view) if view else self._send(404, {"error": "unknown task"})
             if len(parts) == 2 and parts[0] == "blob":
                 data = None
-                if node.is_public_blob(parts[1]):
+                # (a blob we lack is looked up only for local clients: the test scans the state)
+                if (node.blobs.has(parts[1]) or self._local()) and node.is_public_blob(parts[1]):
                     data = node.blobs.get(parts[1])
                     # Results travel from the miner to the buyer on demand; validators never
                     # fetch them. Only local clients may make us fetch, so no amplification.

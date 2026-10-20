@@ -9,6 +9,7 @@ Every release so far is a consensus change: nodes of different versions do not f
 - Both are consensus changes.
 - **Security: a node carrying a sealed request followed the provider's redirect** into its own network (cloud metadata, a router, its own API) and handed the answer back (SECURITY.md N1). No HTTP request of the package follows redirects any more.
 - **Security: compact blocks are checked before they are rebuilt** (SECURITY.md N2): a header with no work behind it could make a node hash its whole mempool under its lock, as often as a peer sent one. The header and its work unit are checked first, and a peer that sends one without work is banned.
+- **A request for a blob the node lacks no longer scans the state** (SECURITY.md N3): 30 ms under the node's lock per `getblob`, free for the asker. The cheap tests (do we hold it, is the peer's budget left) come first.
 
 ## 0.24.0
 
