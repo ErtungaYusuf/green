@@ -134,3 +134,44 @@ def test_an_older_data_folder_gets_its_index_built_on_open(tmp_path):
     assert [store.tx_location(txid(p))[0] for p in pays] == [1, 2, 3, 4, 5]
     assert len(store.address_history(bob.address)) == 5
     store.close()
+
+
+def test_a_light_client_follows_a_reorganization_with_more_work(served):
+    """Blocks come every 15 s, so the chain a light client follows reorganizes now and
+    then. It used to stop for good ("headers do not extend the chain"); it now finds the
+    fork, checks the new branch and takes it, but only if it has more work."""
+    node, genesis, keys, pays = served
+    light = LightClient(node.url, genesis)
+    light.sync()
+    old_tip, fork = node.chain.tip, node.chain.main[node.chain.height - 2]
+    parent = fork
+    with node.lock:
+        for i in range(4):                                      # a heavier branch off 3 blocks back
+            block, _ = mine(node.chain, keys[0], t=T0 + 90_000 + i, parent=parent)
+            assert node.chain.add_block(block) == "added"
+            parent = chainmod.block_hash(block)
+    assert node.chain.tip == parent and not node.chain.on_main(old_tip)
+    assert light.sync() == node.chain.height and light.by_height[-1] == node.chain.tip
+    assert light.verify_payment(txid(pays[5]))["confirmations"] == node.chain.height - 6 + 1
+
+
+def test_a_light_client_keeps_its_chain_against_a_lighter_branch(served, monkeypatch):
+    node, genesis, keys, pays = served
+    light = LightClient(node.url, genesis)
+    light.sync()
+    mine_tip, height = light.by_height[-1], light.height
+    side, parent = [], node.chain.main[height - 2]
+    for i in range(2):                                          # shorter than ours: less work
+        block, _ = mine(node.chain, keys[0], t=T0 + 95_000 + i, parent=parent)
+        assert node.chain.add_block(block) == "added"
+        side.append(block["header"])
+        parent = chainmod.block_hash(block)
+    good = node.headers
+
+    def lying(start, count):                                    # serves the lighter branch as its chain
+        out = [h for h in good(start, count) if h["height"] < height - 1]
+        return out + side if start <= height - 1 else [dict(side[-1], height=height + 1, prev="00" * 32)]
+    monkeypatch.setattr(node, "headers", lying)
+    with pytest.raises(InvalidBlock, match="more work"):
+        light.sync()
+    assert light.by_height[-1] == mine_tip and light.height == height
