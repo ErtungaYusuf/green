@@ -358,6 +358,11 @@ A young proof-of-work network has little work behind it, and Green's work runs o
 - **K5: An offline founder, a node that missed checkpoints.** Without new checkpoints the network follows the most work as before. Nodes hear the latest checkpoint as soon as they connect; one that followed an attacker's chain for longer than the reorg window before hearing a checkpoint must resync, as after any deep reorg.
 - **K6: A bug found while writing it.** `grn genesis --checkpoints` wrote the genesis block over the checkpoint key file (a reused variable), which would have destroyed the founder's key; caught by `test_the_founders_commands_from_key_to_end` before any release.
 
+## Twenty-third review: a bond paid past the guardian (v0.24.1)
+
+- **G1: A guarded account could pay anyone past its guardian's limit.** Bonds did not count as spending, because they come back to an honest sender; but a sender that wants them gone can lose them on purpose, and they go to someone else. An agent with a limit of 100,000 committed to one unit of a job its accomplice posted at a high price and never revealed: the 4,000,000 bond went to the accomplice (the job's buyer), 40 times the limit, and the accomplice cancelled the job to get its escrow back. The WASM market had the same hole twice (a worker's bond goes to the buyer, a wrong challenger's to the worker). Every bond now counts against the limit when it is locked. An honest guarded miner needs a limit that covers its bonds. (`test_a_bond_counts_as_spending`, `test_task_bonds_count_as_spending`; each of the three checks fails its test when removed.)
+- Still by design: a guarded account directs its own income (a block's `miner`, a commit's or a claim's `payees`); the guard caps what leaves its balance, not where coins it has not received yet go.
+
 ## Still open (needed before production)
 
 The full list, by area, is in [PRODUCTION.md](PRODUCTION.md).

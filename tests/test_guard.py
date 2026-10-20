@@ -11,9 +11,10 @@ import pytest
 from green import params, tx as txmod
 from green.crypto import Key
 from green.tx import InvalidTx
-from helpers import add, new_chain, post_job, supply, minted, tx
+from helpers import add, commit, new_chain, post_job, supply, minted, tx
 
 FEE = params.MIN_TX_FEE
+N = params.UNIT
 
 
 @pytest.fixture
@@ -65,6 +66,39 @@ def test_escrow_counts_as_spending(world):
     job_id = chain.blobs.put(txmod.encode_job(a, a))
     post = tx(chain, agent, "job_post", job=job_id, dims=[1, 1, 1], price=10**6)
     rejected(chain, post, "spending limit")                                    # 1M escrow > 100k limit
+
+
+def test_a_bond_counts_as_spending(world):
+    """A bond the sender never redeems goes to someone else: here a job commit that is
+    never revealed pays its bond to the job's buyer, an accomplice. Uncounted, the bond
+    moved 40 times the limit past the guardian."""
+    chain, producer, agent, guardian, shop = world
+    add(chain, producer, [pay(chain, producer, shop, 5 * 10**7)])
+    limit = 10**5
+    add(chain, producer, [guard(chain, agent, guardian, limit=limit, period=10_000)])
+    rng = np.random.default_rng(7)
+    unit = [[0, 0, 0]]
+    _, _, big = post_job(chain, shop, rng, dims=(1, 1, 1), price=4 * 10**7)       # bond 4M
+    over, _ = commit(chain, agent, big, unit, [np.zeros((N, N), np.int64)])
+    rejected(chain, over, "spending limit")
+    _, _, small = post_job(chain, shop, rng, dims=(1, 1, 1), price=5 * 10**5)     # bond 50k: within it
+    within, _ = commit(chain, agent, small, unit, [np.zeros((N, N), np.int64)])
+    add(chain, producer, [within])
+    assert chain.state.guards[agent.address]["spent"] == within["fee"] + params.bond_for(5 * 10**5)
+    assert supply(chain) == minted(chain)
+
+
+def test_task_bonds_count_as_spending(world):
+    """The same for the WASM market: a worker's bond goes to the buyer if it never
+    reveals, a challenger's to the worker if the result was right."""
+    from test_compute import commit_task, challenge, post_task, revealed_task, true_output_hash
+    chain, producer, agent, guardian, shop = world
+    add(chain, producer, [pay(chain, producer, shop, 5 * 10**7)])
+    task_id, _, data = post_task(chain, shop, price=10**6)                         # bond 500k
+    honest, _ = revealed_task(chain, producer, Key.generate())
+    add(chain, producer, [guard(chain, agent, guardian, limit=10**5, period=10_000)])
+    rejected(chain, commit_task(chain, agent, task_id, true_output_hash(data)), "spending limit")
+    rejected(chain, challenge(chain, agent, honest), "spending limit")
 
 
 def test_the_account_can_only_tighten_its_own_guard(world):

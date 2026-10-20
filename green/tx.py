@@ -329,8 +329,9 @@ def tx_size(tx: dict) -> int:
 
 def outflow(tx: dict) -> int:
     """What a transaction spends, for a guarded account's limit: value that
-    leaves for good (transfers, escrow) plus the fee. Bonds are not counted:
-    they come back unless the sender is proven to have cheated."""
+    leaves for good (transfers, escrow) plus the fee. Bonds depend on the
+    ledger, so the chain adds them when it applies the transaction (Chain._guard_bond):
+    a bond that is never redeemed goes to someone else."""
     out = tx["fee"]
     if tx["type"] == "transfer":
         out += tx["amount"]

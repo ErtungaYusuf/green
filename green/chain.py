@@ -776,6 +776,7 @@ class Chain:
         # A guarded account answers to its guardian: frozen means no transaction at
         # all, otherwise spending is capped per period. Checked before any change.
         guard = s.guards.get(addr)
+        spent = 0
         if guard is not None:
             if guard["frozen"]:
                 raise InvalidTx("account is frozen by its guardian")
@@ -866,6 +867,7 @@ class Chain:
             bond = params.bond_for(job["price"]) * len(units)
             if bal < bond + fee:
                 raise InvalidTx("insufficient balance for bond")
+            spent = self._guard_bond(guard, spent, bond)
             s.set_balance(addr, bal - bond - fee)
             expires = height + params.RESERVE_BLOCKS
             job["batches"][bid] = {"miner": addr, "units": tx["units"], "count": len(units),
@@ -1021,6 +1023,7 @@ class Chain:
             bond = params.task_bond(task["price"])
             if bal < bond + fee:
                 raise InvalidTx("insufficient balance for bond")
+            spent = self._guard_bond(guard, spent, bond)
             if r is not None:
                 s.credit(task["buyer"], r["bond"])          # previous worker never revealed
             s.set_balance(addr, s.balance(addr) - bond - fee)
@@ -1063,6 +1066,7 @@ class Chain:
             cbond = params.task_bond(task["price"])
             if bal < cbond + fee:
                 raise InvalidTx("insufficient balance for challenge bond")
+            spent = self._guard_bond(guard, spent, cbond)
             if s.adjudication_used + cost > params.MAX_BLOCK_ADJUDICATION:
                 raise InvalidTx("block adjudication budget exhausted, try the next block")
             honest = self._adjudicate(task)     # may raise MissingData: nothing is changed yet
@@ -1087,6 +1091,18 @@ class Chain:
         if guard is not None and addr in s.guards and kind != "guard_set":
             s.guards[addr].update(window=window, spent=spent)
         s.nonces[addr] = tx["nonce"] + 1
+
+    @staticmethod
+    def _guard_bond(guard: dict | None, spent: int, bond: int) -> int:
+        """A bond counts against a guard's limit like any spending: a sender that never
+        reveals, leaves a dispute unanswered or challenges an honest result loses it to
+        someone else (the buyer, the challenger, the worker), so an uncounted bond would
+        let a guarded account pay anyone past its guardian."""
+        if guard is None:
+            return spent
+        if spent + bond > guard["limit"]:
+            raise InvalidTx(f"over the guardian's spending limit ({guard['limit']} per {guard['period']} blocks)")
+        return spent + bond
 
     @staticmethod
     def _batch(s: State, tx: dict):

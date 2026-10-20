@@ -2,6 +2,10 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## 0.24.1
+
+- **Security: a guarded account could pay anyone past its guardian's limit** by losing a bond on purpose (SECURITY.md G1). A job commit never revealed pays its bond to the job's buyer, a WASM worker's to the task's buyer, a wrong challenger's to the worker; none of them counted against the limit, so an agent with a limit of 100,000 moved 4,000,000 to an accomplice in one transaction. Bonds of `job_commit`, `task_commit` and `task_challenge` now count as spending (SPEC.md §1). A consensus change. (`test_a_bond_counts_as_spending`, `test_task_bonds_count_as_spending`, which fail without the fix.)
+
 ## 0.24.0
 
 - **Checkpoints against a majority attack while the network is young** (SPEC.md §5.6, OPERATIONS.md). A network can name its founder's key in its genesis block (`grn checkpoint key`, then `grn genesis --checkpoints`). The founder's node (`grn node --checkpoints`) signs the block 3 below its tip every 4 blocks; every node refuses any chain that leaves out the latest checkpoint, however much work it has, so an attacker with most of the mining power can rewrite about a minute and a half instead of 100 blocks, and nodes that join later follow the founder's chain instead of a heavier one. The founder cannot move or create coins or make an invalid block valid. The period ends at a height fixed in the genesis block (a year of blocks by default) or when the founder signs its end (`grn checkpoint end --yes`); from then on the most work decides alone, as in Bitcoin. `GET /checkpoint`, `POST /checkpoint`, `grn checkpoint status`; P2P message 27.

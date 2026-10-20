@@ -26,7 +26,7 @@ A transaction is a JSON object with exactly the common fields `type`, `pub`, `no
 - The sender is `address(pub)` (a single key's or a multisig account's address). `nonce` must equal the sender's account nonce; applying the transaction increments it.
 - `fee >= MIN_TX_FEE · signatures` (1 for a single-key transaction, `k` for a k-of-n one, plus 1 for a channel claim's voucher), plus the data fees listed per type. The fee is paid to the block's miner.
 - A transaction is applied atomically: if any rule fails, the state is unchanged and the transaction, and therefore the block containing it, is invalid.
-- **Guarded accounts.** If the sender has a guard (§3.4), before any other effect: a frozen sender's transaction is invalid; otherwise, with `w = floor(height / period)`, `spent' = (spent if window == w else 0) + outflow(tx)` must be `<= limit`, and on success the guard's `window := w`, `spent := spent'` (a `guard_set` instead writes its own new guard). `outflow(tx)` = fee + `amount` (transfer and channel_open) + `price · mu·ku·nu` (job_post) + `price` (task_post); bonds are not counted.
+- **Guarded accounts.** If the sender has a guard (§3.4), before any other effect: a frozen sender's transaction is invalid; otherwise, with `w = floor(height / period)`, `spent' = (spent if window == w else 0) + outflow(tx)` must be `<= limit`, and on success the guard's `window := w`, `spent := spent'` (a `guard_set` instead writes its own new guard). `outflow(tx)` = fee + `amount` (transfer and channel_open) + `price · mu·ku·nu` (job_post) + `price` (task_post); a `job_commit`, `task_commit` or `task_challenge` also adds its bond to `spent'`, which must still be `<= limit` (since v0.24.1: a bond the sender does not redeem goes to someone else).
 
 ### 3.1 Blobs
 
