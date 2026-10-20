@@ -144,7 +144,9 @@ Since v0.12: a transaction and address index kept consistent through reorgs (`/v
 
 **Since v0.19** CI runs on GitHub (a private repository for now): every push is tested on Linux, Windows and macOS with Python 3.12 to 3.14, plus a Docker smoke test; the first run (3.12 and 3.13) passed everywhere. Since v0.23.3 every job has ended within seconds without starting (no logs), the sign of exhausted Actions minutes, not of failing tests: the full suite passes locally on v0.24.1 (328 passed, 4 GPU tests skipped, Linux, Python 3.13).
 
-**Missing:** multi-node testnets with tens of nodes; network partition and latency simulation; week-long soak tests; property-based testing at larger scale; conformance tests shared with a second implementation.
+**Soak (v0.24.1, October 2026):** the local network (five nodes, three CPU miners, two buyers training models and posting jobs) ran 1 h 40 min in two runs with a clean stop and restart between them: 289 blocks; every node on the same chain at every one-minute sample (state roots compared) and the supply audit passing at every sample; 52,651 products bought in the first hour, 95 models trained, 38 jobs posted; 3 of ~150 purchases failed (two transient "no open channel" races, one while the providers restarted). It found one bug (two threads storing one blob, fixed). Threads and open files stayed flat; resident memory grew in the first ten minutes and then levelled off (nodes ~250-300 MB, buyers ~300-490 MB), with a slow drift on the nodes that a run of days must settle. The 8-node simulation (`bench/net_sim.py`) still splits and heals to one chain with identical ledgers.
+
+**Missing:** multi-node testnets with tens of nodes on separate machines; week-long soak tests (memory over days); property-based testing at larger scale; conformance tests shared with a second implementation.
 
 ## 14. Security assurance — blocker
 
