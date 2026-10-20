@@ -125,6 +125,7 @@ FAST_SYNC_PEERS = 2            # a fast sync picks its snapshot once this many p
 FAST_SYNC_GRACE = 10.0         # ...or this many seconds after starting
 BAN_SCORE = 100
 BAN_SECONDS = 24 * 3600
+MAX_BANS = 100_000             # bans held at once (an IPv6 attacker has addresses to spare)
 ADDR_RATE = 0.1                # addresses accepted per second per peer, after a burst of MAX_ADDR
 ADDR_NEW_MAX = 4096
 ADDR_TRIED_MAX = 1024
@@ -713,6 +714,7 @@ class P2P:
         self.node_id = pub_hex(self.key)
         self.addrman = AddrMan(os.path.join(data_dir, "peers.json") if data_dir else None)
         self.bans: dict[str, float] = self._load_bans()
+        self._ban_lock = threading.Lock()
         self.lock = threading.Lock()
         self.peers: dict[int, Peer] = {}           # id(peer) -> peer
         self.manual: dict[str, dict] = {}          # addresses we were told to keep connected
@@ -838,10 +840,24 @@ class P2P:
                 pass
         return {}
 
+    def _prune_bans(self) -> None:
+        """Forget expired bans (they were only dropped from the file, so memory grew with
+        every peer ever banned), and the soonest-ending ones past MAX_BANS."""
+        now = time.time()
+        with self._ban_lock:
+            for k in [k for k, v in self.bans.items() if v <= now]:
+                del self.bans[k]
+            if len(self.bans) > MAX_BANS:
+                for k, _ in sorted(self.bans.items(), key=lambda kv: kv[1])[:len(self.bans) - MAX_BANS]:
+                    del self.bans[k]
+
     def _save_bans(self) -> None:
+        self._prune_bans()
         if self.data_dir:
+            with self._ban_lock:
+                bans = dict(self.bans)
             with open(os.path.join(self.data_dir, "banlist.json"), "w") as f:
-                json.dump({k: v for k, v in self.bans.items() if v > time.time()}, f)
+                json.dump(bans, f)
 
     def is_banned(self, host: str, node_id: str = "") -> bool:
         now = time.time()
@@ -850,7 +866,11 @@ class P2P:
     def punish(self, peer: Peer, score: int, reason: str) -> None:
         peer.score += score
         if peer.score >= BAN_SCORE:
-            self.bans[self._ban_key(peer.host, peer.node_id)] = time.time() + BAN_SECONDS
+            with self._ban_lock:
+                self.bans[self._ban_key(peer.host, peer.node_id)] = time.time() + BAN_SECONDS
+                full = len(self.bans) > MAX_BANS
+            if full:
+                self._prune_bans()
             self.stats["banned"] += 1
             self.log(f"[security] peer {peer.name} ({peer.node_id[:12]}) banned for {BAN_SECONDS // 3600} h: {reason}")
             peer.close(f"banned: {reason}")

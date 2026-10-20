@@ -683,3 +683,18 @@ def test_a_relayed_bad_signature_counts_against_the_peer_but_policy_does_not():
     with pytest.raises(Misbehaving):
         P2P._on_tx(me, peer, {"tx": forged})
     assert txmod.txid(forged) in me.rejected
+
+
+def test_expired_bans_are_forgotten(nodes, monkeypatch):
+    """Bans were dropped only from the saved file, so a long-running node held every
+    peer it ever banned (an IPv6 attacker can be banned at new addresses for ever)."""
+    a = nodes("a", make_genesis(Key.generate().address, "bans"))
+    now = time.time()
+    a.p2p.bans.update({f"ip:2001:db8::{i:x}": now - 1 for i in range(5000)})
+    a.p2p.bans["ip:203.0.113.9"] = now + 3600
+    a.p2p._save_bans()
+    assert a.p2p.bans == {"ip:203.0.113.9": a.p2p.bans["ip:203.0.113.9"]}
+    monkeypatch.setattr(p2p, "MAX_BANS", 3)
+    a.p2p.bans.update({f"ip:198.51.100.{i}": now + 10 + i for i in range(5)})
+    a.p2p._prune_bans()
+    assert len(a.p2p.bans) == 3 and "ip:203.0.113.9" in a.p2p.bans          # the longest-lasting stay
