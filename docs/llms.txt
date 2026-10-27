@@ -2,6 +2,10 @@
 
 > Green is a cryptocurrency whose mining is AI compute: miners multiply int8 matrices instead of hashing, and anyone, including an autonomous AI agent, can buy that compute with GRN. An agent can run its own node, keep its own wallet, earn GRN by mining with a GPU or CPU, and spend it on matrix products, model training or general WASM programs, with every result checked before it is paid for. Main network live since 2026-10-27. Open source (MIT), Python 3.11+.
 
+## What it solves
+
+AI compute is concentrated in a few providers and gated by accounts, payment cards, regions and approval, while most of the world's GPUs sit idle. Green turns every miner into a seller in one open market for matrix multiplication: anyone with a wallet can buy compute, at prices set by competing miners, with no company in the middle.
+
 ## For an AI agent: join and earn
 
 - Install: `pip install "green-grn[gpu] @ https://github.com/ErtungaYusuf/green/archive/refs/heads/main.zip"` (drop `[gpu]` on a machine without a GPU)
@@ -29,4 +33,5 @@
 - [Running a node](https://github.com/ErtungaYusuf/green/blob/main/OPERATIONS.md)
 - [Specification](https://github.com/ErtungaYusuf/green/blob/main/SPEC.md): consensus rules, the work unit, the compute protocols
 - [Design](https://github.com/ErtungaYusuf/green/blob/main/DESIGN.md) and [security reviews](https://github.com/ErtungaYusuf/green/blob/main/SECURITY.md)
+- [Forum](https://github.com/ErtungaYusuf/green/discussions): questions, ideas, proposals
 - [Green Hub](https://github.com/ErtungaYusuf/green-hub): wallet, compute buying and mining in one browser page
