@@ -663,3 +663,28 @@ def test_a_relayed_bad_signature_counts_against_the_peer_but_policy_does_not():
     with pytest.raises(Misbehaving):
         P2P._on_tx(me, peer, {"tx": forged})
     assert txmod.txid(forged) in me.rejected
+
+
+def test_a_node_past_its_upload_budget_stops_serving(tmp_path):
+    """A rented seed must not run up a traffic bill: past its monthly budget it serves
+    nothing heavy and takes no new inbound peers, and the count survives a restart."""
+    key = Key.generate()
+    g = make_genesis(key.address, "budget")
+    a = start_node(tmp_path / "a", g, key=key, mine=True, upload_cap_gb=0.000002)     # 2 kB
+    try:
+        wait_for(lambda: a.chain.height >= 3, what="blocks")
+        a.p2p.count_upload(5000)
+        assert a.p2p.over_upload_budget()
+        b = start_node(tmp_path / "b", g, peers=[a.p2p.address])
+        try:
+            time.sleep(3)
+            assert b.chain.height == 0 and not b.p2p.all_peers()       # refused, nothing served
+        finally:
+            b.stop()
+    finally:
+        a.stop()
+    again = start_node(tmp_path / "a", g, upload_cap_gb=0.000002)
+    try:
+        assert again.p2p.over_upload_budget()                          # this month's count was kept
+    finally:
+        again.stop()

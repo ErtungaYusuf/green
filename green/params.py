@@ -207,7 +207,10 @@ CHECKPOINT_DEFAULT_BLOCKS = 365 * 86400 // TARGET_BLOCK_SECONDS
 # Nodes to ask for addresses when the address book is empty. Filled in when a
 # public network launches; "host:port" or "<node id>@host:port". A host that is a
 # DNS name is resolved and each address it answers with is tried (DNS seeds).
-SEED_NODES: list[str] = []
+SEED_NODES: list[str] = [
+    # the founder's seed and checkpoint node (Frankfurt); its node id pins who answers there
+    "fe65c84bed58c2c0377d57fee4e9ad2212fcf3df90137cc4832e2f0e35b6567a@18.196.55.186:8546",
+]
 # Maintainer keys (Ed25519 public keys, hex) that sign releases, and how many
 # different ones a release needs (green/release.py). Filled in at launch.
 RELEASE_KEYS: list[str] = []

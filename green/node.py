@@ -188,7 +188,7 @@ class Node:
                  host: str = "127.0.0.1", peers=(), miner_key: Key | None = None, log=print,
                  use_gpu: bool = False, p2p_port: int = 0, listen: bool = True, seeds=None,
                  fast_sync: bool = False, p2p_host: str | None = None, no_signal=(), debug=None,
-                 checkpoint_key: Key | None = None,
+                 checkpoint_key: Key | None = None, max_inbound: int | None = None, upload_cap_gb: float | None = None,
                  prune: bool = False, prune_keep: int = prunemod.PRUNE_KEEP_BLOCKS, dandelion: bool = True,
                  portmap: bool = False, portmap_gateway: tuple | None = None, verify_processes: bool = True):
         self.data_dir = data_dir
@@ -259,7 +259,8 @@ class Node:
         self.snapshots: list[dict] = self.store.get_meta("snapshots", [])
         self.chain.on_snapshot = self._write_snapshot
         self.p2p = P2P(self, host=host if p2p_host is None else p2p_host, port=p2p_port, peers=peers, data_dir=data_dir, listen=listen, seeds=seeds,
-                       fast_sync=fast_sync and self.chain.height == 0)
+                       fast_sync=fast_sync and self.chain.height == 0, max_inbound=max_inbound,
+                       upload_cap_gb=upload_cap_gb)
 
     # --- persistence ---
 
@@ -780,7 +781,7 @@ class Node:
         """Try nonces, in batches: on the GPU a batch is submitted before the previous
         one is collected, so the CPU prepares the next inputs while the GPU works."""
         addr = self.miner_key.address
-        self.log(f"Mining started. Reward address: {addr}")
+        self.log(f"Mining {'started' if self.mining else 'ready (off)'}. Reward address: {addr}")
         if self.gpu is not None:
             self.gpu.discard()                       # (a restart after an error)
         self._inflight_units = set()

@@ -84,7 +84,7 @@ from .tx import InvalidTx
 from .verify import ProcessChecker
 
 PROTOCOL_VERSION = 1
-AGENT = "green/0.24.0"
+AGENT = "green/0.25.0"
 
 MAX_OUTBOUND = 8               # outbound connections the node keeps
 BLOCK_RELAY_ONLY = 2           # ...of which relay blocks only
@@ -634,6 +634,7 @@ class Peer:
                 frame = self.send_cipher.seal(body)
                 self.sock.sendall(frame)
                 self.bytes_out += len(frame)
+                self.p2p.count_upload(len(frame))
                 with self.lock:
                     self.out_bytes -= len(body)
             except OSError:
@@ -688,7 +689,8 @@ class Peer:
 
 class P2P:
     def __init__(self, node, host: str = "127.0.0.1", port: int = 0, peers=(), data_dir: str | None = None,
-                 listen: bool = True, max_outbound: int | None = None, seeds=None, fast_sync: bool = False):
+                 listen: bool = True, max_outbound: int | None = None, seeds=None, fast_sync: bool = False,
+                 max_inbound: int | None = None, upload_cap_gb: float | None = None):
         self.node = node
         self.chain = node.chain
         self.log = node.log
@@ -696,6 +698,15 @@ class P2P:
         self.port = port
         self.listen = listen
         self.max_outbound = MAX_OUTBOUND if max_outbound is None else max_outbound
+        self.max_inbound = MAX_INBOUND if max_inbound is None else max_inbound
+        # A monthly upload budget (a rented server's included traffic): past it the node
+        # stops serving blocks, headers and data and takes no new inbound peers until the
+        # month ends; it keeps passing on what is small (checkpoints, transactions, blocks
+        # it announces as a peer). None: no limit.
+        self.upload_cap = int(upload_cap_gb * 1e9) if upload_cap_gb else None
+        self.upload_path = os.path.join(data_dir, "upload.json") if data_dir else None
+        self.upload = self._load_upload()
+        self._upload_saved = 0
         self.data_dir = data_dir
         self.key = load_node_key(data_dir)
         self.node_id = pub_hex(self.key)
@@ -773,6 +784,7 @@ class P2P:
             threading.Thread(target=target, daemon=True, name=target.__name__).start()
 
     def stop(self) -> None:
+        self.save_upload()
         self.running = False
         if self.server is not None:
             try:
@@ -807,7 +819,9 @@ class P2P:
         peers = self.all_peers()
         return {"node_id": self.node_id, "listen": self.address if self.listen else None,
                 "inbound": sum(p.inbound for p in peers), "outbound": sum(not p.inbound for p in peers),
-                "known_addresses": len(self.addrman), "headers_ahead": len(self.hindex),
+                "known_addresses": len(self.addrman),
+                "upload_month_gb": round(self.upload["bytes"] / 1e9, 3),
+                "upload_cap_gb": self.upload_cap / 1e9 if self.upload_cap else None, "headers_ahead": len(self.hindex),
                 "best_header_height": self._height_of(self.best), "blocks_in_flight": len(self.requested),
                 "fast_sync": self.snap_state, "stempool": len(self.stempool), "offers": len(self.offers),
                 "public": addr_key(self.my_host, self.public_port or self.port) if self.my_host else None,
@@ -1077,7 +1091,9 @@ class P2P:
             if any(p.node_id == peer.node_id for p in self.peers.values()):
                 return False                         # already connected to this node
             inbound = [p for p in self.peers.values() if p.inbound]
-            if peer.inbound and len(inbound) >= MAX_INBOUND:
+            if peer.inbound and self.over_upload_budget():
+                return False                         # this month's upload budget is spent
+            if peer.inbound and len(inbound) >= self.max_inbound:
                 victim = self._eviction_candidate(inbound)
                 if victim is None:
                     return False                     # every inbound peer is protected
@@ -1406,6 +1422,8 @@ class P2P:
         self._submit({"header": hdr, "txs": txs, **({"shares": list(shares)} if shares else {})}, peer)
 
     def _on_getblocktxn(self, peer: Peer, m: dict) -> None:
+        if self.over_upload_budget():
+            return                                   # the month's upload budget is spent
         bh, idx = m["block"], m["idx"]
         block = self.chain.block(bh) if is_hex(bh, 64) else None
         if block is None:
@@ -1625,6 +1643,8 @@ class P2P:
             peer.send("getdata", {"items": [["block", h] for h in want_blocks] + [["tx", h] for h in want_tx]})
 
     def _on_getdata(self, peer: Peer, m: dict) -> None:
+        if self.over_upload_budget():
+            return                                   # the month's upload budget is spent
         items = m["items"]
         if not isinstance(items, list) or len(items) > MAX_INV:
             raise Misbehaving(20, "oversized getdata")
@@ -1690,6 +1710,8 @@ class P2P:
             self.rejected.add(tid)                   # policy can differ between nodes: no penalty
 
     def _on_getmempool(self, peer: Peer, m: dict) -> None:
+        if self.over_upload_budget():
+            return                                   # the month's upload budget is spent
         if peer.sent_mempool or peer.block_only or not peer.relay:
             return
         peer.sent_mempool = True
@@ -1731,6 +1753,8 @@ class P2P:
         return None
 
     def _on_getblob(self, peer: Peer, m: dict) -> None:
+        if self.over_upload_budget():
+            return                                   # the month's upload budget is spent
         h, limit = m["hash"], m["max"]
         data = self.node.blobs.get(h) if is_hex(h, 64) and self.node.is_public_blob(h) else None
         now = time.time()
@@ -1921,6 +1945,8 @@ class P2P:
             self._ask_headers(peer)
 
     def _on_getheaders(self, peer: Peer, m: dict) -> None:
+        if self.over_upload_budget():
+            return                                   # the month's upload budget is spent
         loc = m["locator"]
         if not isinstance(loc, list) or len(loc) > MAX_LOCATOR:
             raise Misbehaving(20, "bad locator")
@@ -2251,6 +2277,45 @@ class P2P:
             if self.best not in self.hindex and not self.chain.has_block(self.best):
                 self.best = max(list(self.hindex) + [self.chain.tip], key=self._work_of)
 
+    # -- upload budget --
+
+    def _load_upload(self) -> dict:
+        month = time.strftime("%Y-%m", time.gmtime())
+        try:
+            with open(self.upload_path, encoding="utf-8") as f:
+                u = json.load(f)
+            if u.get("month") == month and isinstance(u.get("bytes"), int):
+                return u
+        except (TypeError, OSError, ValueError):
+            pass
+        return {"month": month, "bytes": 0}
+
+    def count_upload(self, n: int) -> None:
+        month = time.strftime("%Y-%m", time.gmtime())
+        with self.lock:
+            if self.upload["month"] != month:
+                self.upload = {"month": month, "bytes": 0}
+            self.upload["bytes"] += n
+            save = self.upload["bytes"] - self._upload_saved >= 10_000_000
+        if save:
+            self.save_upload()
+
+    def save_upload(self) -> None:
+        if not self.upload_path:
+            return
+        with self.lock:
+            self._upload_saved = self.upload["bytes"]
+            snapshot = dict(self.upload)
+        try:
+            with open(self.upload_path + ".tmp", "w", encoding="utf-8") as f:
+                json.dump(snapshot, f)
+            os.replace(self.upload_path + ".tmp", self.upload_path)
+        except OSError:
+            pass
+
+    def over_upload_budget(self) -> bool:
+        return self.upload_cap is not None and self.upload["bytes"] >= self.upload_cap
+
     # -- checkpoints --
 
     def announce_checkpoint(self, cp: dict, source: Peer | None = None) -> None:
@@ -2308,6 +2373,8 @@ class P2P:
     # -- fast sync from a snapshot --
 
     def _on_getsnapinfo(self, peer: Peer, m: dict) -> None:
+        if self.over_upload_budget():
+            return                                   # the month's upload budget is spent
         offers = [{"id": s["id"], "height": s["height"], "hash": s["hash"], "root": s["root"]}
                   for s in self.node.snapshots]
         peer.send("snapinfo", {"snapshots": offers})

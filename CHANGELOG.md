@@ -2,6 +2,15 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## 0.25.0: the main network
+
+- **The Green main network.** Its genesis block (`d2636216d32fd45fffdb7cb0245d73519cd6adced195dc98c031558225785068`, 2026-10-27, "Green main network, 2026-10-27: proof of given compute") ships in `green/networks/mainnet.json`, with the founder's checkpoints until block 2,102,400. A node started without a genesis file joins it; only main-network nodes dial its seed, the founder's node in Frankfurt (`params.SEED_NODES`, pinned by node id). Checked: a new node on a home connection behind carrier-grade NAT, given nothing but `grn node`, found the network and connected to the seed within a second.
+- **A traffic budget for rented servers:** `--upload-cap-gb` stops a node from serving blocks, headers and data and from taking new inbound peers once it has uploaded that much in the month, so a seed on a server with included traffic can never run up a bill; small messages (checkpoints, transactions) still go out. `--max-inbound` caps inbound peers. The count survives restarts. (`test_a_node_past_its_upload_budget_stops_serving`.)
+- `grn checkpoint protect`: encrypts a checkpoint key kept unencrypted (a server's, which its service unlocks without a password) for its backup.
+- Consensus values (work units, a job unit and its product, a state entry, a genesis) checked identical on Windows (Python 3.14, numpy 2.5.3) and Linux (Python 3.12, numpy 2.5.4).
+- The website lives in `docs/` (GitHub Pages).
+- A node that does not mine no longer logs "Mining started".
+
 ## 0.24.0
 
 - **Checkpoints against a majority attack while the network is young** (SPEC.md §5.6, OPERATIONS.md). A network can name its founder's key in its genesis block (`grn checkpoint key`, then `grn genesis --checkpoints`). The founder's node (`grn node --checkpoints`) signs the block 3 below its tip every 4 blocks; every node refuses any chain that leaves out the latest checkpoint, however much work it has, so an attacker with most of the mining power can rewrite about a minute and a half instead of 100 blocks, and nodes that join later follow the founder's chain instead of a heavier one. The founder cannot move or create coins or make an invalid block valid. The period ends at a height fixed in the genesis block (a year of blocks by default) or when the founder signs its end (`grn checkpoint end --yes`); from then on the most work decides alone, as in Bitcoin. `GET /checkpoint`, `POST /checkpoint`, `grn checkpoint status`; P2P message 27.

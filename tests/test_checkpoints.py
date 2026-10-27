@@ -220,3 +220,20 @@ def test_the_checkpoint_key_is_encrypted_with_a_password(tmp_path, monkeypatch):
     assert cli.main(["--data", d, "checkpoint", "key"]) == 1                   # never overwritten
     monkeypatch.setenv(cli.CHECKPOINT_PASSWORD_ENV, "a good password")
     assert cli.load_checkpoint_key(d).pub_hex == key.pub_hex
+
+
+def test_an_unencrypted_key_can_be_protected_later(tmp_path, monkeypatch):
+    """A server's key is kept unencrypted for its service; its backup is encrypted with protect."""
+    from green import cli
+    d = str(tmp_path / "backup")
+    assert cli.main(["--data", d, "checkpoint", "key", "--no-password"]) == 0
+    plain = cli.load_checkpoint_key(d)
+    monkeypatch.setenv(cli.CHECKPOINT_PASSWORD_ENV, "a good password")
+    assert cli.main(["--data", d, "checkpoint", "protect"]) == 0
+    text = open(cli.checkpoint_key_path(d)).read()
+    assert "secret" not in text and plain.secret_hex() not in text
+    assert cli.load_checkpoint_key(d).pub_hex == plain.pub_hex
+    assert cli.main(["--data", d, "checkpoint", "protect"]) == 1               # already encrypted
+    monkeypatch.setenv(cli.CHECKPOINT_PASSWORD_ENV, "the wrong one")
+    with pytest.raises(cli.CliError, match="wrong checkpoint key password"):
+        cli.load_checkpoint_key(d)

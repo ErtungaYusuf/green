@@ -398,6 +398,24 @@ def cmd_checkpoint(args):
         print(f"Public key: {key.pub_hex}")
         print("Back it up and keep it secret: whoever holds it decides which chain is final until the "
               "checkpoint period ends. Next: grn genesis --msg \"...\" --checkpoints")
+    elif args.action == "protect":
+        path = checkpoint_key_path(args.data)
+        if not os.path.exists(path):
+            raise CliError(f"no checkpoint key in {args.data}")
+        with open(path, encoding="utf-8") as f:
+            record = json.load(f)
+        if "secret" not in record:
+            raise CliError(f"{path} is already encrypted")
+        key = Key.from_hex(record["secret"])
+        if key.pub_hex != record["pub"]:
+            raise CliError(f"{path} is corrupt: the key does not match its public key")
+        password = os.environ.get(CHECKPOINT_PASSWORD_ENV) or ask_password(confirm=True, label="Checkpoint key password")
+        encrypted = {"pub": record["pub"], "encrypted": encrypt_secret(key.secret_hex(), password)}
+        with open(path + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(encrypted, f, indent=1)
+        os.replace(path + ".tmp", path)
+        print(f"Encrypted {path} (public key {record['pub'][:16]}...). Keep the password: without it the file "
+              "cannot sign, not even the end of the checkpoints.")
     elif args.action == "status":
         st = api_get(args, "/checkpoint")
         if st["authority"] is None:
@@ -452,7 +470,8 @@ def cmd_node(args):
                 debug=logger.debug if logger.isEnabledFor(logging.DEBUG) else None,
                 use_gpu=args.gpu, p2p_port=args.p2p_port, listen=not args.no_listen, fast_sync=args.fast_sync,
                 p2p_host=args.p2p_host, no_signal=args.no_signal, prune=args.prune, prune_keep=args.prune_keep,
-                dandelion=not args.no_dandelion, portmap=args.portmap, checkpoint_key=checkpoint_key)
+                dandelion=not args.no_dandelion, portmap=args.portmap, checkpoint_key=checkpoint_key,
+                max_inbound=args.max_inbound, upload_cap_gb=args.upload_cap_gb)
     if checkpoint_key is not None:
         if node.chain.authority is None or node.chain.authority[0] != checkpoint_key.pub_hex:
             raise CliError("this node's checkpoint key is not the one this network's genesis names")
@@ -544,7 +563,8 @@ CONFIG_KEYS = {"port": int, "host": str, "p2p_port": int, "p2p_host": str, "peer
                "report": (int, float), "log_level": str, "log_file": str, "prune": bool, "prune_keep": int,
                "pool_port": int, "pool_host": str, "pool_fee": int, "no_dandelion": bool,
                "provide_port": int, "provide_host": str, "provide_url": str, "provide_price": int,
-               "portmap": bool, "intensity": int, "checkpoints": bool}
+               "portmap": bool, "intensity": int, "checkpoints": bool, "max_inbound": int,
+               "upload_cap_gb": (int, float)}
 
 
 def load_config(data: str) -> dict:
@@ -1164,6 +1184,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-listen", action="store_true", help="do not accept connections from other nodes")
     s.add_argument("--checkpoints", action="store_true",
                    help="sign this network's checkpoints with the folder's checkpoint key (the founder's node)")
+    s.add_argument("--max-inbound", type=int, metavar="N", help="accept at most N inbound peers (default 32)")
+    s.add_argument("--upload-cap-gb", type=float, metavar="GB",
+                   help="upload at most this much a month (a rented server's included traffic): past it the node "
+                        "stops serving blocks to others until the month ends")
     s.add_argument("--portmap", action="store_true",
                    help="ask the home router to forward the P2P port (and the --provide-port) with PCP or "
                         "NAT-PMP, so other nodes and buyers can reach this one")
@@ -1340,9 +1364,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_job_cancel)
 
     s = sub.add_parser("checkpoint", help="the founder's checkpoints: make the key, see them, end them")
-    s.add_argument("action", choices=["key", "status", "end"],
-                   help="key: make this folder's checkpoint key; status: the network's checkpoints; "
-                        "end: end the checkpoint period for good (with --yes)")
+    s.add_argument("action", choices=["key", "protect", "status", "end"],
+                   help="key: make this folder's checkpoint key; protect: encrypt an unencrypted key (a backup); "
+                        "status: the network's checkpoints; end: end the checkpoint period for good (with --yes)")
     s.add_argument("--no-password", action="store_true", help="key: store it unencrypted (testing only)")
     s.add_argument("--yes", action="store_true", help="end: really end the checkpoint period")
     s.set_defaults(fn=cmd_checkpoint)

@@ -1,0 +1,21 @@
+{
+  "header": {
+    "version": 536870912,
+    "height": 0,
+    "prev": "0000000000000000000000000000000000000000000000000000000000000000",
+    "time": 1793106105,
+    "target": "00068db8bac710cb295e9e1b089a027525460aa64c2f837b4a2339c0ebedfa43",
+    "tx_root": "43eef4c3b1d1ab172d0e67b4343716cd593b650761af8abd368840bce94828dc",
+    "shares_root": "43eef4c3b1d1ab172d0e67b4343716cd593b650761af8abd368840bce94828dc",
+    "miner": "grn1hx2kq7sekldkeacxlzrve22vxgf0wr9s3c3v8y",
+    "work": {
+      "job": null,
+      "unit": null
+    },
+    "nonce": 12874,
+    "msg": "Green main network, 2026-10-27: proof of given compute | checkpoints 8ecfbcbdb9e128c0b2aa7846233c9d3c4bf46fb2eeec26b920add7f997b8093e until 2102400",
+    "state_root": "d872b0ae7cb574228983cfad0cb231aea97129719ad6fc326d1a249cf2582901",
+    "transcript": "589304d27d42b17aea47233c1fa64a4102636416ee522584f56f8a4522d1b2a7"
+  },
+  "txs": []
+}
