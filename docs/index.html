@@ -4,18 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Green (GRN): mining that multiplies</title>
-<meta name="description" content="Green is an open network secured by useful work: miners multiply matrices for AI instead of hashing, and anyone can use GRN tokens to buy that compute.">
+<meta name="description" content="Green is a cryptocurrency secured by useful work: miners multiply matrices for AI instead of hashing, and anyone can buy that compute with GRN.">
 <meta name="keywords" content="Green, GRN, cryptocurrency, proof of useful work, AI compute, GPU mining, buy GPU compute, AI agents, autonomous agents, matrix multiplication, decentralized compute">
 <link rel="canonical" href="https://ertungayusuf.github.io/green/">
 <link rel="alternate" type="text/plain" title="Green for AI agents and LLMs" href="llms.txt">
 <meta property="og:title" content="Green (GRN): mining that multiplies">
-<meta property="og:description" content="An open network secured by AI compute. Miners multiply matrices; anyone, including an AI agent, can use GRN tokens to buy that compute.">
+<meta property="og:description" content="A cryptocurrency secured by AI compute. Miners multiply matrices; anyone, including an AI agent, can buy that compute with GRN.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://ertungayusuf.github.io/green/">
 <script type="application/ld+json">
 {"@context": "https://schema.org", "@type": "SoftwareApplication", "name": "Green (GRN)",
  "applicationCategory": "FinanceApplication", "operatingSystem": "Windows, Linux, macOS",
- "description": "Open-source network whose proof of work is AI compute (int8 matrix multiplication). Autonomous AI agents can run a node, earn GRN by mining and buy verified GPU compute with it.",
+ "description": "Open-source cryptocurrency whose proof of work is AI compute (int8 matrix multiplication). Autonomous AI agents can run a node, earn GRN by mining and buy verified GPU compute with it.",
  "url": "https://ertungayusuf.github.io/green/", "downloadUrl": "https://github.com/ErtungaYusuf/green",
  "license": "https://opensource.org/licenses/MIT", "isAccessibleForFree": true}
 </script>
@@ -150,7 +150,7 @@ footer ul { list-style: none; padding: 0; margin: 0; }
     </a>
     <nav aria-label="Main">
       <a href="#work">How it works</a>
-      <a href="#token" class="hide-s">The token</a>
+      <a href="#coin" class="hide-s">The coin</a>
       <a href="#join">Join</a>
       <a href="llms.txt" class="hide-s">For AI agents</a>
       <a href="https://github.com/ErtungaYusuf/green">GitHub</a>
@@ -161,7 +161,7 @@ footer ul { list-style: none; padding: 0; margin: 0; }
     <div class="hero">
       <div>
         <h1>Mining that multiplies.</h1>
-        <p class="lede">Green is a network where the work that secures it is AI compute. Every block is found by multiplying matrices, the work at the heart of training and running neural networks, and anyone can use GRN tokens to buy that compute.</p>
+        <p class="lede">Green is a cryptocurrency secured by AI compute. Every block is found by multiplying matrices, the work at the heart of training and running neural networks, and anyone can buy that compute with GRN.</p>
         <div class="actions">
           <a class="btn" href="#join">Run a node</a>
           <a class="btn quiet" href="#work">See how it works</a>
@@ -187,7 +187,7 @@ footer ul { list-style: none; padding: 0; margin: 0; }
 
     <section id="work" aria-labelledby="work-h">
       <h2 id="work-h">Work someone needed</h2>
-      <p class="intro">The work that secures Green is compute someone needed. We call it proof of given compute: the network is paid for the compute it gives, and the token is secured by that same compute.</p>
+      <p class="intro">The work that secures Green is compute someone needed. We call it proof of given compute: the network is paid for the compute it gives, and the coin is secured by that same compute.</p>
       <div class="facts">
         <div>
           <h3>Miners multiply matrices</h3>
@@ -221,11 +221,11 @@ footer ul { list-style: none; padding: 0; margin: 0; }
       </div>
     </section>
 
-    <section id="token" aria-labelledby="token-h">
+    <section id="coin" aria-labelledby="coin-h">
       <div class="split">
         <div>
-          <h2 id="token-h">The token</h2>
-          <p>There will never be more than 21 million GRN, and no token is ever created out of nothing. All of them start in the protocol's reserve and are paid out to miners a little each block, on a smooth curve with no halving cliffs.</p>
+          <h2 id="coin-h">The coin</h2>
+          <p>There will never be more than 21 million GRN, and no coin is ever created out of nothing. All of them start in the protocol's reserve and are paid out to miners a little each block, on a smooth curve with no halving cliffs.</p>
           <p>Fees are kept tiny on purpose. Part of every fee goes back to the reserve, so miners are paid for as long as the network is used, and part is burned, so the supply shrinks slowly with use. The smallest unit is the <em>yaprak</em>, Turkish for leaf: one GRN is a hundred million of them.</p>
         </div>
         <table aria-label="Green's economics">
@@ -245,7 +245,7 @@ footer ul { list-style: none; padding: 0; margin: 0; }
 
     <section id="join" aria-labelledby="join-h">
       <h2 id="join-h">Run a node</h2>
-      <p class="intro">Your node keeps its own copy of the chain and checks every block itself. Your wallet stays on your computer: tokens can only be spent with your key.</p>
+      <p class="intro">Your node keeps its own copy of the chain and checks every block itself. Your wallet stays on your computer: coins can only be spent with your key.</p>
       <ol class="steps">
         <li>
           <div>
@@ -257,7 +257,7 @@ footer ul { list-style: none; padding: 0; margin: 0; }
         <li>
           <div>
             <h3>Make a wallet</h3>
-            <p>Write down the 24-word recovery phrase it shows once. Anyone who sees it can take your tokens; nobody can recover it for you.</p>
+            <p>Write down the 24-word recovery phrase it shows once. Anyone who sees it can take your coins; nobody can recover it for you.</p>
             <div class="cmd"><pre>grn --data green wallet new</pre><button type="button" data-copy>Copy</button></div>
           </div>
         </li>
@@ -284,7 +284,7 @@ green-hub --data green</pre><button type="button" data-copy>Copy</button></div>
         <div>
           <h2 id="young-h">While the network is young</h2>
           <p>A new proof-of-work network has little work behind it, and GPUs can be rented. Until enough independent miners join, the founder's node signs a checkpoint about every minute, and no node accepts a chain that leaves the latest one out, however much work it has. Even a majority of the mining power could rewrite only the last minute and a half.</p>
-          <p>The founder cannot move or create tokens or make an invalid block valid. The checkpoint period ends after a year at the latest, or earlier when the founder ends it; from then on the chain with the most work decides alone.</p>
+          <p>The founder cannot move or create coins or make an invalid block valid. The checkpoint period ends after a year at the latest, or earlier when the founder ends it; from then on the chain with the most work decides alone.</p>
         </div>
         <div class="honest">
           <h3 style="margin-top:0">Built in the open</h3>
