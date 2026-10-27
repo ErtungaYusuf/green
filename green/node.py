@@ -1121,9 +1121,14 @@ class Node:
         # error still reveals what was committed (forgetting it would lose the bond).
         inflight = self._task_inflight       # task_id -> {"commitment","output","output_blob","height"}
         unrunnable = self._task_unrunnable
+        tip = None
         while self.running:
-            time.sleep(1.0)
             with self.lock:
+                # Wake on every new block, not on a fixed clock: a reveal's deadline is
+                # counted in blocks, and a run of quick blocks used to outrun a 1 s sleep
+                # until the reservation expired, the bond was lost and the task committed again.
+                self.tip_changed.wait_for(lambda: self.chain.tip != tip or not self.running, 1.0)
+                tip = self.chain.tip
                 height = self.chain.height
                 tasks = {tid: dict(t) for tid, t in self.chain.state.tasks.items()}
                 busy = {t["task"] for t in self.mempool.values()
@@ -1151,9 +1156,10 @@ class Node:
                     inflight.pop(tid, None)
                     continue
                 if height - r["height"] >= REVEAL_CONFIRMATIONS and tid not in busy:
+                    # Kept in inflight until the chain shows the reveal (status above): one
+                    # that leaves the mempool unmined is sent again before the deadline.
                     self.blobs.put(info["output_blob"])
                     self._try_tx("task_reveal", task=tid, output=info["output"])
-                    inflight.pop(tid, None)
             # Pick one open, unreserved task we can afford and run it.
             if len(inflight) < COMMIT_INFLIGHT_CAP:
                 for tid, t in tasks.items():

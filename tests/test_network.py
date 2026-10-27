@@ -326,12 +326,13 @@ def test_worker_commits_once_when_blocks_are_slow(tmp_path, monkeypatch):
     The worker used to forget it during that wait, never reveal it, lose the
     bond and commit the same task again. Instant test blocks hid this."""
     wasmtime = pytest.importorskip("wasmtime")
-    # A few seconds per block on a CPU (a unit verifies in ~9 ms since v0.7). Block times
-    # are random, so two can land a fraction of a second apart: the reservation leaves the
-    # reveal 4 blocks of slack after its 2 confirmations (the real network leaves 18), or
-    # this would test luck against the worker's 1 s loop instead of the worker.
+    # Under a second per block on a fast CPU (a unit verifies in ~9 ms since v0.7), and block
+    # times are random, so a few can land within one second. The reservation leaves the
+    # reveal 2 blocks of slack after its 2 confirmations (the real network leaves 18): a
+    # worker that polled on a 1 s clock instead of waking on each block missed it on fast
+    # machines (macOS CI), lost the bond and committed the task again.
     monkeypatch.setattr(params, "INITIAL_TARGET", params.MAX_TARGET // 400)
-    monkeypatch.setattr(params, "TASK_RESERVE_BLOCKS", 6)
+    monkeypatch.setattr(params, "TASK_RESERVE_BLOCKS", 4)
     monkeypatch.setattr(params, "TASK_CHALLENGE_BLOCKS", 2)
     prog = wasmtime.wat2wasm(r"""(module (memory (export "memory") 1)
       (func (export "green_run") (param i32 i32) (result i64)
