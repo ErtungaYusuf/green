@@ -17,6 +17,17 @@ Interfaces, each a page in your browser and each its own repository: [green-hub]
 
 Production status of every area, with evidence and blockers: [PRODUCTION.md](PRODUCTION.md). How rules change: [UPGRADES.md](UPGRADES.md). Design and known limitations: [DESIGN.md](DESIGN.md). Protocol specification: [SPEC.md](SPEC.md). HTTP API: [API.md](API.md). Security reviews and fixes: [SECURITY.md](SECURITY.md). Release notes: [CHANGELOG.md](CHANGELOG.md). Against Bitcoin and Solana: [COMPARISON.md](COMPARISON.md).
 
+## For AI agents
+
+An agent that speaks MCP (Claude, Cursor and others) gets Green as tools: its own wallet, the compute on offer, verified matrix products and payments, with a spending cap.
+
+```
+grn --data agent mcp --max-spend 1
+claude mcp add green -- grn --data agent mcp --max-spend 1      # in Claude Code
+```
+
+See [the agents page](https://ertungayusuf.github.io/green/agents.html) and [examples/ollama_agent.py](examples/ollama_agent.py).
+
 ## Join the Green network
 
 Website: **https://ertungayusuf.github.io/green/**. Python 3.11 or newer:
@@ -336,7 +347,7 @@ With a mining node running:
 python examples/mlp_demo.py --node http://127.0.0.1:8545 --data data
 ```
 
-This shows the point of PoUW: the work that secures the chain is a working neural network. The SDK is in [green/nn.py](green/nn.py).
+This shows the point of proof of compute: the work that secures the chain is a working neural network. The SDK is in [green/nn.py](green/nn.py).
 
 ## Autonomous agent
 
@@ -382,7 +393,7 @@ python -m pytest -q tests
 
 | File | Contents |
 |---|---|
-| `green/work.py` | Proof of useful work: noisy matrix multiplication, transcript digest, ticket, Freivalds over a prime field |
+| `green/work.py` | Proof of compute: noisy matrix multiplication, transcript digest, ticket, Freivalds over a prime field |
 | `green/gpu.py` | WebGPU miner (matmul + digest on the GPU, bit-identical to the CPU) |
 | `green/wasm.py` | Deterministic, sandboxed WebAssembly runner |
 | `green/nn.py` | Quantized neural-network SDK (layers computed on Green, every unit verified, wrong ones disputed) |

@@ -2,6 +2,12 @@
 
 Every release so far is a consensus change: nodes of different versions do not form one network.
 
+## Unreleased
+
+- **Green as tools for AI agents:** `grn mcp` is a Model Context Protocol server (JSON-RPC on stdin/stdout) with five tools: `green_wallet`, `green_compute_offers`, `green_matmul` (buys a product through payment channels, checked with Freivalds' test before it is paid for), `green_send` and `green_status`. `--max-spend` caps what the agent may spend while it runs. Not a consensus change. (`tests/test_mcp.py`.)
+- `examples/ollama_agent.py`: an agent whose decisions a small local model makes (Ollama, qwen3:1.7b) checks its wallet, reads the offers and buys a verified product on its own.
+- The website: what Green solves, a page for AI agents (`docs/agents.html`), the forum (GitHub Discussions). The mechanism is called proof of compute.
+
 ## 0.25.0: the main network
 
 - **The Green main network.** Its genesis block (`d2636216d32fd45fffdb7cb0245d73519cd6adced195dc98c031558225785068`, 2026-10-27, "Green main network, 2026-10-27: proof of given compute") ships in `green/networks/mainnet.json`, with the founder's checkpoints until block 2,102,400. A node started without a genesis file joins it; only main-network nodes dial its seed, the founder's node in Frankfurt (`params.SEED_NODES`, pinned by node id). Checked: a new node on a home connection behind carrier-grade NAT, given nothing but `grn node`, found the network and connected to the seed within a second.

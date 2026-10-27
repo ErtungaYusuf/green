@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GPU compute for AI agents | Green (GRN)</title>
+<meta name="description" content="An AI agent can buy verified GPU compute on Green with its own wallet: no sign-up, no API key, no card. An MCP server, a Python library and an HTTP API, every result checked before it is paid for.">
+<meta name="keywords" content="AI agents, autonomous agents, MCP server, Model Context Protocol, buy GPU compute, GPU compute API, decentralized compute, permissionless compute, agent payments, proof of compute, Green, GRN">
+<link rel="canonical" href="https://ertungayusuf.github.io/green/agents.html">
+<link rel="alternate" type="text/plain" title="Green for AI agents and LLMs" href="llms.txt">
+<meta property="og:title" content="GPU compute for AI agents">
+<meta property="og:description" content="An agent with a wallet buys verified GPU compute from an open network of miners. No account, no API key.">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://ertungayusuf.github.io/green/agents.html">
+<script type="application/ld+json">
+[
+ {
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "GPU compute for AI agents on Green",
+  "description": "How an autonomous AI agent buys verified GPU compute on the Green network with its own wallet: an MCP server, a Python library and an HTTP API.",
+  "url": "https://ertungayusuf.github.io/green/agents.html",
+  "about": "Proof of compute, decentralized GPU compute, Model Context Protocol"
+ },
+ {
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+   {
+    "@type": "Question",
+    "name": "Can an AI agent buy GPU compute without an account?",
+    "acceptedAnswer": {
+     "@type": "Answer",
+     "text": "Yes. On Green an agent needs only a wallet, which it creates itself on its own machine. There is no sign-up, no API key, no payment card and no approval: it pays miners directly in GRN through payment channels."
+    }
+   },
+   {
+    "@type": "Question",
+    "name": "How does the agent know the result is correct?",
+    "acceptedAnswer": {
+     "@type": "Answer",
+     "text": "Every matrix product is checked with Freivalds' test before it is paid for. Checking takes n squared steps where computing takes n cubed, so the agent verifies each answer for almost nothing and never pays for a wrong one."
+    }
+   },
+   {
+    "@type": "Question",
+    "name": "How does an agent get GRN?",
+    "acceptedAnswer": {
+     "@type": "Answer",
+     "text": "It can earn GRN by mining with a GPU or CPU, or receive it at its address from its owner or from anyone who pays it for its work."
+    }
+   },
+   {
+    "@type": "Question",
+    "name": "What does compute cost?",
+    "acceptedAnswer": {
+     "@type": "Answer",
+     "text": "Miners set their own prices and compete in the open; the agent picks the cheapest. A transaction fee is 0.000005 GRN per signature."
+    }
+   },
+   {
+    "@type": "Question",
+    "name": "Which agents can use it?",
+    "acceptedAnswer": {
+     "@type": "Answer",
+     "text": "Any agent that speaks the Model Context Protocol (Claude, Cursor and others) through the grn mcp server, and any program through the Python library or the node's HTTP API."
+    }
+   },
+   {
+    "@type": "Question",
+    "name": "Can the owner limit what an agent spends?",
+    "acceptedAnswer": {
+     "@type": "Answer",
+     "text": "Yes. grn mcp --max-spend caps a session, and a guardian account (grn guard) can cap spending per period on chain and freeze the agent's account."
+    }
+   }
+  ]
+ }
+]
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --paper: #f3f6f2; --ink: #102a20; --leaf: #1f7a4d; --lattice: #c9d8cd; --signal: #2457c5;
+  --muted: #5b6f64; --panel: #e7eee8; --good: #1f7a4d; --bad: #b3261e;
+  --display: "Bricolage Grotesque", "Segoe UI", sans-serif;
+  --text: "Source Serif 4", Georgia, serif;
+  --mono: "JetBrains Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --paper: #0f1d17; --ink: #e2ece5; --leaf: #5cc28c; --lattice: #26392f; --signal: #7aa2ff;
+          --muted: #93a99c; --panel: #16271f; --good: #5cc28c; --bad: #ff8a80; }
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 400 1.0625rem/1.65 var(--text); }
+a { color: var(--signal); text-underline-offset: .18em; }
+a:focus-visible, button:focus-visible { outline: 3px solid var(--signal); outline-offset: 3px; border-radius: 4px; }
+h1, h2, h3 { font-family: var(--display); line-height: 1.08; margin: 0; letter-spacing: -.015em; }
+h2 { font-size: clamp(1.7rem, 3.2vw, 2.4rem); font-weight: 800; margin-bottom: .6rem; }
+h3 { font-size: 1.15rem; font-weight: 600; margin: 1.6rem 0 .35rem; }
+p { margin: 0 0 1rem; max-width: 64ch; }
+code, pre { font-family: var(--mono); font-size: .88em; }
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 1.25rem; }
+
+/* top bar */
+.bar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1.1rem 0; }
+.brand { font: 800 1.35rem var(--display); color: var(--ink); text-decoration: none; display: flex; align-items: center; gap: .5rem; }
+.brand svg { width: 1.6rem; height: 1.6rem; }
+.bar nav { display: flex; gap: 1.25rem; font: 600 .95rem var(--display); }
+.bar nav a { color: var(--ink); text-decoration: none; }
+.bar nav a:hover { color: var(--leaf); }
+
+/* hero */
+.hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); gap: 3rem; align-items: center;
+        padding: 3.5rem 0 4.5rem; }
+.hero h1 { font-size: clamp(2.9rem, 7vw, 5.6rem); font-weight: 800; letter-spacing: -.035em; margin-bottom: 1.2rem; }
+.hero .lede { font-size: 1.22rem; color: var(--ink); max-width: 34ch; }
+.actions { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1.6rem; }
+.btn { font: 600 1rem var(--display); padding: .8rem 1.25rem; border-radius: 999px; border: 2px solid var(--leaf);
+       background: var(--leaf); color: var(--paper); text-decoration: none; cursor: pointer; }
+.btn.quiet { background: transparent; color: var(--leaf); }
+.btn:hover { filter: brightness(1.08); }
+
+/* the product, computed on the page */
+.bench { background: var(--panel); border-radius: 18px; padding: 1.4rem; position: relative; overflow: hidden;
+         background-image: linear-gradient(var(--lattice) 1px, transparent 1px), linear-gradient(90deg, var(--lattice) 1px, transparent 1px);
+         background-size: 22px 22px; background-position: -1px -1px; }
+.eq { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1.3fr); align-items: center; gap: .5rem; }
+.op { font: 600 1.4rem var(--display); color: var(--muted); text-align: center; }
+.mx { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); min-width: 0; gap: 2px; background: var(--paper); padding: 4px; border-radius: 6px;
+      border: 1px solid var(--lattice); }
+.mx span { font: 400 clamp(.5rem, .95vw, .68rem)/1 var(--mono); aspect-ratio: 1; display: grid; place-items: center;
+           color: var(--muted); font-variant-numeric: tabular-nums; min-width: 0; overflow: hidden; }
+.mx.in span { border-radius: 2px; }
+.mx.c span { color: var(--ink); background: transparent; transition: background-color .4s;
+              font-size: clamp(.42rem, .78vw, .6rem); letter-spacing: -.04em; }
+.mx.c span.lit { background: color-mix(in srgb, var(--leaf) 22%, transparent); }
+.mx.c span.now { background: var(--signal); color: var(--paper); }
+.mx.c span.row { box-shadow: inset 0 0 0 1px var(--signal); }
+.readout { margin-top: 1rem; display: grid; gap: .3rem; font: 400 .9rem/1.45 var(--display); }
+.readout b { font-weight: 600; }
+.readout .ok { color: var(--good); } .readout .no { color: var(--bad); }
+.readout .ticket { font-family: var(--mono); font-size: .8rem; word-break: break-all; color: var(--muted); }
+.bench .again { margin-top: 1rem; }
+.caption { font: 400 .85rem/1.5 var(--display); color: var(--muted); margin-top: .7rem; max-width: none; }
+
+/* sections */
+section { padding: 4rem 0; border-top: 1px solid var(--lattice); }
+.split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 3rem; align-items: start; }
+.intro { color: var(--muted); font-size: 1.12rem; }
+.facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2rem; margin-top: 2rem; }
+.facts p { font-size: 1rem; }
+
+/* shares: one block's reward, as work */
+.strip { margin: 1.4rem 0 .4rem; }
+.strip .lab { font: 600 .95rem var(--display); margin-bottom: .35rem; }
+.ticks { display: flex; gap: 2px; height: 34px; }
+.ticks i { flex: 1; background: var(--leaf); border-radius: 2px; opacity: .85; }
+.ticks i.f { background: var(--signal); opacity: 1; flex: 1.3; }
+.strip .note { font: 400 .85rem var(--display); color: var(--muted); margin-top: .3rem; }
+
+table { border-collapse: collapse; width: 100%; font: 400 .98rem/1.45 var(--display); }
+th, td { text-align: left; vertical-align: top; padding: .7rem .8rem .7rem 0; border-bottom: 1px solid var(--lattice); }
+th { font-weight: 600; color: var(--muted); }
+td:first-child { font-weight: 600; width: 34%; }
+
+/* join */
+ol.steps { list-style: none; counter-reset: s; padding: 0; margin: 1.5rem 0 0; display: grid; gap: 1.4rem; max-width: 760px; }
+ol.steps li { counter-increment: s; display: grid; grid-template-columns: 2.4rem 1fr; gap: .9rem; }
+ol.steps li::before { content: counter(s); font: 800 1.5rem/1 var(--display); color: var(--leaf); padding-top: .15rem; }
+ol.steps h3 { margin: 0 0 .3rem; }
+.cmd { display: flex; align-items: stretch; gap: 0; margin: .4rem 0 0; background: var(--panel); border-radius: 10px;
+       border: 1px solid var(--lattice); overflow: hidden; }
+.cmd pre { margin: 0; padding: .7rem .9rem; overflow-x: auto; flex: 1; white-space: pre; }
+.cmd button { font: 600 .82rem var(--display); border: 0; border-left: 1px solid var(--lattice); background: transparent;
+              color: var(--leaf); padding: 0 .9rem; cursor: pointer; }
+.honest { background: var(--panel); border-radius: 14px; padding: 1.4rem 1.5rem; border-left: 5px solid var(--signal); }
+.honest p:last-child { margin-bottom: 0; }
+footer { border-top: 1px solid var(--lattice); padding: 2.5rem 0 3.5rem; font: 400 .95rem/1.7 var(--display); color: var(--muted); }
+footer .cols { display: flex; flex-wrap: wrap; gap: 2.5rem; }
+footer a { color: var(--ink); }
+footer h3 { margin: 0 0 .4rem; font-size: 1rem; color: var(--ink); }
+footer ul { list-style: none; padding: 0; margin: 0; }
+
+@media (max-width: 880px) {
+  .hero, .split { grid-template-columns: 1fr; gap: 2rem; }
+  .hero { padding-top: 1.5rem; }
+  .facts { grid-template-columns: 1fr; gap: .5rem; }
+  .bar nav { gap: .9rem; font-size: .9rem; }
+}
+@media (max-width: 520px) {
+  .eq { grid-template-columns: 1fr auto 1fr; }
+  .eq .op.eqs { grid-column: 1 / -1; }
+  .eq .mx.c { grid-column: 1 / -1; }
+  .bar nav a.hide-s { display: none; }
+}
+</style>
+<style>
+.page-head { padding: 3.5rem 0 1rem; }
+.page-head h1 { font-size: clamp(2.3rem, 5.5vw, 3.8rem); font-weight: 800; max-width: 18ch; }
+.page-head .lede { font-size: 1.22rem; max-width: 46ch; margin-top: 1.2rem; }
+.code { background: var(--panel); border: 1px solid var(--lattice); border-radius: 10px; padding: .9rem 1rem; overflow-x: auto; margin: .5rem 0 1rem; }
+.code pre { margin: 0; white-space: pre; }
+dl.faq dt { font: 600 1.1rem var(--display); margin-top: 1.4rem; }
+dl.faq dd { margin: .35rem 0 0; max-width: 64ch; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="bar">
+    <a class="brand" href="./">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 27C5 13 14 5 28 5c0 14-8 23-22 23z" fill="currentColor" opacity=".9"/><path d="M8 25 22 11" stroke="var(--paper)" stroke-width="2"/></svg>
+      Green
+    </a>
+    <nav aria-label="Main">
+      <a href="./#why" class="hide-s">Why</a>
+      <a href="./#work">How it works</a>
+      <a href="agents.html" aria-current="page">For AI agents</a>
+      <a href="https://github.com/ErtungaYusuf/green/discussions">Forum</a>
+      <a href="https://github.com/ErtungaYusuf/green">GitHub</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="page-head">
+      <h1>Compute an agent can buy on its own.</h1>
+      <p class="lede">On Green an AI agent holds its own wallet and buys GPU compute straight from the network's miners. No sign-up, no API key, no card, and every result is checked before it is paid for.</p>
+    </div>
+
+    <section aria-labelledby="start-h">
+      <h2 id="start-h">Connect an agent</h2>
+      <ol class="steps">
+        <li><div><h3>Install Green</h3><div class="cmd"><pre>pip install &quot;green-grn @ https://github.com/ErtungaYusuf/green/archive/refs/heads/main.zip&quot;</pre><button type="button" data-copy>Copy</button></div></div></li>
+        <li><div><h3>Give the agent a wallet</h3><p>The key is made and kept on this computer. Set GREEN_WALLET_PASSWORD_FILE so the agent can unlock it unattended.</p><div class="cmd"><pre>grn --data agent wallet new</pre><button type="button" data-copy>Copy</button></div></div></li>
+        <li><div><h3>Run a node</h3><p>It joins the main network by itself and checks every block.</p><div class="cmd"><pre>grn --data agent node</pre><button type="button" data-copy>Copy</button></div></div></li>
+        <li><div><h3>Add Green to the agent as an MCP server</h3><p>For Claude Code:</p><div class="cmd"><pre>claude mcp add green -- grn --data agent mcp --max-spend 1</pre><button type="button" data-copy>Copy</button></div><p>For Claude Desktop, Cursor and other MCP clients, in their MCP settings:</p><div class="code"><pre>{
+  &quot;mcpServers&quot;: {
+    &quot;green&quot;: {
+      &quot;command&quot;: &quot;grn&quot;,
+      &quot;args&quot;: [
+        &quot;--data&quot;,
+        &quot;agent&quot;,
+        &quot;mcp&quot;,
+        &quot;--max-spend&quot;,
+        &quot;1&quot;
+      ]
+    }
+  }
+}</pre></div></div></li>
+      </ol>
+    </section>
+
+    <section aria-labelledby="tools-h">
+      <h2 id="tools-h">What the agent can do</h2>
+      <table>
+        <thead><tr><th scope="col">Tool</th><th scope="col">What it does</th></tr></thead>
+        <tbody>
+          <tr><td><code>green_wallet</code></td><td>The agent's address and balance.</td></tr>
+          <tr><td><code>green_compute_offers</code></td><td>Miners selling compute and their prices, cheapest first.</td></tr>
+          <tr><td><code>green_matmul</code></td><td>Buy A @ B of int8 matrices, checked before it is paid for.</td></tr>
+          <tr><td><code>green_send</code></td><td>Send GRN to an address.</td></tr>
+          <tr><td><code>green_status</code></td><td>The network, the fee and what the session may still spend.</td></tr>
+        </tbody>
+      </table>
+      <p style="margin-top:1rem"><code>--max-spend</code> caps what the agent spends while the server runs. On chain, a guardian account can cap its spending per period and freeze it (<code>grn guard</code>).</p>
+    </section>
+
+    <section aria-labelledby="py-h">
+      <h2 id="py-h">From code</h2>
+      <p>The same market from Python. Payment channels open to the cheapest miners; each product is paid for as it arrives, only after it checks out.</p>
+      <div class="code"><pre>from green.cli import load_wallet
+from green.compute import ComputeCluster
+import numpy as np
+
+key = load_wallet(&quot;agent&quot;)
+cluster = ComputeCluster.from_market(&quot;http://127.0.0.1:8545&quot;, key, amount_each=10_000_000)
+a = np.random.randint(-128, 128, (512, 512), dtype=np.int8)
+c = cluster.matmul(a, a)        # checked with Freivalds&#x27; test before paying
+print(cluster.owed)             # what it cost so far
+cluster.close()                 # settle; what is unspent comes back</pre></div>
+      <p>Every endpoint is in the <a href="https://github.com/ErtungaYusuf/green/blob/main/API.md">HTTP API</a>. A complete agent run by a small local model is in <a href="https://github.com/ErtungaYusuf/green/blob/main/examples/ollama_agent.py">examples/ollama_agent.py</a>.</p>
+    </section>
+
+    <section aria-labelledby="faq-h">
+      <h2 id="faq-h">Questions</h2>
+      <dl class="faq">
+        <dt>Can an AI agent buy GPU compute without an account?</dt><dd>Yes. On Green an agent needs only a wallet, which it creates itself on its own machine. There is no sign-up, no API key, no payment card and no approval: it pays miners directly in GRN through payment channels.</dd>
+        <dt>How does the agent know the result is correct?</dt><dd>Every matrix product is checked with Freivalds&#x27; test before it is paid for. Checking takes n squared steps where computing takes n cubed, so the agent verifies each answer for almost nothing and never pays for a wrong one.</dd>
+        <dt>How does an agent get GRN?</dt><dd>It can earn GRN by mining with a GPU or CPU, or receive it at its address from its owner or from anyone who pays it for its work.</dd>
+        <dt>What does compute cost?</dt><dd>Miners set their own prices and compete in the open; the agent picks the cheapest. A transaction fee is 0.000005 GRN per signature.</dd>
+        <dt>Which agents can use it?</dt><dd>Any agent that speaks the Model Context Protocol (Claude, Cursor and others) through the grn mcp server, and any program through the Python library or the node&#x27;s HTTP API.</dd>
+        <dt>Can the owner limit what an agent spends?</dt><dd>Yes. grn mcp --max-spend caps a session, and a guardian account (grn guard) can cap spending per period on chain and freeze the agent&#x27;s account.</dd>
+      </dl>
+      <p style="margin-top:1.5rem">Something else? Ask in the <a href="https://github.com/ErtungaYusuf/green/discussions">forum</a>.</p>
+    </section>
+  </main>
+
+  <footer>
+    <div class="cols">
+      <div><h3>Green</h3><ul><li><a href="./">Home</a></li><li><a href="llms.txt">llms.txt</a></li><li><a href="https://github.com/ErtungaYusuf/green/discussions">Forum</a></li></ul></div>
+      <div><h3>Read</h3><ul><li><a href="https://github.com/ErtungaYusuf/green/blob/main/README.md">Overview</a></li><li><a href="https://github.com/ErtungaYusuf/green/blob/main/API.md">HTTP API</a></li></ul></div>
+      <div><p style="margin:0">Open source under the MIT license.</p></div>
+    </div>
+  </footer>
+</div>
+<script>
+"use strict";
+(() => {
+  document.querySelectorAll("[data-copy]").forEach((b) => b.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(b.previousElementSibling.textContent); b.textContent = "Copied"; }
+    catch (e) { b.textContent = "Select and copy"; }
+    setTimeout(() => b.textContent = "Copy", 1600);
+  }));
+})();
+</script>
+</body>
+</html>

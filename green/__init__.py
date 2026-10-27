@@ -1,4 +1,4 @@
-"""Green: proof-of-useful-work blockchain."""
+"""Green: a proof-of-compute blockchain."""
 
 import os
 

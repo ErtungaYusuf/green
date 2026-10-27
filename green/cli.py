@@ -1024,6 +1024,15 @@ def cmd_agent(args):
     print(f"{len(done)}/{args.goals} goals completed.")
 
 
+def cmd_mcp(args):
+    from .mcp import Server
+    key = load_wallet(args.data)                   # an encrypted wallet: GREEN_WALLET_PASSWORD(_FILE)
+    limit = params.parse_amount(args.max_spend) if args.max_spend else None
+    print(f"Green MCP server: node {args.node}, wallet {key.address if key else 'none'}, "
+          f"spending limit {params.fmt_amount(limit) if limit is not None else 'none'}", file=sys.stderr)
+    Server(args.node, key, max_spend=limit, allow_local=args.allow_local).serve()
+
+
 def cmd_supply(args):
     s = api_get(args, "/supply")
     print(f"Height   : {s['height']}")
@@ -1147,7 +1156,7 @@ def cmd_peers(args):
 def build_parser() -> argparse.ArgumentParser:
     prog = "grn" if os.path.basename(sys.argv[0]).lower().startswith("grn") else "python -m green"
     p = argparse.ArgumentParser(prog=prog,
-                                description=f"{params.COIN_NAME} ({params.TICKER}): a blockchain secured by proof of useful work")
+                                description=f"{params.COIN_NAME} ({params.TICKER}): a blockchain secured by proof of compute")
     p.add_argument("--data", default="data", help="folder for the wallet, blocks and data (default: data)")
     p.add_argument("--node", default=DEFAULT_NODE, help=f"node to talk to (default: {DEFAULT_NODE})")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1406,6 +1415,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--price", default="0.01")
     s.add_argument("--max-wait", type=float, default=300, help="longest wait for funds (s)")
     s.set_defaults(fn=cmd_agent)
+
+    s = sub.add_parser("mcp", help="Green as tools for an AI agent: an MCP server on stdin/stdout")
+    s.add_argument("--max-spend", metavar="GRN", help="the most the agent may spend while the server runs")
+    s.add_argument("--allow-local", action="store_true", help="also buy from providers on private addresses (testing)")
+    s.set_defaults(fn=cmd_mcp)
 
     task = sub.add_parser("task", help="buy general compute (WASM)").add_subparsers(dest="task_cmd", required=True)
     s = task.add_parser("post", help="post a WASM program + input to be run")
