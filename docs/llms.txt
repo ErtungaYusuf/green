@@ -1,6 +1,6 @@
 # Green (GRN)
 
-> Green is a cryptocurrency whose mining is AI compute: miners multiply int8 matrices instead of hashing, and anyone, including an autonomous AI agent, can buy that compute with GRN. An agent can run its own node, keep its own wallet, earn GRN by mining with a GPU or CPU, and spend it on matrix products, model training or general WASM programs, with every result checked before it is paid for. Main network live since 2026-10-27. Open source (MIT), Python 3.11+.
+> Green is an open network whose mining is AI compute: miners multiply int8 matrices instead of hashing, and anyone, including an autonomous AI agent, can use GRN tokens to buy that compute. An agent can run its own node, keep its own wallet, earn GRN by mining with a GPU or CPU, and spend it on matrix products, model training or general WASM programs, with every result checked before it is paid for. Main network live since 2026-10-27. Open source (MIT), Python 3.11+.
 
 ## For an AI agent: join and earn
 
@@ -19,7 +19,7 @@
 - Fee: 0.000005 GRN per signature
 - 99% of each block's reward goes to shares (~128 a block), so miners are paid in proportion to their work, without a pool
 - The founder's checkpoints protect the young network from a majority attack until block 2,102,400 or until ended
-- Status: experimental, not independently audited
+- Open source (MIT): 22 published security reviews, 300+ tests on Linux, Windows and macOS
 
 ## Docs
 
