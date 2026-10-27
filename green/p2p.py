@@ -711,7 +711,10 @@ class P2P:
         self.running = False
         self.server = None
         self._ready: queue.Queue = queue.Queue()
-        self.seeds = list(params.SEED_NODES if seeds is None else seeds)
+        if seeds is None:                          # only the main network's nodes dial its seeds
+            from . import mainnet
+            seeds = params.SEED_NODES if mainnet.is_mainnet(node.chain.genesis_hash) else []
+        self.seeds = list(seeds)
         # relay
         self.tx_wait: dict[str, dict] = {}         # txid -> {"peers": [...], "asked": peer, "deadline"}
         self.rejected = BoundedSet(50_000)         # transactions found invalid since the last block

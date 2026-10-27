@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Green (GRN): mining that multiplies</title>
+<meta name="description" content="Green is a cryptocurrency secured by useful work: miners multiply matrices for AI instead of hashing, and anyone can buy that compute with the coin.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --paper: #f3f6f2; --ink: #102a20; --leaf: #1f7a4d; --lattice: #c9d8cd; --signal: #2457c5;
+  --muted: #5b6f64; --panel: #e7eee8; --good: #1f7a4d; --bad: #b3261e;
+  --display: "Bricolage Grotesque", "Segoe UI", sans-serif;
+  --text: "Source Serif 4", Georgia, serif;
+  --mono: "JetBrains Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --paper: #0f1d17; --ink: #e2ece5; --leaf: #5cc28c; --lattice: #26392f; --signal: #7aa2ff;
+          --muted: #93a99c; --panel: #16271f; --good: #5cc28c; --bad: #ff8a80; }
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 400 1.0625rem/1.65 var(--text); }
+a { color: var(--signal); text-underline-offset: .18em; }
+a:focus-visible, button:focus-visible { outline: 3px solid var(--signal); outline-offset: 3px; border-radius: 4px; }
+h1, h2, h3 { font-family: var(--display); line-height: 1.08; margin: 0; letter-spacing: -.015em; }
+h2 { font-size: clamp(1.7rem, 3.2vw, 2.4rem); font-weight: 800; margin-bottom: .6rem; }
+h3 { font-size: 1.15rem; font-weight: 600; margin: 1.6rem 0 .35rem; }
+p { margin: 0 0 1rem; max-width: 64ch; }
+code, pre { font-family: var(--mono); font-size: .88em; }
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 1.25rem; }
+
+/* top bar */
+.bar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1.1rem 0; }
+.brand { font: 800 1.35rem var(--display); color: var(--ink); text-decoration: none; display: flex; align-items: center; gap: .5rem; }
+.brand svg { width: 1.6rem; height: 1.6rem; }
+.bar nav { display: flex; gap: 1.25rem; font: 600 .95rem var(--display); }
+.bar nav a { color: var(--ink); text-decoration: none; }
+.bar nav a:hover { color: var(--leaf); }
+
+/* hero */
+.hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); gap: 3rem; align-items: center;
+        padding: 3.5rem 0 4.5rem; }
+.hero h1 { font-size: clamp(2.9rem, 7vw, 5.6rem); font-weight: 800; letter-spacing: -.035em; margin-bottom: 1.2rem; }
+.hero .lede { font-size: 1.22rem; color: var(--ink); max-width: 34ch; }
+.actions { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1.6rem; }
+.btn { font: 600 1rem var(--display); padding: .8rem 1.25rem; border-radius: 999px; border: 2px solid var(--leaf);
+       background: var(--leaf); color: var(--paper); text-decoration: none; cursor: pointer; }
+.btn.quiet { background: transparent; color: var(--leaf); }
+.btn:hover { filter: brightness(1.08); }
+
+/* the product, computed on the page */
+.bench { background: var(--panel); border-radius: 18px; padding: 1.4rem; position: relative; overflow: hidden;
+         background-image: linear-gradient(var(--lattice) 1px, transparent 1px), linear-gradient(90deg, var(--lattice) 1px, transparent 1px);
+         background-size: 22px 22px; background-position: -1px -1px; }
+.eq { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1.3fr); align-items: center; gap: .5rem; }
+.op { font: 600 1.4rem var(--display); color: var(--muted); text-align: center; }
+.mx { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); min-width: 0; gap: 2px; background: var(--paper); padding: 4px; border-radius: 6px;
+      border: 1px solid var(--lattice); }
+.mx span { font: 400 clamp(.5rem, .95vw, .68rem)/1 var(--mono); aspect-ratio: 1; display: grid; place-items: center;
+           color: var(--muted); font-variant-numeric: tabular-nums; min-width: 0; overflow: hidden; }
+.mx.in span { border-radius: 2px; }
+.mx.c span { color: var(--ink); background: transparent; transition: background-color .4s;
+              font-size: clamp(.42rem, .78vw, .6rem); letter-spacing: -.04em; }
+.mx.c span.lit { background: color-mix(in srgb, var(--leaf) 22%, transparent); }
+.mx.c span.now { background: var(--signal); color: var(--paper); }
+.mx.c span.row { box-shadow: inset 0 0 0 1px var(--signal); }
+.readout { margin-top: 1rem; display: grid; gap: .3rem; font: 400 .9rem/1.45 var(--display); }
+.readout b { font-weight: 600; }
+.readout .ok { color: var(--good); } .readout .no { color: var(--bad); }
+.readout .ticket { font-family: var(--mono); font-size: .8rem; word-break: break-all; color: var(--muted); }
+.bench .again { margin-top: 1rem; }
+.caption { font: 400 .85rem/1.5 var(--display); color: var(--muted); margin-top: .7rem; max-width: none; }
+
+/* sections */
+section { padding: 4rem 0; border-top: 1px solid var(--lattice); }
+.split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 3rem; align-items: start; }
+.intro { color: var(--muted); font-size: 1.12rem; }
+.facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2rem; margin-top: 2rem; }
+.facts p { font-size: 1rem; }
+
+/* shares: one block's reward, as work */
+.strip { margin: 1.4rem 0 .4rem; }
+.strip .lab { font: 600 .95rem var(--display); margin-bottom: .35rem; }
+.ticks { display: flex; gap: 2px; height: 34px; }
+.ticks i { flex: 1; background: var(--leaf); border-radius: 2px; opacity: .85; }
+.ticks i.f { background: var(--signal); opacity: 1; flex: 1.3; }
+.strip .note { font: 400 .85rem var(--display); color: var(--muted); margin-top: .3rem; }
+
+table { border-collapse: collapse; width: 100%; font: 400 .98rem/1.45 var(--display); }
+th, td { text-align: left; vertical-align: top; padding: .7rem .8rem .7rem 0; border-bottom: 1px solid var(--lattice); }
+th { font-weight: 600; color: var(--muted); }
+td:first-child { font-weight: 600; width: 34%; }
+
+/* join */
+ol.steps { list-style: none; counter-reset: s; padding: 0; margin: 1.5rem 0 0; display: grid; gap: 1.4rem; max-width: 760px; }
+ol.steps li { counter-increment: s; display: grid; grid-template-columns: 2.4rem 1fr; gap: .9rem; }
+ol.steps li::before { content: counter(s); font: 800 1.5rem/1 var(--display); color: var(--leaf); padding-top: .15rem; }
+ol.steps h3 { margin: 0 0 .3rem; }
+.cmd { display: flex; align-items: stretch; gap: 0; margin: .4rem 0 0; background: var(--panel); border-radius: 10px;
+       border: 1px solid var(--lattice); overflow: hidden; }
+.cmd pre { margin: 0; padding: .7rem .9rem; overflow-x: auto; flex: 1; white-space: pre; }
+.cmd button { font: 600 .82rem var(--display); border: 0; border-left: 1px solid var(--lattice); background: transparent;
+              color: var(--leaf); padding: 0 .9rem; cursor: pointer; }
+.honest { background: var(--panel); border-radius: 14px; padding: 1.4rem 1.5rem; border-left: 5px solid var(--signal); }
+.honest p:last-child { margin-bottom: 0; }
+footer { border-top: 1px solid var(--lattice); padding: 2.5rem 0 3.5rem; font: 400 .95rem/1.7 var(--display); color: var(--muted); }
+footer .cols { display: flex; flex-wrap: wrap; gap: 2.5rem; }
+footer a { color: var(--ink); }
+footer h3 { margin: 0 0 .4rem; font-size: 1rem; color: var(--ink); }
+footer ul { list-style: none; padding: 0; margin: 0; }
+
+@media (max-width: 880px) {
+  .hero, .split { grid-template-columns: 1fr; gap: 2rem; }
+  .hero { padding-top: 1.5rem; }
+  .facts { grid-template-columns: 1fr; gap: .5rem; }
+  .bar nav { gap: .9rem; font-size: .9rem; }
+}
+@media (max-width: 520px) {
+  .eq { grid-template-columns: 1fr auto 1fr; }
+  .eq .op.eqs { grid-column: 1 / -1; }
+  .eq .mx.c { grid-column: 1 / -1; }
+  .bar nav a.hide-s { display: none; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="bar">
+    <a class="brand" href="#top" aria-label="Green, home">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 27C5 13 14 5 28 5c0 14-8 23-22 23z" fill="currentColor" opacity=".9"/><path d="M8 25 22 11" stroke="var(--paper)" stroke-width="2"/></svg>
+      Green
+    </a>
+    <nav aria-label="Main">
+      <a href="#work">How it works</a>
+      <a href="#money" class="hide-s">The money</a>
+      <a href="#join">Join</a>
+      <a href="https://github.com/ErtungaYusuf/green">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="top">
+    <div class="hero">
+      <div>
+        <h1>Mining that multiplies.</h1>
+        <p class="lede">Green is money secured by AI compute. Every block is found by multiplying matrices, the work at the heart of training and running neural networks, and anyone can buy that compute with the coin.</p>
+        <div class="actions">
+          <a class="btn" href="#join">Run a node</a>
+          <a class="btn quiet" href="#work">See how it works</a>
+        </div>
+      </div>
+      <figure class="bench" aria-labelledby="bench-cap" style="margin:0">
+        <div class="eq">
+          <div class="mx in" id="ma" role="img" aria-label="Matrix A: random int8 values, green positive, blue negative"></div>
+          <div class="op" aria-hidden="true">×</div>
+          <div class="mx in" id="mb" role="img" aria-label="Matrix B: random int8 values, green positive, blue negative"></div>
+          <div class="op eqs" aria-hidden="true">=</div>
+          <div class="mx c" id="mc" aria-label="Product C"></div>
+        </div>
+        <div class="readout" aria-live="polite">
+          <div id="r-check">&nbsp;</div>
+          <div id="r-ticket" class="ticket">&nbsp;</div>
+          <div id="r-win">&nbsp;</div>
+        </div>
+        <button class="btn quiet again" id="again" type="button">Multiply new matrices</button>
+        <figcaption class="caption" id="bench-cap">Computed in your browser just now: a small int8 product, checked the cheap way, and turned into a lottery ticket. A Green miner does the same with 256 × 256 tiles, hundreds of times a second.</figcaption>
+      </figure>
+    </div>
+
+    <section id="work" aria-labelledby="work-h">
+      <h2 id="work-h">Work someone needed</h2>
+      <p class="intro">The work that secures Green is compute someone needed. We call it proof of given compute: the network is paid for the compute it gives, and the coin is secured by that same compute.</p>
+      <div class="facts">
+        <div>
+          <h3>Miners multiply matrices</h3>
+          <p>A miner computes int8 matrix products, the operation GPUs run all day for AI. A digest of each product is a ticket in the block lottery. When buyers post jobs, their units are the miners' work.</p>
+        </div>
+        <div>
+          <h3>Checking costs almost nothing</h3>
+          <p>A product of n × n matrices takes n³ steps to compute and n² to check, with Freivalds' test. Nodes verify each other's work without redoing it, and a buyer never pays for a wrong result.</p>
+        </div>
+        <div>
+          <h3>Compute you can buy</h3>
+          <p>Pay miners product by product through payment channels, or post a whole job on chain. Your data can be split or secret-shared so no miner sees the whole problem.</p>
+        </div>
+      </div>
+    </section>
+
+    <section aria-labelledby="fair-h">
+      <div class="split">
+        <div>
+          <h2 id="fair-h">Paid for work, not luck</h2>
+          <p>99% of each block's reward goes to <em>shares</em>: proofs of work 128 times easier than a block, about one every tenth of a second across the network. Every share is paid, so a miner's income follows the work it does, block after block.</p>
+          <p>A single GPU earns several times a minute. Nobody needs a pool to get a steady income, and finding the block itself is worth about one share.</p>
+        </div>
+        <div>
+          <div class="strip">
+            <div class="lab">One Green block's reward</div>
+            <div class="ticks" id="ticks-green" aria-label="128 shares and the block finder, each paid"></div>
+            <div class="note">About 128 shares, each paid; the finder's part is one more.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="money" aria-labelledby="money-h">
+      <div class="split">
+        <div>
+          <h2 id="money-h">The money</h2>
+          <p>There will never be more than 21 million GRN, and no coin is ever created out of nothing. All of them start in the protocol's reserve and are paid out to miners a little each block, on a smooth curve with no halving cliffs.</p>
+          <p>Fees are kept tiny on purpose. Part of every fee goes back to the reserve, so miners are paid for as long as the network is used, and part is burned, so the supply shrinks slowly with use. The smallest unit is the <em>yaprak</em>, Turkish for leaf: one GRN is a hundred million of them.</p>
+        </div>
+        <table aria-label="Green's economics">
+          <tbody>
+            <tr><td>Supply</td><td>21,000,000 GRN at most, never inflated</td></tr>
+            <tr><td>Block time</td><td>15 seconds</td></tr>
+            <tr><td>Reward per block</td><td>1/16,777,216 of the reserve, 99% of it to shares</td></tr>
+            <tr><td>Fee</td><td>0.000005 GRN per signature</td></tr>
+            <tr><td>Where fees go</td><td>50% to the miner, 30% back to the reserve, 20% burned</td></tr>
+            <tr><td>Capacity</td><td>3,000 transactions a block, 200 a second</td></tr>
+            <tr><td>Premine</td><td>None: the genesis block paid its finder 0.0125 GRN</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+
+    <section id="join" aria-labelledby="join-h">
+      <h2 id="join-h">Run a node</h2>
+      <p class="intro">Your node keeps its own copy of the chain and checks every block itself. Your wallet stays on your computer: coins can only be spent with your key.</p>
+      <ol class="steps">
+        <li>
+          <div>
+            <h3>Install</h3>
+            <p>Python 3.11 or newer. The <code>gpu</code> extra mines on AMD, NVIDIA and Intel GPUs; without it Green mines on the CPU.</p>
+            <div class="cmd"><pre>pip install "green-grn[gpu] @ https://github.com/ErtungaYusuf/green/archive/refs/heads/main.zip"</pre><button type="button" data-copy>Copy</button></div>
+          </div>
+        </li>
+        <li>
+          <div>
+            <h3>Make a wallet</h3>
+            <p>Write down the 24-word recovery phrase it shows once. Anyone who sees it can take your coins; nobody can recover it for you.</p>
+            <div class="cmd"><pre>grn --data green wallet new</pre><button type="button" data-copy>Copy</button></div>
+          </div>
+        </li>
+        <li>
+          <div>
+            <h3>Join and mine</h3>
+            <p>With no genesis file of its own, a node joins the Green network and finds its peers. <code>--portmap</code> asks your router to let other nodes reach you.</p>
+            <div class="cmd"><pre>grn --data green node --mine --gpu --portmap</pre><button type="button" data-copy>Copy</button></div>
+          </div>
+        </li>
+        <li>
+          <div>
+            <h3>Use it in the browser</h3>
+            <p>Green Hub is a wallet, a compute market and a mining dashboard in one page, on your own computer.</p>
+            <div class="cmd"><pre>pip install "green-hub @ https://github.com/ErtungaYusuf/green-hub/archive/refs/heads/main.zip"
+green-hub --data green</pre><button type="button" data-copy>Copy</button></div>
+          </div>
+        </li>
+      </ol>
+    </section>
+
+    <section aria-labelledby="young-h">
+      <div class="split">
+        <div>
+          <h2 id="young-h">While the network is young</h2>
+          <p>A new proof-of-work network has little work behind it, and GPUs can be rented. Until enough independent miners join, the founder's node signs a checkpoint about every minute, and no node accepts a chain that leaves the latest one out, however much work it has. Even a majority of the mining power could rewrite only the last minute and a half.</p>
+          <p>The founder cannot move or create coins or make an invalid block valid. The checkpoint period ends after a year at the latest, or earlier when the founder ends it; from then on the chain with the most work decides alone.</p>
+        </div>
+        <div class="honest">
+          <h3 style="margin-top:0">Read this before you put money in</h3>
+          <p>Green is new, experimental software written in Python. It has been reviewed and tested by its authors (twenty-two security reviews and over three hundred tests, all in the repository), but not audited independently. Run it to learn and to mine; do not put in more than you can afford to lose.</p>
+          <p>Everything is open: the <a href="https://github.com/ErtungaYusuf/green/blob/main/SPEC.md">specification</a>, the <a href="https://github.com/ErtungaYusuf/green/blob/main/DESIGN.md">design</a>, the <a href="https://github.com/ErtungaYusuf/green/blob/main/SECURITY.md">security reviews</a> and what is <a href="https://github.com/ErtungaYusuf/green/blob/main/PRODUCTION.md">still missing</a>.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="cols">
+      <div>
+        <h3>Software</h3>
+        <ul>
+          <li><a href="https://github.com/ErtungaYusuf/green">green</a>: the node</li>
+          <li><a href="https://github.com/ErtungaYusuf/green-hub">green-hub</a>: wallet, compute, mining</li>
+          <li><a href="https://github.com/ErtungaYusuf/green-wallet">green-wallet</a> and <a href="https://github.com/ErtungaYusuf/green-miner">green-miner</a></li>
+        </ul>
+      </div>
+      <div>
+        <h3>Read</h3>
+        <ul>
+          <li><a href="https://github.com/ErtungaYusuf/green/blob/main/README.md">Overview</a></li>
+          <li><a href="https://github.com/ErtungaYusuf/green/blob/main/OPERATIONS.md">Running a node</a></li>
+          <li><a href="https://github.com/ErtungaYusuf/green/blob/main/API.md">HTTP API</a></li>
+        </ul>
+      </div>
+      <div>
+        <h3>Green</h3>
+        <p style="margin:0">Open source under the MIT license.</p>
+      </div>
+    </div>
+  </footer>
+</div>
+
+<script>
+"use strict";
+(() => {
+  const N = 8, still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const $ = (id) => document.getElementById(id);
+  const cells = (el) => { el.replaceChildren(...Array.from({ length: N * N }, () => document.createElement("span"))); return el.children; };
+  const ca = cells($("ma")), cb = cells($("mb")), cc = cells($("mc"));
+  const int8 = () => Math.floor(Math.random() * 17) - 8;              // small int8 values, readable at this size
+  let timer = null;
+
+  function product(A, B) {
+    const C = new Array(N * N).fill(0);
+    for (let i = 0; i < N; i++) for (let k = 0; k < N; k++) { const a = A[i * N + k]; for (let j = 0; j < N; j++) C[i * N + j] += a * B[k * N + j]; }
+    return C;
+  }
+  function freivalds(A, B, C) {                                        // A(Br) == Cr for a random 0/1 vector r
+    const r = Array.from({ length: N }, () => Math.random() < .5 ? 0 : 1);
+    const mv = (M, v) => Array.from({ length: N }, (_, i) => v.reduce((s, x, j) => s + M[i * N + j] * x, 0));
+    const left = mv(A, mv(B, r)), right = mv(C, r);
+    return left.every((x, i) => x === right[i]);
+  }
+  async function ticket(C) {
+    const bytes = new Int32Array(C).buffer;
+    if (!crypto.subtle) return null;
+    const d = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+    return Array.from(d, (b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  async function run() {
+    clearInterval(timer);
+    const A = Array.from({ length: N * N }, int8), B = Array.from({ length: N * N }, int8), C = product(A, B);
+    const paint = (cells, M) => M.forEach((v, i) => {         // a value as a tint: green positive, blue negative
+      cells[i].style.background = `color-mix(in srgb, var(${v >= 0 ? "--leaf" : "--signal"}) ${Math.round(Math.abs(v) / 8 * 85) + 6}%, transparent)`;
+      cells[i].title = v;
+    });
+    paint(ca, A); paint(cb, B);
+    Array.from(cc).forEach((s) => { s.textContent = ""; s.className = ""; });
+    ["r-check", "r-ticket", "r-win"].forEach((id) => $(id).innerHTML = "&nbsp;");
+    const finish = async () => {
+      const ok = freivalds(A, B, C);
+      $("r-check").innerHTML = ok ? `<b class="ok">Checked:</b> a random vector, two matrix–vector products, and the result is right.`
+                                  : `<b class="no">Check failed.</b>`;
+      const t = await ticket(C);
+      if (t) {
+        $("r-ticket").textContent = `ticket ${t.slice(0, 32)}…`;
+        const v = parseInt(t.slice(0, 2), 16);
+        $("r-win").innerHTML = v < 64 ? `<b class="ok">A share.</b> Its ticket is under the share target, so it is paid.`
+                                      : `Not a share this time: a miner tries again with a new product.`;
+      }
+    };
+    if (still) { C.forEach((v, i) => { cc[i].textContent = v; cc[i].className = "lit"; }); return finish(); }
+    let i = 0;
+    timer = setInterval(() => {
+      if (i > 0) cc[i - 1].classList.remove("now");
+      if (i === N * N) { clearInterval(timer); Array.from(cc).forEach((s) => s.classList.remove("row")); finish(); return; }
+      const row = Math.floor(i / N);
+      Array.from(cc).forEach((s, j) => s.classList.toggle("row", Math.floor(j / N) === row && j >= i));
+      cc[i].textContent = C[i]; cc[i].className = "lit now"; i++;
+    }, 28);
+  }
+  $("again").addEventListener("click", run);
+  run();
+
+  const g = $("ticks-green");
+  g.replaceChildren(...Array.from({ length: 129 }, (_, i) => { const t = document.createElement("i"); if (i === 128) t.className = "f"; return t; }));
+
+  document.querySelectorAll("[data-copy]").forEach((b) => b.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(b.previousElementSibling.textContent); b.textContent = "Copied"; }
+    catch (e) { b.textContent = "Select and copy"; }
+    setTimeout(() => b.textContent = "Copy", 1600);
+  }));
+})();
+</script>
+</body>
+</html>

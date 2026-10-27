@@ -37,7 +37,7 @@ def wallet_path(data: str) -> str:
     return os.path.join(data, "wallet.json")
 
 
-def ask_password(confirm: bool = False) -> str:
+def ask_password(confirm: bool = False, label: str = "Wallet password") -> str:
     """Wallet password from the terminal, or for automation from the file named by
     GREEN_WALLET_PASSWORD_FILE (preferred) or GREEN_WALLET_PASSWORD."""
     path = os.environ.get(PASSWORD_FILE_ENV)
@@ -53,7 +53,7 @@ def ask_password(confirm: bool = False) -> str:
     if not sys.stdin.isatty():
         raise CliError(f"wallet password required: run the command from a terminal "
                        f"or set the {PASSWORD_ENV} environment variable")
-    password = getpass.getpass("Wallet password: ")
+    password = getpass.getpass(f"{label}: ")
     if confirm:
         if len(password) < 8:
             raise CliError("the password must be at least 8 characters")
@@ -390,7 +390,7 @@ def cmd_checkpoint(args):
         if args.no_password:
             record["secret"] = key.secret_hex()
         else:
-            password = os.environ.get(CHECKPOINT_PASSWORD_ENV) or ask_password(confirm=True)
+            password = os.environ.get(CHECKPOINT_PASSWORD_ENV) or ask_password(confirm=True, label="Checkpoint key password")
             record["encrypted"] = encrypt_secret(key.secret_hex(), password)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(record, f, indent=1)
@@ -418,19 +418,31 @@ def cmd_checkpoint(args):
               if r.get("new") else "The checkpoint period had already ended.")
 
 
-def cmd_node(args):
+def node_genesis(args) -> dict:
+    """The genesis a node starts from: --genesis, the data folder's, or the main network's."""
     os.makedirs(args.data, exist_ok=True)
     local_genesis = os.path.join(args.data, "genesis.json")
     source = args.genesis or local_genesis
     if not os.path.exists(source):
-        raise CliError(f"no genesis file: {source}. For a new network: python -m green genesis --msg \"...\" "
-                       f"or pass --genesis <file> to join an existing one.")
+        from . import mainnet
+        genesis = mainnet.genesis()
+        if genesis is None or args.genesis:
+            raise CliError(f"no genesis file: {source}. For a new network: python -m green genesis --msg \"...\" "
+                           f"or pass --genesis <file> to join an existing one.")
+        with open(local_genesis, "w") as f:              # no genesis given: the Green main network
+            json.dump(genesis, f, indent=2)
+        source = local_genesis
+        print("Joining the Green main network")
     with open(source) as f:
         genesis = json.load(f)
     if source != local_genesis and not os.path.exists(local_genesis):
         with open(local_genesis, "w") as f:
             json.dump(genesis, f, indent=2)
+    return genesis
 
+
+def cmd_node(args):
+    genesis = node_genesis(args)
     key = require_wallet(args.data)
     checkpoint_key = load_checkpoint_key(args.data) if args.checkpoints else None
     logger = setup_logging(args.log_level, args.log_file)

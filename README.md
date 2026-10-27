@@ -17,6 +17,18 @@ Interfaces, each a page in your browser and each its own repository: [green-hub]
 
 Production status of every area, with evidence and blockers: [PRODUCTION.md](PRODUCTION.md). How rules change: [UPGRADES.md](UPGRADES.md). Design and known limitations: [DESIGN.md](DESIGN.md). Protocol specification: [SPEC.md](SPEC.md). HTTP API: [API.md](API.md). Security reviews and fixes: [SECURITY.md](SECURITY.md). Release notes: [CHANGELOG.md](CHANGELOG.md). Against Bitcoin and Solana: [COMPARISON.md](COMPARISON.md).
 
+## Join the Green network
+
+Website: **https://ertungayusuf.github.io/green/**. Python 3.11 or newer:
+
+```bash
+pip install "green-grn[gpu] @ https://github.com/ErtungaYusuf/green/archive/refs/heads/main.zip"
+grn --data green wallet new
+grn --data green node --mine --gpu --portmap
+```
+
+A node started without a genesis file joins the main network (its genesis block ships in `green/networks/mainnet.json`) and finds its peers through the seeds. While the network is young its founder's checkpoints protect it from a majority attack (SPEC.md §5.6). Green is experimental and not independently audited: do not put in more than you can afford to lose.
+
 ## Try it: a whole network on your computer
 
 Five people, each running their own node, on a network of their own: alice, bob and dave mine on the GPU (on the CPU without one, or with `--cpu`) and sell compute; carol, an AI researcher, and erin, a startup, keep asking the network for compute: next to each of their nodes a buyer process trains small models and buys products through payment channels, and posts matrix jobs to the on-chain market. `grn localnet status` shows what they have bought.

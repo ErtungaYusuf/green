@@ -28,7 +28,7 @@ grn = "green.cli:main"
 packages = ["green"]
 
 [tool.setuptools.package-data]
-green = ["bip39_english.txt", "app.html"]
+green = ["bip39_english.txt", "app.html", "networks/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

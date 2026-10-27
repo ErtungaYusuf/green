@@ -10,9 +10,9 @@ name: tests
 on:
   push:
     branches: [main]
-    paths-ignore: ["**.md", "LICENSE", "contrib/**"]
+    paths-ignore: ["**.md", "LICENSE", "contrib/**", "docs/**"]
   pull_request:
-    paths-ignore: ["**.md", "LICENSE", "contrib/**"]
+    paths-ignore: ["**.md", "LICENSE", "contrib/**", "docs/**"]
   schedule:
     - cron: "17 3 * * 1"        # Mondays 03:17 UTC, macOS included
   workflow_dispatch:
