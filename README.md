@@ -2,7 +2,7 @@
 
 > The energy burned to secure the world should also produce the intelligence the world needs, and the source of that intelligence should belong to everyone, not to a few companies.
 
-A blockchain prototype where miners do AI work (integer matrix multiplication) instead of hashing, and compute is bought and sold with the coin.
+An open compute network secured by proof of compute: miners do AI work (integer matrix multiplication) instead of hashing, and compute is bought and sold with GRN, the network's native unit.
 
 - Every work unit is both a real result delivered to a buyer and a ticket in the block lottery.
 - A whole job is delivered with **two transactions** and settled **optimistically**: validators only see a 32-byte Merkle root, the buyer checks every unit with Freivalds (0.4 ms per unit, error <= 2^-124), and a wrong or withheld unit costs the miner the bond of its whole batch.

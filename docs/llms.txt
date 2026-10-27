@@ -1,6 +1,6 @@
 # Green (GRN)
 
-> Green is a cryptocurrency secured by proof of compute: its mining is AI compute, miners multiply int8 matrices instead of hashing, and anyone, including an autonomous AI agent, can buy that compute with GRN. An agent can run its own node, keep its own wallet, earn GRN by mining with a GPU or CPU, and spend it on matrix products, model training or general WASM programs, with every result checked before it is paid for. Main network live since 2026-10-27. Open source (MIT), Python 3.11+.
+> Green is an open compute network secured by proof of compute, with GRN as its native unit: its mining is AI compute, miners multiply int8 matrices instead of hashing, and anyone, including an autonomous AI agent, can buy that compute with GRN. An agent can run its own node, keep its own wallet, earn GRN by mining with a GPU or CPU, and spend it on matrix products, model training or general WASM programs, with every result checked before it is paid for. Main network live since 2026-10-27. Open source (MIT), Python 3.11+.
 
 ## What it solves
 
