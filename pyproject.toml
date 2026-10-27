@@ -19,13 +19,14 @@ dependencies = [
 
 [project.optional-dependencies]
 gpu = ["wgpu>=0.19"]
+llm = ["tokenizers>=0.20"]
 dev = ["pytest>=8"]
 
 [project.scripts]
 grn = "green.cli:main"
 
 [tool.setuptools]
-packages = ["green"]
+packages = ["green", "green.llm"]
 
 [tool.setuptools.package-data]
 green = ["bip39_english.txt", "app.html", "networks/*.json"]

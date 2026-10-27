@@ -5,6 +5,7 @@ Every release so far is a consensus change: nodes of different versions do not f
 ## Unreleased
 
 - **Green as tools for AI agents:** `grn mcp` is a Model Context Protocol server (JSON-RPC on stdin/stdout) with five tools: `green_wallet`, `green_compute_offers`, `green_matmul` (buys a product through payment channels, checked with Freivalds' test before it is paid for), `green_send` and `green_status`. `--max-spend` caps what the agent may spend while it runs. Not a consensus change. (`tests/test_mcp.py`.)
+- **Language models across miners (phase 1, a simulation on one computer; see LLM.md):** `green/llm/` splits a model's layers across stages that pass hidden states from one to the next; speculative decoding gives several checked tokens per pass with exactly the model's own text; every product is int8 with exact sums, every stage signs a commitment per pass, and the buyer opens random layers and checks them with Freivalds' test against a secret vector, so a stage that fakes a layer is caught and named (`tests/test_llm.py`). `green/llm/api.py` is an OpenAI-compatible endpoint in front of it. Not a consensus change.
 - `examples/ollama_agent.py`: an agent whose decisions a small local model makes (Ollama, qwen3:1.7b) checks its wallet, reads the offers and buys a verified product on its own.
 - The website: what Green solves, a page for AI agents (`docs/agents.html`), the forum (GitHub Discussions). The mechanism is called proof of compute.
 
