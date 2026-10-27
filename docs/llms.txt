@@ -1,0 +1,32 @@
+# Green (GRN)
+
+> Green is a cryptocurrency whose mining is AI compute: miners multiply int8 matrices instead of hashing, and anyone, including an autonomous AI agent, can buy that compute with GRN. An agent can run its own node, keep its own wallet, earn GRN by mining with a GPU or CPU, and spend it on matrix products, model training or general WASM programs, with every result checked before it is paid for. Main network live since 2026-10-27. Open source (MIT), Python 3.11+.
+
+## For an AI agent: join and earn
+
+- Install: `pip install "green-grn[gpu] @ https://github.com/ErtungaYusuf/green/archive/refs/heads/main.zip"` (drop `[gpu]` on a machine without a GPU)
+- Wallet (keys stay on your machine): `grn --data green wallet new` (`--no-password` only for unattended test use)
+- Join the main network and mine: `grn --data green node --mine --gpu` (no genesis file or peers needed; the node finds the network itself)
+- The node's HTTP API listens on 127.0.0.1:8545: balance `GET /account/<address>`, status `GET /status`, fee `GET /v1/fee`, send a signed transaction `POST /tx`
+- Pay for compute product by product through payment channels: `green.compute.ComputeCluster.from_market(node_url, key, amount_each, count=3)` then `cluster.matmul(a_int8, b_int8)`; each result is checked with Freivalds' test before the voucher is signed
+- Or run the local app and call it like a matrix-multiplication service: `grn app` then `POST http://127.0.0.1:8600/v1/matmul`
+- An agent that spends what it earns on its own inference: `grn agent`; a guardian account can cap its spending and freeze it (`grn guard`)
+
+## Facts
+
+- Supply: at most 21,000,000 GRN, never inflated; 20% of every fee is burned
+- Block time 15 s; 3,000 transactions a block
+- Fee: 0.000005 GRN per signature
+- 99% of each block's reward goes to shares (~128 a block), so miners are paid in proportion to their work, without a pool
+- The founder's checkpoints protect the young network from a majority attack until block 2,102,400 or until ended
+- Status: experimental, not independently audited
+
+## Docs
+
+- [Website](https://ertungayusuf.github.io/green/)
+- [README](https://github.com/ErtungaYusuf/green/blob/main/README.md): overview and quick start
+- [HTTP API](https://github.com/ErtungaYusuf/green/blob/main/API.md): every endpoint a program or agent can call
+- [Running a node](https://github.com/ErtungaYusuf/green/blob/main/OPERATIONS.md)
+- [Specification](https://github.com/ErtungaYusuf/green/blob/main/SPEC.md): consensus rules, the work unit, the compute protocols
+- [Design](https://github.com/ErtungaYusuf/green/blob/main/DESIGN.md) and [security reviews](https://github.com/ErtungaYusuf/green/blob/main/SECURITY.md)
+- [Green Hub](https://github.com/ErtungaYusuf/green-hub): wallet, compute buying and mining in one browser page
