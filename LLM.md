@@ -96,17 +96,57 @@ The buyer needs the weights to check (it computes W^T r from them). A buyer that
 hold them hands the openings to an auditor: another miner holding the same layers,
 chosen at random and paid for it.
 
-## Phase 2: on the network
+## Phase 2: on the network, paid on chain (in progress)
 
-- Miners announce the models and layer ranges they serve, with a price and a region,
-  alongside today's compute offers; buyers build a route of nearby miners, with a spare
-  per stage.
-- Payment per pass through payment channels; a voucher for a pass is signed once its
-  audits are done.
-- A bond for serving models, and a transaction that takes it on a signed proof of
-  wrong work (a consensus change).
-- A small draft model on the buyer's side; sampling with temperature from a seed both
-  sides know, so sampled text is checkable too.
+Built on what Green already has: signed compute offers relayed by every node, payment
+channels, vouchers and the provider's claims.
+
+- **Serving layers.** `grn node --provide-port P --provide-url URL --llm-model DIR
+  --llm-layers 0-12 --llm-price N` runs a Stage inside the miner's node, next to its
+  Provider. The signed offer gains an optional `llm` field: `{url, model, layers, price}`,
+  where `model` is the SHA-256 of the weights file and `price` is yaprak per token per
+  layer. Nodes from this version relay offers with the field (not a consensus change;
+  the founder's seed is upgraded with it).
+- **Routes.** The buyer reads `/providers` from its own node, keeps the offers for its
+  model, measures each stage's round trip, and picks a chain of stages covering every
+  layer at the lowest price and latency, with a spare per range.
+- **No inbound connections at the buyer.** It sends a pass to the first stage and waits
+  on the last stage (`/llm/wait`, a long poll): one hop back, and it works behind NAT.
+- **Payment.** The buyer opens a channel to each stage's address (`channel_open`). Each
+  pass carries, per stage, the channel id, a voucher for everything delivered before
+  this pass, and the buyer's signature over the pass (so nobody can run up another
+  buyer's channel). A stage works only while the unvouched amount stays under a small
+  credit and the channel holds enough; the Provider's existing books claim the vouchers
+  on chain and close the channel when the buyer is done (`/close`). A buyer that catches
+  a stage stops paying it: its loss is at most one credit.
+- **Test:** separate node processes on a local network, each with its own wallet,
+  finding each other through offers, paid through channels, the claims checked in the
+  blocks.
+
+## Phase 3: bonds and penalties (a consensus change, planned)
+
+A stage that signs a commitment to wrong work hands the buyer proof of it. Phase 3 lets
+that proof cost the stage its bond.
+
+- **`llm_bond` transaction:** locks an amount (at least `LLM_MIN_BOND`, proposed 10 GRN)
+  for a model hash and layer range; unlocks only `LLM_UNBOND_BLOCKS` (proposed 40,320,
+  about a week) after an `llm_unbond`, so proof found later can still reach it. The
+  offer names the bond; buyers use bonded stages only.
+- **`llm_slash` transaction:** carries the evidence: the stage's signed commitment for a
+  pass, the opened Record, the cache rows it relied on with their own signed
+  commitments, and the challenger's vector r. Every node re-runs `Model.check` on that
+  one layer (it needs that layer's weights, about 15 MB for a 0.5B model; the model hash
+  in the bond pins which). The r is revealed only here, after the fact, so it is no
+  longer secret but the commitment was already signed.
+- **Who checks evidence:** nodes that hold the bonded model's layers; the rule is that a
+  block with an `llm_slash` is valid only if the check fails, and a node lacking the
+  weights fetches the layer by hash from the network before validating.
+- **Where the bond goes:** half to the challenger (it paid to audit), half burned, so a
+  stage cannot slash itself for profit through a second identity.
+- **Weakness covered:** the one-unit rounding slack is fixed in the rule, so honest
+  machines never get slashed for floating-point differences.
+- **Rollout:** a versionbits deployment, as with earlier rule changes, after tests that
+  replay honest and dishonest Records on Linux, Windows and macOS.
 
 ## Try it
 
