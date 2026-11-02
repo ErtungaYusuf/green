@@ -535,6 +535,7 @@ def test_a_stopping_node_finishes_the_message_in_hand_before_closing_its_databas
     peer.send("getheaders", {"locator": [a.chain.genesis_hash]})
     assert handling.wait(5)
     a.stop()
+    time.sleep(1.5)                                   # a worker left running would fail by now
     assert not [m for m in lines if "error handling" in m], lines
 
 

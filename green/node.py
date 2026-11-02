@@ -285,10 +285,8 @@ class Node:
         from . import gpu
         try:
             miner = gpu.GPUMiner()                   # this node's own (a shared one is not thread-safe)
-        except Exception:
-            miner = None
-        if miner is None:
-            self.log("[gpu] no suitable GPU/driver found; mining on the CPU")
+        except Exception as e:                       # say why: a driver or limit problem is fixable
+            self.log(f"[gpu] no suitable GPU/driver found ({type(e).__name__}: {e}); mining on the CPU")
             return None
         for s in (b"gpu-selftest-1", b"gpu-selftest-2"):
             a, b = work.filler_inputs(s)

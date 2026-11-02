@@ -109,7 +109,12 @@ class GPUMiner:
         import wgpu
 
         self.adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
-        self.device = self.adapter.request_device_sync()
+        # A 32x32 workgroup is 1024 threads, past WebGPU's default of 256: ask for it, so
+        # every wgpu version and vendor (AMD, NVIDIA, Intel) gets it or says why not.
+        self.device = self.adapter.request_device_sync(required_limits={
+            "max-compute-invocations-per-workgroup": BLK * BLK,
+            "max-compute-workgroup-size-x": BLK,
+            "max-compute-workgroup-size-y": BLK})
         self.name = self.adapter.info["device"]
         self._wgpu = wgpu
         self.batch = batch
