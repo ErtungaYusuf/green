@@ -613,4 +613,4 @@ def test_steady_target_matches_the_formula_and_clamps():
     assert steady_target(t, 10**7, H) == steady_target(t, M, H)          # a pause counts as MAX_SOLVETIME
     assert steady_target(t, -10**7, H) == steady_target(t, -M, H)        # and so does a clock run backwards
     assert steady_target(params.MAX_TARGET, M, H) == params.MAX_TARGET
-    assert params.STEADY_DIFFICULTY_HEIGHT is None                       # off until miners have upgraded
+    assert params.STEADY_DIFFICULTY_HEIGHT == 50_000                     # the main network's flag day (0.27.0)

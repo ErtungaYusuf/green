@@ -42,9 +42,9 @@ ASERT_HALFLIFE = 1800           # seconds (120 blocks)
 # since genesis (steady_target in chain.py): no block counts as more than
 # MAX_SOLVETIME late. Anchored at genesis, a 3.5-day pause on the main network left the
 # chain ~20,000 blocks behind its schedule, and those blocks then came almost free, a
-# second apart, until it caught up. None: not active (a rule change: miners must upgrade
-# before a height is set here for the main network).
-STEADY_DIFFICULTY_HEIGHT: int | None = None
+# second apart, until it caught up. A rule change (0.27.0): nodes older than 0.27.0
+# follow a different chain from this height on. None would turn it off.
+STEADY_DIFFICULTY_HEIGHT: int | None = 50_000
 MAX_SOLVETIME = 900             # seconds: a block at most this late eases the next by 2^(885/1800) ~ 1.41x
 MAX_TARGET = 2**256 - 1
 # Start easy; the retarget algorithm finds the real difficulty within a few

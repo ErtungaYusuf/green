@@ -2,6 +2,8 @@
 
 > The energy burned to secure the world should also produce the intelligence the world needs, and the source of that intelligence should belong to everyone, not to a few companies.
 
+**Miners and node operators: upgrade to 0.27.0 before block 50,000 (about 5 November 2026).** From that block the difficulty rule changes and older nodes split off ([why, and how to upgrade](CHANGELOG.md)).
+
 An open compute network secured by proof of compute: miners do AI work (integer matrix multiplication) instead of hashing, and compute is bought and sold with GRN, the network's native unit.
 
 - Every work unit is both a real result delivered to a buyer and a ticket in the block lottery.
