@@ -121,3 +121,26 @@ def test_a_stage_that_skips_a_layer_is_caught_and_named(model):
 def test_lookup_draft_copies_what_followed_the_same_tokens():
     assert lookup_draft([1, 2, 3, 9, 9, 1, 2, 3], 3) == [9, 9, 1]
     assert lookup_draft([1, 2, 3], 3) == [] and lookup_draft([4, 4, 4], 0) == []
+
+
+def test_a_stage_refuses_a_request_too_large_to_read():
+    """A stage's port is open to everyone: a huge Content-Length is refused unread."""
+    import http.client
+
+    from green.llm import pipeline
+
+    class Echo(pipeline._Server):
+        def on_echo(self, body):
+            return body
+    server = Echo()
+    url = server.serve()
+    try:
+        host, port = url.split("//")[1].split(":")
+        conn = http.client.HTTPConnection(host, int(port), timeout=5)
+        conn.putrequest("POST", "/echo")
+        conn.putheader("Content-Length", str(pipeline.MAX_BODY + 1))
+        conn.endheaders()
+        assert conn.getresponse().status == 413
+        assert pipeline.post(url + "/echo", {"x": 1}) == {"x": 1}
+    finally:
+        server.stop()

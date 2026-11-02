@@ -61,6 +61,7 @@ DEFAULT_PRICE = 10                                   # yaprak per token per laye
 CREDIT_TOKENS = 512                                  # tokens a stage serves ahead of payment
 RESULT_SECONDS = 300                                 # an uncollected result is dropped after this
 CHANNEL_WAIT = 30                                    # how long a stage waits for a new channel's block
+MAX_BODY = 64 << 20                                  # bytes of one request a stage reads (a long prompt's pass is a few MB)
 
 
 class PaymentRequired(Exception):
@@ -148,8 +149,13 @@ class _Server:
 
         class H(BaseHTTPRequestHandler):
             def do_POST(self):
+                raw = self.headers.get("Content-Length", "")
+                if not raw.isdigit() or int(raw) > MAX_BODY:     # a stage is open to everyone: no unbounded reads
+                    self.send_error(413, "too large")
+                    self.close_connection = True
+                    return
                 try:
-                    body = unpack(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+                    body = unpack(json.loads(self.rfile.read(int(raw))))
                     out = getattr(owner, "on_" + self.path.strip("/"))(body)
                     data, code = json.dumps(pack(out)).encode(), 200
                 except Exception as e:                       # noqa: BLE001  (reported to the caller)
