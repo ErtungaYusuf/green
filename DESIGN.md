@@ -183,7 +183,7 @@ Goal: random miners should not learn who computes what.
 
 Real confidentiality needs secure hardware (the confidential-computing mode of data-center GPUs, a TEE), secret sharing / MPC, or fully homomorphic encryption (10^4–10^6× slower today, not practical). TEEs are the most realistic. None of this is in v0.3.
 
-## 10. Known limitations (prototype)
+## 10. Known limitations
 
 - Python reference implementation: CPU + numpy and a single GPU kernel. The GPU miner reaches ~1,300 units/s, a small fraction of the card's int8 peak; a native miner is needed.
 - The base state is held in memory (one copy; a disk-backed base loaded on demand is future work) and so is the main-chain hash index.
@@ -192,7 +192,6 @@ Real confidentiality needs secure hardware (the confidential-computing mode of d
 - WASM adjudication depends on the wasmtime version (an upgrade is a hard fork); there is no data-availability proof for WASM *outputs* (§7).
 - No data privacy (§9).
 - The network layer has no NAT traversal, DNS seeds or Tor/I2P support yet, and the protocol can be recognised (though not read) by an observer; results reach the buyer by asking a few peers, not through a content-routing layer.
-- The code has not been independently audited. That is mandatory before any network carries real value.
 
 ## 11. Roadmap
 

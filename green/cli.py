@@ -483,7 +483,7 @@ def cmd_node(args):
 
     node = Node(args.data, genesis, port=args.port, host=args.host, peers=args.peer, miner_key=key, log=log,
                 debug=logger.debug if logger.isEnabledFor(logging.DEBUG) else None,
-                use_gpu=args.gpu, p2p_port=args.p2p_port, listen=not args.no_listen, fast_sync=args.fast_sync,
+                use_gpu=args.gpu, p2p_port=args.p2p_port, listen=not args.no_listen, fast_sync=not args.full_sync,
                 p2p_host=args.p2p_host, no_signal=args.no_signal, prune=args.prune, prune_keep=args.prune_keep,
                 dandelion=not args.no_dandelion, portmap=args.portmap, checkpoint_key=checkpoint_key,
                 max_inbound=args.max_inbound, upload_cap_gb=args.upload_cap_gb)
@@ -655,7 +655,7 @@ CONFIG_KEYS = {"port": int, "host": str, "p2p_port": int, "p2p_host": str, "peer
                "provide_port": int, "provide_host": str, "provide_url": str, "provide_price": int,
                "portmap": bool, "intensity": int, "checkpoints": bool, "max_inbound": int,
                "upload_cap_gb": (int, float), "llm_model": str, "llm_layers": str, "llm_port": int,
-               "llm_host": str, "llm_url": str, "llm_price": int, "no_sell": bool, "no_llm": bool}
+               "llm_host": str, "llm_url": str, "llm_price": int, "no_sell": bool, "no_llm": bool, "full_sync": bool}
 
 
 def load_config(data: str) -> dict:
@@ -1465,8 +1465,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-signal", action="append", default=[], metavar="DEPLOYMENT",
                    help="do not signal readiness for this rule change when mining (see: deployments)")
     s.add_argument("--fast-sync", action="store_true",
-                   help="new node: start from a ledger snapshot verified against the header chain, "
-                        "instead of replaying all of history")
+                   help="(the default) a new node starts from a ledger snapshot verified against the header "
+                        "chain, and validates every block after it")
+    s.add_argument("--full-sync", action="store_true",
+                   help="a new node replays all of history from the genesis block instead (slower: hours)")
     s.add_argument("--peer", action="append", default=[],
                    help="a node to stay connected to: host:port, or <node id>@host:port to also check its key")
     s.add_argument("--genesis", help="genesis.json of an existing network")

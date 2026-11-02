@@ -4,6 +4,7 @@ Releases up to 0.25.0 were consensus changes: nodes of different versions do not
 
 ## Unreleased
 
+- **New nodes start from a verified snapshot by default** (fast sync; `--full-sync` replays all of history): joining the main network takes minutes instead of hours (here: 2.5 minutes instead of about 2 hours at 36,000 blocks). The snapshot is checked against the state root in its block's header, every block after it is validated, and without a usable snapshot the node syncs from genesis.
 - **A miner sells compute by itself:** `grn node --mine` starts the compute seller on port 8548 (`--no-sell` turns it off), finds its public address from its peers (or the router, with `--portmap`), checks that the address answers as this seller, and only then advertises it; it checks again every 20 minutes and withdraws an offer nobody can reach. A model saved with `grn use --model` is served beside it (all layers by default, port 8549; `--no-llm` turns it off). `--llm-layers` defaults to all layers.
 - **A stopping node lets its message workers finish** before it closes its database: the seed logged `Cannot operate on a closed database` when restarted while answering a peer's `getheaders`.
 - **GPU mining asks for the 1024-thread workgroups it needs** instead of relying on the wgpu version's defaults, so AMD, NVIDIA and Intel GPUs get them or the node says why not; a GPU that cannot be used is now logged with the reason. The kernel was checked bit for bit against the CPU on Vulkan, D3D12, OpenGL and Microsoft's software renderer (WARP).

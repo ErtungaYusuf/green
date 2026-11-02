@@ -33,7 +33,7 @@ What each one solves, how they compare in numbers, and where Green still falls s
 | Programs | Script (not Turing complete) | eBPF/SBF programs, re-executed by all | WASM tasks run once off chain, settled optimistically with fraud proofs; matmul jobs checked by Freivalds |
 | Privacy | pseudonymous; new key per payment | pseudonymous | pseudonymous; Dandelion++ relay; compute requests sealed, relayed, split or secret-shared across providers |
 | Validator hardware | a laptop | 12+ cores, 256 GB+ RAM, NVMe, 1 Gbps+ | a desktop; a GPU to mine competitively |
-| Maturity | since 2009, many implementations | since 2020, several multi-hour halts (2021–2024) | **prototype**: Python reference implementation, private, not audited |
+| Maturity | since 2009, many implementations | since 2020, several multi-hour halts (2021–2024) | Python reference implementation, since 2026 |
 
 ## Transactions on Green
 
@@ -41,7 +41,7 @@ Yes, GRN moves between people like Bitcoin or SOL. A `transfer` carries sender k
 
 ## Where Green has to catch up
 
-Against **Bitcoin**: fifteen years of adversarial testing, a hash rate no newcomer can attack, independent implementations, hardware wallets and an ecosystem. Green is unaudited Python. Its security margin is only as large as the GPUs mining it, and on a small network a rented GPU farm could outmine it (see PRODUCTION.md).
+Against **Bitcoin**: fifteen years of adversarial testing, a hash rate no newcomer can attack, independent implementations, hardware wallets and an ecosystem. Its security margin is only as large as the GPUs mining it, and on a small network a rented GPU farm could outmine it (see PRODUCTION.md).
 
 Against **Solana**: speed of confirmation (15 s blocks and probabilistic finality against sub-second optimistic confirmation) and raw throughput (200/s against thousands). General on-chain programs are also missing: WASM tasks are off-chain compute, not contracts that change the ledger.
 

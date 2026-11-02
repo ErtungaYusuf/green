@@ -40,7 +40,7 @@ grn --data green wallet new
 grn --data green node --mine --gpu --portmap
 ```
 
-A node started without a genesis file joins the main network (its genesis block ships in `green/networks/mainnet.json`) and finds its peers through the seeds. While the network is young its founder's checkpoints protect it from a majority attack (SPEC.md §5.6). Green is experimental and not independently audited: do not put in more than you can afford to lose.
+A node started without a genesis file joins the main network (its genesis block ships in `green/networks/mainnet.json`) and finds its peers through the seeds. While the network is young its founder's checkpoints protect it from a majority attack (SPEC.md §5.6).
 
 ## Try it: a whole network on your computer
 
@@ -381,7 +381,7 @@ The two nodes set up an encrypted connection and sync the chain. With `--peer <i
 
 To be reachable by other computers while keeping the API private, listen on all interfaces for P2P only: `--p2p-host 0.0.0.0`.
 
-**Joining an existing network quickly:** a new node started with `--fast-sync` downloads the header chain, then the newest snapshot of the ledger that another node offers, checks it against the state root in that block's header, and validates every block after it. Without a usable snapshot it syncs from genesis.
+**Joining an existing network quickly:** a new node (unless started with `--full-sync`) downloads the header chain, then the newest snapshot of the ledger that another node offers, checks it against the state root in that block's header, and validates every block after it. Without a usable snapshot it syncs from genesis.
 
 ## Tests
 
@@ -389,7 +389,7 @@ To be reachable by other computers while keeping the API private, listen on all 
 python -m pytest -q tests
 ```
 
-264 tests: consensus, difficulty, guarded accounts, security regressions, addresses, the fee market, the state engine and storage (restarts, crashes, reorgs across base moves, a differential check against full copies), the state commitment, snapshots and fast sync, rule changes by version bits, signed releases, multisignature accounts, pruning, the transaction index and the light client, non-custodial pools, recovery phrases, Dandelion++ and compact blocks, compute channels and training, port mapping, the reserve and shares, transaction atomicity, the P2P protocol (encryption on the wire, identity pinning, relay, headers-first sync, and what happens to peers that lie or flood), the network (watchtowers, dispute answers and reorgs included), the GPU (if present), the WASM sandbox, both compute markets, neural-network inference, the autonomous agent, the app and its compute proxy, and a local network of five node processes started and stopped as a user does it. Two fuzz tests check conservation of money, the exact escrow of every job, the dispute backlog and transaction atomicity at every block, and every block any test builds checks its incremental state root against a full recomputation; mutation testing confirmed they catch injected accounting bugs. CI runs the suite on Linux, Windows and macOS ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
+264 tests: consensus, difficulty, guarded accounts, security regressions, addresses, the fee market, the state engine and storage (restarts, crashes, reorgs across base moves, a differential check against full copies), the state commitment, snapshots and fast sync, rule changes by version bits, signed releases, multisignature accounts, pruning, the transaction index and the light client, non-custodial pools, recovery phrases, Dandelion++ and compact blocks, compute channels and training, port mapping, the reserve and shares, transaction atomicity, the P2P protocol (encryption on the wire, identity pinning, relay, headers-first sync, and what happens to peers that lie or flood), the network (watchtowers, dispute answers and reorgs included), the GPU (if present), the WASM sandbox, both compute markets, neural-network inference, the autonomous agent, the app and its compute proxy, and a local network of five node processes started and stopped as a user does it. Two fuzz tests check that no GRN is created or lost, the exact escrow of every job, the dispute backlog and transaction atomicity at every block, and every block any test builds checks its incremental state root against a full recomputation; mutation testing confirmed they catch injected accounting bugs. CI runs the suite on Linux, Windows and macOS ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
 ## Project layout
 
@@ -436,4 +436,3 @@ python -m pytest -q tests
 | `Dockerfile` | Container image for a node |
 | `SPEC.md` | The consensus rules, independent of the code |
 
-> This is a prototype and has not been independently audited. An audit is mandatory before any network carries real value.

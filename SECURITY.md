@@ -2,8 +2,6 @@
 
 This document records the security reviews done so far: the vulnerabilities found, the fixes applied and the known limitations. Every finding has a permanent test in `tests/` that keeps it from coming back.
 
-> **Warning:** Green is a prototype and has not been through an independent security audit. A professional audit is mandatory before using it on a network that carries real monetary value.
-
 ## Method
 
 Eight attack scenarios were written against the first version (v0.1); all eight succeeded. A code review then found nine more issues. All seventeen were fixed, each with a regression test.

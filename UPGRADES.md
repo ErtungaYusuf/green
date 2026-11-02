@@ -1,6 +1,6 @@
 # How Green changes its rules
 
-Bitcoin's lesson is that the hard part of upgrading a cryptocurrency is not the code, it is changing the rules without splitting the network or letting a few people decide for everyone. This is the process Green follows once a public network exists. Before that, every release may still start a new network.
+The hard part of upgrading a shared network is not the code, it is changing the rules without splitting the network or letting a few people decide for everyone. This is the process Green follows once a public network exists. Before that, every release may still start a new network.
 
 ## Kinds of change
 

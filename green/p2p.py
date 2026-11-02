@@ -2452,12 +2452,13 @@ class P2P:
     def _maybe_fast_sync(self) -> None:
         if self.snap_state != "waiting" or not self._headers_settled():
             return
-        if len([p for p in self.all_peers() if p.alive]) < FAST_SYNC_PEERS                 and time.time() - self.started < FAST_SYNC_GRACE:
-            return                                   # a peer still connecting may be the one with a snapshot
         if self._height_of(self.best) < params.SNAPSHOT_INTERVAL + params.MAX_REORG_DEPTH:
             self.snap_state = "failed"               # too young a chain for any final snapshot
             self.log("[sync] no snapshot can exist yet; syncing from genesis")
+            self._schedule()
             return
+        if len([p for p in self.all_peers() if p.alive]) < FAST_SYNC_PEERS                 and time.time() - self.started < FAST_SYNC_GRACE:
+            return                                   # a peer still connecting may be the one with a snapshot
         self.snap_state = "running"
         threading.Thread(target=self._fast_sync, daemon=True, name="fast-sync").start()
 

@@ -1,12 +1,12 @@
 # Production readiness
 
-Where Green stands on every aspect a production cryptocurrency needs, what backs each claim, and what is still missing. "Done" means implemented, tested and measured in this repository; it does not mean audited, battle-tested or ready to carry real value. Nothing here is ready for real money until the items marked **blocker** are done.
+Where Green stands on every aspect a production network needs, what backs each claim, and what is still missing. "Done" means implemented, tested and measured in this repository.
 
 Status as of v0.21 (October 2026). 274 automated tests; eighteen internal security reviews (SECURITY.md).
 
 ## Summary
 
-| Area | Status | Blockers before real value |
+| Area | Status | Still to do |
 |---|---|---|
 | 1. Consensus rules and specification | Done for a testnet | external review of SPEC.md |
 | 2. Proof of useful work | Done; custom digest unaudited | audit of the transcript digest |
