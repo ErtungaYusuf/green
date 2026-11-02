@@ -22,6 +22,16 @@ secret vector for every product, the cheap steps done again). The stage cannot k
 which layer will be opened, so skipping or faking any layer is caught with a chance of
 one in its layer count on every pass, and a signed commitment to wrong work is proof
 of it. A caught stage is dropped and the text is made again on an honest one.
+
+The buyer needs no open port: it sends a pass to the first stage and waits on the last
+(/wait, a long poll), so the result comes back as the answer to its own request.
+
+On the network a stage runs inside a miner's node, next to its compute Provider, and is
+paid through a payment channel like any other compute: each pass carries, per stage, a
+voucher for everything delivered before it and the buyer's signature over the pass, and
+a stage works only while what it delivered unpaid stays under its credit. The node's
+signed offer names the model, the layers and the price, so buyers find stages through
+GET /providers (Pipeline.from_market).
 """
 
 import base64
@@ -38,6 +48,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
 
+from .. import tx as txmod
 from ..crypto import Key, canonical, verify
 from .model import Model
 
@@ -46,6 +57,23 @@ from .model import Model
 RECORD_KEYS = ("h_in", "pos", "x1q", "s1", "aq", "sa", "h_mid", "x2q", "s2", "mq", "sm", "h_out")
 ROW_KEYS = ("x1q", "s1", "yk", "yv")                 # a layer's cache rows (yk, yv opened, not committed)
 ROW_COMMIT = ("x1q", "s1")
+DEFAULT_PRICE = 10                                   # yaprak per token per layer
+CREDIT_TOKENS = 512                                  # tokens a stage serves ahead of payment
+RESULT_SECONDS = 300                                 # an uncollected result is dropped after this
+CHANNEL_WAIT = 30                                    # how long a stage waits for a new channel's block
+
+
+class PaymentRequired(Exception):
+    pass
+
+
+class StageRefused(Exception):
+    """A stage would not do a pass (unpaid, a channel it does not know, a pass done twice)."""
+
+
+def pass_bytes(chain_id: str, channel: str, session: str, no: int, tokens: int) -> bytes:
+    """What the buyer signs per pass and stage: only the channel's owner can run up its bill."""
+    return canonical(["grn-llm-pass", chain_id, channel, session, no, tokens])
 
 
 # --- wire format: JSON with arrays as base64 ---------------------------------------------
@@ -129,23 +157,23 @@ class _Server:
 
 
 class _Sender:
-    """Delivers messages after a simulated one-way network delay, without holding up
-    the work that comes next."""
+    """Hands results on without holding up the work that comes next, after a simulated
+    one-way network delay (`latency`; 0 on a real network)."""
 
     def __init__(self, latency: float):
         self.latency, self.q = latency, queue.Queue()
         threading.Thread(target=self._run, daemon=True).start()
 
-    def send(self, url: str, body: dict):
-        self.q.put((time.perf_counter() + self.latency, url, body))
+    def send(self, fn):
+        self.q.put((time.perf_counter() + self.latency, fn))
 
     def _run(self):
         while True:
-            at, url, body = self.q.get()
+            at, fn = self.q.get()
             if (wait := at - time.perf_counter()) > 0:
                 time.sleep(wait)
             try:
-                post(url, body)
+                fn()
             except OSError:
                 pass
 
@@ -153,13 +181,24 @@ class _Sender:
 # --- a miner's stage ----------------------------------------------------------------------
 
 class Stage(_Server):
-    """A miner serving layers [first, last) of a model. `cheat` is for tests and demos:
-    "skip" fakes the stage's last layer instead of computing it."""
+    """A miner serving layers [first, last) of a model. With a compute `provider` (the
+    miner's node selling through payment channels) every pass must be paid for; without
+    one it serves for free (a simulation). `cheat` is for tests and demos: "skip" fakes
+    the stage's last layer instead of computing it."""
 
-    def __init__(self, model: Model, layers: range, key: Key, latency: float = 0.0, cheat: str | None = None):
+    def __init__(self, model: Model, layers: range, key: Key, latency: float = 0.0, cheat: str | None = None,
+                 provider=None, price: int = DEFAULT_PRICE, credit_tokens: int = CREDIT_TOKENS):
+        if provider is not None and provider.address != key.address:
+            raise ValueError("a stage is paid to its own key: give it the provider's key")
         self.model, self.layers, self.key, self.cheat = model, layers, key, cheat
+        self.provider, self.price = provider, price
+        self.credit = price * credit_tokens * len(layers)
         self.sender = _Sender(latency)
         self.sessions: dict[str, list] = {}               # session -> its passes, in order
+        self.session_channel: dict[str, str] = {}         # session -> the channel paying for it
+        self.owed: dict[str, int] = {}                    # channel -> what its passes cost so far
+        self.results: dict = {}                           # (session, pass) -> (time, result), on the last stage
+        self.cond = threading.Condition()
         self.work = queue.Queue()
         self.lock = threading.Lock()
         self.passes = self.layer_runs = 0
@@ -168,6 +207,72 @@ class Stage(_Server):
     @property
     def info(self) -> dict:
         return {"url": self.url, "layers": [self.layers.start, self.layers.stop], "key": self.key.pub_hex}
+
+    def advertise(self, url: str, model_id: str) -> None:
+        """Put this stage in the miner's signed offer, so buyers find it (GET /providers)."""
+        self.provider.llm = {"url": url, "model": model_id, "layers": [self.layers.start, self.layers.stop],
+                             "price": self.price}
+        self.provider.announce()
+
+    def _charge(self, m: dict) -> None:
+        """Check the pass is paid for and book it: a voucher for what came before, the
+        channel owner's signature over this pass, and room in the channel and the credit."""
+        if self.provider is None:
+            return
+        p = (m.get("pay") or {}).get(self.key.address)
+        if not isinstance(p, dict):
+            raise PaymentRequired("this stage is paid: open a channel to it and send its voucher")
+        cid, n = p.get("channel"), len(m["pos"])
+        end = time.time() + CHANNEL_WAIT
+        while True:
+            try:
+                ch = self.provider._channel(cid)
+                break
+            except LookupError:
+                # The buyer saw the channel confirmed on its node; ours may be a block behind.
+                if time.time() > end:
+                    raise
+                time.sleep(0.2)
+        chain_id = self.provider.node.chain.chain_id
+        if not verify(ch["pub"], pass_bytes(chain_id, cid, m["session"], m["pass"], n), str(p.get("auth")),
+                      cache=False):
+            raise PaymentRequired("the pass is not signed by the channel's owner")
+        with self.lock:
+            if self.session_channel.setdefault(m["session"], cid) != cid:
+                raise PaymentRequired("this session is paid through another channel")
+        vouched = self.provider.take_voucher(cid, ch, p.get("total"), p.get("voucher"))
+        cost = self.price * n * len(self.layers)
+        with self.lock:
+            owed = self.owed.get(cid, 0)
+            if owed - vouched > self.credit:
+                raise PaymentRequired(f"pay for the passes delivered first (owed {owed}, vouched {vouched})")
+            if owed + cost > ch["amount"]:
+                raise PaymentRequired("the channel has too little left for this pass: open another")
+            self.owed[cid] = owed + cost
+
+    def on_wait(self, m: dict) -> dict:
+        """The buyer's long poll on the last stage: the pass's result once it is here."""
+        key = (m["session"], m["pass"])
+        with self.cond:
+            if not self.cond.wait_for(lambda: key in self.results, timeout=min(float(m.get("timeout", 60)), 120)):
+                return {"pending": True}
+            return self.results.pop(key)[1]
+
+    def _deliver(self, session: str, no: int, result: dict) -> None:
+        with self.cond:
+            now = time.time()
+            for k in [k for k, (t, _) in self.results.items() if now - t > RESULT_SECONDS]:
+                del self.results[k]
+            self.results[(session, no)] = (now, result)
+            self.cond.notify_all()
+
+    def _pass_on(self, m: dict, h, commits: list) -> None:
+        if m["route"]:
+            body = {**m, "h": h, "route": m["route"][1:], "commits": commits}
+            self.sender.send(lambda: post(m["route"][0] + "/forward", body))
+        else:
+            result = {"h": h, "commits": commits, "error": m.get("error")}
+            self.sender.send(lambda: self._deliver(m["session"], m["pass"], result))
 
     def on_forward(self, m: dict) -> dict:
         self.work.put(m)                                  # one queue: the stage works pass by pass
@@ -195,6 +300,17 @@ class Stage(_Server):
                 print(f"stage {self.layers}: {type(e).__name__}: {e}")
 
     def _do(self, m: dict):
+        if m.get("error") is None:
+            try:
+                with self.lock:
+                    done = self.sessions.get(m["session"]) or []
+                    if done and done[-1]["no"] >= m["pass"]:
+                        raise StageRefused("that pass was done already")
+                self._charge(m)
+            except Exception as e:                        # noqa: BLE001  (any refusal goes back to the buyer)
+                m = {**m, "error": f"the stage for layers {[self.layers.start, self.layers.stop]}: {e}"}
+        if m.get("error") is not None:                    # passed on to the buyer, through the last stage
+            return self._pass_on(m, m["h"], m["commits"])
         with self.lock:
             passes = self.sessions.setdefault(m["session"], [])
             if passes and passes[-1]["keep"] is None:     # the buyer says how much of the last pass it kept
@@ -218,20 +334,17 @@ class Stage(_Server):
         c = {"session": m["session"], "pass": m["pass"], "key": self.key.pub_hex,
              "layers": [self.layers.start, self.layers.stop], "bounds": bounds, "leaves": leaves, "kv": kv}
         c["sig"] = self.key.sign(canonical(c))
-        commits = m["commits"] + [c]
-        if m["route"]:
-            self.sender.send(m["route"][0] + "/forward", {**m, "h": h, "route": m["route"][1:], "commits": commits})
-        else:
-            self.sender.send(m["reply"] + "/result", {"session": m["session"], "pass": m["pass"], "h": h,
-                                                      "commits": commits})
+        self._pass_on(m, h, m["commits"] + [c])
 
     def on_open(self, m: dict) -> dict:
         """Open layer i of a pass: its Record (made again from the stored input: the work
         is deterministic) and every earlier pass's cache rows for that layer, whole."""
         i, no = m["layer"], m["pass"]
         with self.lock:
-            passes = list(self.sessions[m["session"]])
-        idx = next(n for n, p in enumerate(passes) if p["no"] == no)
+            passes = list(self.sessions.get(m["session"], []))
+        idx = next((n for n, p in enumerate(passes) if p["no"] == no), None)
+        if idx is None or i not in self.layers:
+            raise LookupError("no such pass or layer here")
         p = passes[idx]
         # the cache as it stood for that pass: the earlier passes, cut as they were then
         past = self._past(passes[:idx], i)
@@ -247,35 +360,98 @@ class CheatingStage(Exception):
         self.stage, self.why = stage, why
 
 
-class Pipeline(_Server):
-    """The buyer's side: embedding and head here, the layers on the stages, and audits."""
+class Pipeline:
+    """The buyer's side: embedding and head here, the layers on the stages, and audits.
+    With `key`, the stages are paid: each stage dict then carries its "provider" address,
+    its "price" and an open "channel" (a compute.ComputeChannel); see from_market."""
 
     def __init__(self, model: Model, stages: list[dict], latency: float = 0.0, audit: float = 1.0, opens: int = 2,
-                 seed=None, audit_later: bool = False):
+                 seed=None, audit_later: bool = False, key: Key | None = None):
         """Each pass, with chance `audit`, open `opens` random layers of every stage: a stage
         faking one of n layers then escapes a pass with chance 1 - opens/n, and n passes
         in a row with chance (1 - opens/n)^n. audit_later: hold the audits until
         finish_audits (a simulation on one computer, where the buyer's audits would
         otherwise take the CPU from the miners)."""
         self.model, self.stages, self.latency, self.audit, self.opens = model, stages, latency, audit, opens
+        self.key = key
+        for st in stages:
+            st.setdefault("owed", 0)                      # what its delivered passes cost
+            st.setdefault("vouched", 0)                   # what our last voucher to it says
         self.later = threading.Event() if audit_later else None
         self.rng = random.Random(seed)
         # the secret vector of Freivalds' test: never leaves the buyer
         self.r = np.frombuffer(secrets.token_bytes(4 * 8192), dtype="<u4").astype(np.int64) & ((1 << 18) - 1)
         self.sketches = {i: model.sketches(i, self.r) for i in model.layers}
-        self.results: dict = {}
-        self.cond = threading.Condition()
         self.audits = queue.Queue()
         self.audit_log: list = []
         self.caught: CheatingStage | None = None
-        self.serve()
         threading.Thread(target=self._auditor, daemon=True).start()
 
-    def on_result(self, m: dict) -> dict:
-        with self.cond:
-            self.results[(m["session"], m["pass"])] = m
-            self.cond.notify_all()
-        return {}
+    @classmethod
+    def from_market(cls, node_url: str, key: Key, model: Model, model_id: str, amount_each: int,
+                    max_price: int | None = None, wait: float = 180, **kw) -> "Pipeline":
+        """Find stages for `model_id` among the network's offers (GET /providers on our
+        node), pick the cheapest chain of them covering every layer, open a payment
+        channel of `amount_each` to each, and wait until the channels are confirmed."""
+        from ..compute import ComputeChannel
+        from ..node import http_get
+        node_url = node_url.rstrip("/")
+        offers = [o for o in http_get(f"{node_url}/providers", timeout=30)
+                  if isinstance(o.get("llm"), dict) and o["llm"].get("model") == model_id
+                  and (max_price is None or o["llm"]["price"] <= max_price)]
+        route = cheapest_route(offers, model.n_layers)
+        if route is None:
+            raise StageRefused(f"no chain of stages on offer covers all {model.n_layers} layers of this model")
+        stages = []
+        for o in route:
+            ch = ComputeChannel(o["url"], key, node_url, offer=dict(o))
+            ch.open(amount_each, wait=0)
+            stages.append({"url": o["llm"]["url"], "layers": list(o["llm"]["layers"]), "key": o["pub"],
+                           "provider": o["provider"], "price": o["llm"]["price"], "channel": ch})
+        end = time.time() + wait
+        for st in stages:                                 # opened together, confirmed together
+            while True:
+                try:
+                    http_get(f"{node_url}/channel/{st['channel'].cid}", timeout=30)
+                    break
+                except OSError:
+                    if time.time() > end:
+                        raise
+                    time.sleep(0.5)
+        return cls(model, stages, key=key, **kw)
+
+    def _payments(self, sess: dict, no: int, tokens: int) -> dict:
+        pay = {}
+        for st in self.stages:
+            ch = st.get("channel")
+            if ch is None:
+                continue
+            total = st["owed"]
+            pay[st["provider"]] = {
+                "channel": ch.cid, "total": total or None,
+                "voucher": txmod.sign_voucher(self.key, ch.chain_id, ch.cid, total) if total else None,
+                "auth": self.key.sign(pass_bytes(ch.chain_id, ch.cid, sess["id"], no, tokens))}
+            st["vouched"] = total
+        return pay
+
+    def close(self) -> dict:
+        """Settle with every paid stage: a final voucher for what it delivered, and the
+        channel closed so the rest comes back now. A caught stage gets nothing more than
+        it was already vouched. Returns provider -> what it was paid."""
+        paid = {}
+        for st in self.stages:
+            ch = st.get("channel")
+            if ch is None:
+                continue
+            cheat = self.caught is not None and self.caught.stage is st
+            with ch.lock:
+                ch.owed = st["vouched"] if cheat else st["owed"]
+            ch.close()
+            paid[st["provider"]] = ch.owed
+        return paid
+
+    def stop(self):
+        self.audits.put(None)
 
     def _check_links(self, h_sent: np.ndarray, m: dict) -> list:
         commits = m["commits"]
@@ -339,6 +515,8 @@ class Pipeline(_Server):
         self.audit_log.append(("ok", s, i, no))
 
     def _pass(self, sess: dict, ids: list, cache_len: int) -> np.ndarray:
+        if self.caught:
+            raise self.caught
         no = len(sess["pos"])
         pos = np.arange(cache_len, cache_len + len(ids), dtype=np.int64)
         h = self.model.embed_tokens(ids)
@@ -347,14 +525,22 @@ class Pipeline(_Server):
             sess["keep"][no - 1] = cache_len - int(sess["pos"][no - 1][0])
         sess["keep"].append(None)
         msg = {"session": sess["id"], "pass": no, "cache_len": cache_len, "pos": pos, "h": h,
-               "route": [st["url"] for st in self.stages[1:]], "reply": self.url, "commits": []}
+               "route": [st["url"] for st in self.stages[1:]], "commits": [],
+               "pay": self._payments(sess, no, len(ids)) if self.key else None}
         time.sleep(self.latency)                          # the first hop
         post(self.stages[0]["url"] + "/forward", msg)
-        with self.cond:
-            if not self.cond.wait_for(lambda: (sess["id"], no) in self.results, timeout=120):
+        end = time.time() + 300
+        while True:                                       # the result comes back as the answer to a long poll
+            m = post(self.stages[-1]["url"] + "/wait", {"session": sess["id"], "pass": no, "timeout": 60}, timeout=90)
+            if not m.get("pending"):
+                break
+            if time.time() > end:
                 raise TimeoutError("the pipeline did not answer")
-            m = self.results.pop((sess["id"], no))
+        if m.get("error"):
+            raise StageRefused(m["error"])
         sess["commits"].append(self._check_links(h, m))
+        for st in self.stages:                            # delivered and linked: owed, vouched next pass
+            st["owed"] += st.get("price", 0) * len(ids) * (st["layers"][1] - st["layers"][0])
         for s, st in enumerate(self.stages):              # audits, off the critical path
             if self.rng.random() < self.audit:
                 layers = range(*st["layers"])
@@ -411,6 +597,21 @@ def lookup_draft(ids: list, k: int, ngram: int = 3) -> list:
                 if follow:
                     return follow
     return []
+
+
+def cheapest_route(offers: list[dict], n_layers: int) -> list[dict] | None:
+    """The offers whose layer ranges chain from 0 to n_layers at the lowest price per
+    token, fewer stages breaking ties (fewer hops). None if no chain covers the model."""
+    best: dict[int, tuple] = {n_layers: (0, 0, [])}       # layer -> (price, hops, offers from there on)
+    for start in range(n_layers - 1, -1, -1):
+        for o in offers:
+            a, b = o["llm"]["layers"]
+            if a == start and b in best:
+                price, hops, rest = best[b]
+                cand = (price + o["llm"]["price"] * (b - a), hops + 1, [o] + rest)
+                if start not in best or cand[:2] < best[start][:2]:
+                    best[start] = cand
+    return best[0][2] if 0 in best else None
 
 
 def local_stages(model: Model, splits: list[range], latency: float = 0.0, cheat: dict | None = None) -> list[Stage]:

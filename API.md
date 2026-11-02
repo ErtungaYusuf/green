@@ -29,7 +29,7 @@ This is the reference node's interface for wallets, tools and agents, not consen
 
 | Method and path | Returns |
 |---|---|
-| `GET /providers` | compute on offer (SPEC.md §12): signed offers `{"provider", "pub", "url", "price", "max_dim", "credit", "time", "sig"}` this node has heard over the network, cheapest first |
+| `GET /providers` | compute on offer (SPEC.md §12): signed offers `{"provider", "pub", "url", "price", "max_dim", "credit", "time", "sig"}` this node has heard over the network, cheapest first; an offer may also carry `"kx"` (sealed requests) and `"llm": {"url", "model", "layers", "price"}`, the layers of a language model the provider serves (LLM.md) |
 | `GET /channel/<id>` | an open compute channel: `buyer`, `pub`, `provider`, `amount`, `paid`, `left`, `expires`, `height`; 404 before it is confirmed and after it ends |
 | `GET /account/<address>` | `balance`, `nonce` (confirmed), `pending_balance`, `pending_nonce` (including the mempool and this node's own transactions still on their stem; use `pending_nonce` for the next transaction), `guard` (null, or `guardian`, `limit`, `period`, `frozen`, `window`, `spent`, `spend_left`) |
 | `GET /mempool` | the pending transactions |

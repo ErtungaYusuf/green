@@ -174,6 +174,7 @@ class Provider:
         self.host, self.port = host, port
         self.price, self.max_dim, self.credit = price, max_dim, credit
         self.url = url                    # how buyers reach us; advertised over the network when set
+        self.llm = None                   # language-model layers served beside us (green/llm), advertised too
         self.announced = 0.0
         self.listed = False               # the network took our offer (we hold OFFER_MIN_BALANCE)
         self.path = os.path.join(node.data_dir, "provider.json")
@@ -232,6 +233,8 @@ class Provider:
         offer = {"provider": self.address, "pub": self.key.pub_hex, "url": self.url, "price": self.price,
                  "max_dim": self.max_dim, "credit": self.credit, "time": int(time.time()),
                  "kx": sealed.public_hex(self.kx)}
+        if self.llm:
+            offer["llm"] = self.llm
         from .p2p import offer_bytes
         offer["sig"] = self.key.sign(offer_bytes(self.node.chain.chain_id, offer))
         return offer

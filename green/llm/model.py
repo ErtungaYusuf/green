@@ -56,6 +56,17 @@ def read_safetensors(path: str) -> dict:
     return out
 
 
+def model_id(path: str) -> str:
+    """A model's name on the network: the SHA-256 of its weights file. Stages and buyers
+    agree on exactly which weights by it."""
+    import hashlib
+    m = hashlib.sha256()
+    with open(os.path.join(path, "model.safetensors"), "rb") as f:
+        while chunk := f.read(1 << 22):
+            m.update(chunk)
+    return m.hexdigest()
+
+
 class QLinear:
     """y = x @ W^T (+ bias) with W as int8 per output channel."""
 

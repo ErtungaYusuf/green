@@ -16,7 +16,7 @@ CFG = {"hidden_size": 256, "num_hidden_layers": 4, "num_attention_heads": 4, "nu
 
 
 @pytest.fixture(scope="module")
-def model(tmp_path_factory):
+def tiny_dir(tmp_path_factory):
     d = tmp_path_factory.mktemp("tiny")
     rng = np.random.default_rng(3)
     hs, inter, kv = CFG["hidden_size"], CFG["intermediate_size"], CFG["num_key_value_heads"] * 64
@@ -42,7 +42,12 @@ def model(tmp_path_factory):
     h = json.dumps(header).encode()
     (d / "model.safetensors").write_bytes(struct.pack("<Q", len(h)) + h + b"".join(blobs))
     (d / "config.json").write_text(json.dumps(CFG))
-    return Model(str(d))
+    return str(d)
+
+
+@pytest.fixture(scope="module")
+def model(tiny_dir):
+    return Model(tiny_dir)
 
 
 def run_layer(model, i, n_tokens=5, past_tokens=7, seed=0):

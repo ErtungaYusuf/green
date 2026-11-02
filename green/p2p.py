@@ -113,6 +113,7 @@ KNOWN_INV = 20_000             # hashes remembered per peer as "they have it"
 TRICKLE_MEAN_SECONDS = 0.5     # mean delay before a transaction announcement
 TX_REQUEST_SECONDS = 10        # wait this long for a requested transaction, then ask someone else
 BLOCK_REQUEST_SECONDS = 15
+STALL_LIMIT = 3                 # block requests in a row a peer lets time out before we drop it (not a ban)
 HEADERS_REQUEST_SECONDS = 30
 BLOCK_WINDOW = 256             # blocks ahead of the tip that may be in flight or waiting
 BLOCKS_PER_PEER = 16
@@ -505,22 +506,48 @@ def offer_bytes(chain_id: str, offer: dict) -> bytes:
 
 OFFER_FIELDS = {"provider", "pub", "url", "price", "max_dim", "credit", "time", "sig"}
 # "kx": the provider's X25519 key for sealed requests (green/sealed.py), since v0.21
+# "llm": layers of a language model it serves (green/llm/pipeline.py), since v0.26:
+#        {"url", "model": SHA-256 of the weights file, "layers": [first, last), "price": yaprak per token per layer}
+OFFER_OPTIONAL = {"kx", "llm"}
+LLM_FIELDS = {"url", "model", "layers", "price"}
 
 
-def offer_problem(chain_id: str, offer, now: float) -> str | None:
-    """Why `offer` is not a valid signed offer (None if it is). Balance is checked separately."""
-    if not isinstance(offer, dict) or set(offer) not in (OFFER_FIELDS, OFFER_FIELDS | {"kx"}):
-        return "bad fields"
-    if "kx" in offer and not is_hex(offer["kx"], 64):
-        return "bad key"
-    url = offer["url"]
-    hostport = parse_address(url.split("://", 1)[1].split("/")[0]) if isinstance(url, str) and "://" in url else None
+def _url_problem(url) -> str | None:
+    if not isinstance(url, str) or "://" not in url:
+        return "bad url"
+    hostport = parse_address(url.split("://", 1)[1].split("/")[0])
     if not (len(url) <= 200 and url.split("://")[0] in ("http", "https") and hostport is not None):
         return "bad url"
     try:
         ipaddress.ip_address(hostport[0])     # an IP, not a name: a name could resolve into the buyer's network
     except ValueError:
         return "bad url"
+    return None
+
+
+def _llm_problem(llm) -> str | None:
+    if not isinstance(llm, dict) or set(llm) != LLM_FIELDS:
+        return "bad llm fields"
+    if _url_problem(llm["url"]):
+        return "bad llm url"
+    layers = llm["layers"]
+    if not (is_hex(llm["model"], 64) and isinstance(layers, list) and len(layers) == 2
+            and all(txmod.is_uint(x) for x in layers) and layers[0] < layers[1] <= 4096
+            and txmod.is_uint(llm["price"]) and llm["price"] >= 1):
+        return "bad llm terms"
+    return None
+
+
+def offer_problem(chain_id: str, offer, now: float) -> str | None:
+    """Why `offer` is not a valid signed offer (None if it is). Balance is checked separately."""
+    if not isinstance(offer, dict) or not OFFER_FIELDS <= set(offer) <= OFFER_FIELDS | OFFER_OPTIONAL:
+        return "bad fields"
+    if "kx" in offer and not is_hex(offer["kx"], 64):
+        return "bad key"
+    if "llm" in offer and (err := _llm_problem(offer["llm"])):
+        return err
+    if err := _url_problem(offer["url"]):
+        return err
     if not (txmod.is_uint(offer["price"]) and offer["price"] >= 1 and txmod.is_uint(offer["max_dim"])
             and 1 <= offer["max_dim"] <= 4096 and txmod.is_uint(offer["credit"]) and 1 <= offer["credit"] <= 1000
             and txmod.is_uint(offer["time"])):
@@ -567,9 +594,11 @@ class Peer:
         self.next_trickle = 0.0
         self.inflight_blocks: dict[str, float] = {}
         self.blob_waits: dict[str, dict] = {}        # blob hash -> {"max", "event", "data"}
+        self.blob_late: deque = deque(maxlen=16)     # blobs we asked for and stopped waiting for
         self.headers_asked = 0.0                     # when we last sent getheaders, 0 if none open
         self.unconnecting = 0
         self.score = 0
+        self.stalls = 0                              # block requests in a row it let time out
         self.lock = threading.Lock()
         self.out_q: queue.Queue = queue.Queue()
         self.out_bytes = 0
@@ -1747,6 +1776,8 @@ class P2P:
             if asked:
                 with peer.lock:
                     peer.blob_waits.pop(blob_hash, None)
+                    if wait["data"] is None:
+                        peer.blob_late.append(blob_hash)
             data = wait["data"]
             if data is not None and hhex(data) == blob_hash:
                 return data
@@ -1772,6 +1803,8 @@ class P2P:
         with peer.lock:
             wait = peer.blob_waits.get(h)
         if wait is None:
+            if h in peer.blob_late:
+                return                               # asked for, and late: a slow peer, not an attack
             raise Misbehaving(BAN_SCORE, "sent data nobody asked for")
         wait["data"] = data
         wait["event"].set()
@@ -2117,6 +2150,7 @@ class P2P:
         with self.node.lock:
             if self.requested.get(bh, (None,))[0] is peer:
                 del self.requested[bh]
+                peer.stalls = 0
             peer.inflight_blocks.pop(bh, None)
             if self.chain.has_block(bh):
                 return
@@ -2551,8 +2585,13 @@ class P2P:
             p.send("getdata", {"items": [["block", bh]]})
         for p, tids in retry_tx.values():
             p.send("getdata", {"items": [["tx", t] for t in tids]})
-        for p in stalled:                            # the blocks go to other peers; repeat stalling is a ban
-            self.punish(p, 10, "did not deliver requested blocks")
+        for p in stalled:
+            # The blocks go to other peers. A slow peer is not a hostile one (a busy node,
+            # a slow link): a new node syncing from busy peers must not ban them all and
+            # cut itself off. One that keeps stalling is dropped; it may come back.
+            p.stalls += 1
+            if p.stalls >= STALL_LIMIT:
+                p.close("stalled: did not deliver requested blocks")
         if behind:
             self._ask_headers(max(behind, key=lambda p: p.best_work))
         self._schedule()

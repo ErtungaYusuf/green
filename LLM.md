@@ -2,9 +2,10 @@
 
 A language model on Green runs on many miners at once: each holds a few of its layers,
 and a buyer's text flows through them. The buyer checks their work, so a miner that
-skips or fakes any part of it is caught and named. This is phase 1: it runs on one
-computer as a simulation of the network (`green/llm/`, `examples/distributed_llm.py`,
-`tests/test_llm.py`); payment and penalties on chain come in phase 2.
+skips or fakes any part of it is caught and named. Miners serve layers from their nodes,
+buyers find them through the network's signed offers and pay them through payment
+channels (`green/llm/`, `tests/test_llm.py`, `tests/test_llm_network.py`); penalties on
+chain come in phase 3.
 
 ## Splitting a model
 
@@ -96,7 +97,7 @@ The buyer needs the weights to check (it computes W^T r from them). A buyer that
 hold them hands the openings to an auditor: another miner holding the same layers,
 chosen at random and paid for it.
 
-## Phase 2: on the network, paid on chain (in progress)
+## Phase 2: on the network, paid on chain
 
 Built on what Green already has: signed compute offers relayed by every node, payment
 channels, vouchers and the provider's claims.
@@ -107,11 +108,12 @@ channels, vouchers and the provider's claims.
   where `model` is the SHA-256 of the weights file and `price` is yaprak per token per
   layer. Nodes from this version relay offers with the field (not a consensus change;
   the founder's seed is upgraded with it).
-- **Routes.** The buyer reads `/providers` from its own node, keeps the offers for its
-  model, measures each stage's round trip, and picks a chain of stages covering every
-  layer at the lowest price and latency, with a spare per range.
+- **Routes.** `Pipeline.from_market` reads `/providers` from the buyer's own node, keeps
+  the offers for its model and picks the chain of stages covering every layer at the
+  lowest price per token, fewer stages breaking ties. Choosing by measured latency and
+  keeping a spare per range are next.
 - **No inbound connections at the buyer.** It sends a pass to the first stage and waits
-  on the last stage (`/llm/wait`, a long poll): one hop back, and it works behind NAT.
+  on the last stage (`/wait`, a long poll): one hop back, and it works behind NAT.
 - **Payment.** The buyer opens a channel to each stage's address (`channel_open`). Each
   pass carries, per stage, the channel id, a voucher for everything delivered before
   this pass, and the buyer's signature over the pass (so nobody can run up another
@@ -119,9 +121,16 @@ channels, vouchers and the provider's claims.
   credit and the channel holds enough; the Provider's existing books claim the vouchers
   on chain and close the channel when the buyer is done (`/close`). A buyer that catches
   a stage stops paying it: its loss is at most one credit.
-- **Test:** separate node processes on a local network, each with its own wallet,
-  finding each other through offers, paid through channels, the claims checked in the
-  blocks.
+- **Tested** in `tests/test_llm_network.py` (nodes in one process) and for real: two
+  `grn node` processes on a local network, each with its own wallet, each serving 12 of
+  Qwen2.5-0.5B-Instruct's 24 layers. A buyer behind its own node found both through the
+  relayed offers, opened a channel to each, had a 38-token answer made in 23 passes
+  (92 layers audited, all honest), and closed: each stage received 0.0001776 GRN for
+  its share and claimed it in the next block (0.00001 GRN of that was the claim's fee).
+- **Joining a busy network.** A node that let block requests time out used to collect
+  penalty points until it was banned for a day; a new node syncing from busy peers
+  banned them all and cut itself off. Now a stall frees the blocks for other peers, and
+  a peer that stalls three times in a row is disconnected, not banned.
 
 ## Phase 3: bonds and penalties (a consensus change, planned)
 
@@ -150,11 +159,23 @@ that proof cost the stage its bond.
 
 ## Try it
 
+On one computer (a simulation of four miners):
+
 ```
 pip install tokenizers
 python examples/distributed_llm.py --model <folder with Qwen2.5-0.5B-Instruct>
 python examples/distributed_llm.py --model <folder> --serve 8700   # an OpenAI-compatible API
 ```
+
+As a miner, serving layers 0-12 beside the node's compute sales:
+
+```
+grn --data green node --mine --provide-port 8548 --provide-host 0.0.0.0 --provide-url http://<your IP>:8548 \
+    --llm-model <folder> --llm-layers 0-12 --llm-port 8549 --llm-host 0.0.0.0
+```
+
+As a buyer, in Python: `Pipeline.from_market(node_url, key, Model(folder), model_id(folder), amount_each)`,
+then `generate(...)`, then `close()`.
 
 The model folder needs `config.json`, `tokenizer.json` and `model.safetensors` from
 https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct (about 1 GB).

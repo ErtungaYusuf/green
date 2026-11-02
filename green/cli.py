@@ -497,6 +497,7 @@ def cmd_node(args):
         log(f"Selling matrix products on {args.provide_host}:{provider.port} at {args.provide_price} yaprak per "
             f"unit; " + (f"advertised to the network as {provider.url} (once this wallet holds 0.1 GRN)"
                          if provider.url else "not advertised: set --provide-url so buyers can find it"))
+    stage = start_llm_stage(args, node, key, provider, log) if args.llm_model else None
     log(f"{params.COIN_NAME} node running. API: {node.url}  (genesis {node.chain.genesis_hash[:16]}...)")
     if node.p2p.listen:
         log(f"P2P: {node.p2p.address}  -- other nodes connect with --peer {node.p2p.full_address}")
@@ -520,12 +521,43 @@ def cmd_node(args):
     watchdog.start()
     if pool is not None:
         pool.stop()
+    if stage is not None:
+        stage.stop()
     if provider is not None:
         provider.claim_due(force=True)           # collect what is owed before going away
         provider.stop()
     node.stop()
     watchdog.cancel()
     log("Stopped.")
+
+
+def start_llm_stage(args, node, key, provider, log):
+    """Serve layers of a language model (green/llm), paid through this node's channels."""
+    if provider is None:
+        raise CliError("--llm-model needs --provide-port: a stage is paid through the node's payment channels")
+    from urllib.parse import urlparse
+    from .llm.model import Model, model_id
+    from .llm.pipeline import Stage
+    try:
+        first, last = (int(x) for x in args.llm_layers.split("-"))
+    except (AttributeError, ValueError):
+        raise CliError("--llm-layers is a range of layers, first-last (last not included), e.g. 0-12") from None
+    log(f"Loading layers {first}-{last} of {args.llm_model}...")
+    mid = model_id(args.llm_model)
+    model = Model(args.llm_model, layers=range(first, last), head=False)
+    if not 0 <= first < last <= model.n_layers:
+        raise CliError(f"this model has layers 0-{model.n_layers}")
+    stage = Stage(model, range(first, last), key, provider=provider, price=args.llm_price)
+    stage.serve(args.llm_host, args.llm_port or 0)
+    port = stage.httpd.server_address[1]
+    url = args.llm_url
+    if url is None and provider.url:             # beside the compute seller, on our own port
+        url = f"http://{urlparse(provider.url).hostname}:{port}"
+    if url:
+        stage.advertise(url, mid)
+    log(f"Serving layers {first}-{last} of model {mid[:16]}... on {args.llm_host}:{port} at {args.llm_price} "
+        f"yaprak per token per layer; " + (f"advertised as {url}" if url else "not advertised: set --llm-url"))
+    return stage
 
 
 SHUTDOWN_SECONDS = 45          # a node that has not stopped by then logs where it is stuck and exits
@@ -564,7 +596,8 @@ CONFIG_KEYS = {"port": int, "host": str, "p2p_port": int, "p2p_host": str, "peer
                "pool_port": int, "pool_host": str, "pool_fee": int, "no_dandelion": bool,
                "provide_port": int, "provide_host": str, "provide_url": str, "provide_price": int,
                "portmap": bool, "intensity": int, "checkpoints": bool, "max_inbound": int,
-               "upload_cap_gb": (int, float)}
+               "upload_cap_gb": (int, float), "llm_model": str, "llm_layers": str, "llm_port": int,
+               "llm_host": str, "llm_url": str, "llm_price": int}
 
 
 def load_config(data: str) -> dict:
@@ -1221,6 +1254,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--provide-url", help="public URL buyers reach it at, e.g. http://203.0.113.7:8548 "
                                          "(advertised over the network)")
     s.add_argument("--provide-price", type=int, default=1000, help="yaprak per 2^24 multiply-adds (default 1000)")
+    s.add_argument("--llm-model", metavar="DIR", help="also serve layers of this language model (a folder with "
+                                                      "config.json and model.safetensors), paid through channels")
+    s.add_argument("--llm-layers", metavar="FIRST-LAST", help="the layers to serve, e.g. 0-12 (12 not included)")
+    s.add_argument("--llm-port", type=int, help="port the layers are served on (default: any free one)")
+    s.add_argument("--llm-host", default="127.0.0.1", help="address they are served on (0.0.0.0: everyone)")
+    s.add_argument("--llm-url", help="public URL buyers reach the layers at (default: the --provide-url host)")
+    s.add_argument("--llm-price", type=int, default=10, help="yaprak per token per layer (default 10)")
     s.add_argument("--pool-port", type=int, help="also run a non-custodial mining pool on this port")
     s.add_argument("--pool-host", default="127.0.0.1", help="address the pool listens on (0.0.0.0 for remote miners)")
     s.add_argument("--pool-fee", type=int, default=1, help="the pool's percentage of each block (default 1)")

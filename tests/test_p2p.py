@@ -542,15 +542,23 @@ def test_eviction_protects_good_peers_and_hits_the_crowded_group():
     assert p2p.P2P._eviction_candidate(honest[:10]) is None           # all protected
 
 
-def test_a_peer_that_stalls_block_requests_is_penalised(nodes, monkeypatch):
+def test_a_peer_that_stalls_block_requests_is_dropped_not_banned(nodes, monkeypatch):
+    """A slow peer is not a hostile one: a new node syncing from busy peers used to ban
+    them all and cut itself off. Stalling frees the block for another peer; a peer that
+    keeps stalling is disconnected, and may come back."""
     monkeypatch.setattr(p2p, "BLOCK_REQUEST_SECONDS", 1)
     a = nodes("a", make_genesis(Key.generate().address, "stall"))
     staller = RawPeer(a)
-    staller.send("inv", {"items": [["block", "ef" * 32]]})
-    assert staller.recv_until("getdata")["items"] == [["block", "ef" * 32]]   # and never answers
-    peer = next(p for p in a.p2p.all_peers() if p.node_id == staller.node_id)
-    wait_for(lambda: peer.score >= 10, timeout=10, what="the stall to be noticed")
-    assert "ef" * 32 not in a.p2p.requested                                  # free for another peer
+    peer = None
+    for n in range(p2p.STALL_LIMIT):
+        h = f"{n:02x}" * 32
+        staller.send("inv", {"items": [["block", h]]})
+        assert staller.recv_until("getdata")["items"] == [["block", h]]       # and never answers
+        peer = peer or next(p for p in a.p2p.all_peers() if p.node_id == staller.node_id)
+        wait_for(lambda: h not in a.p2p.requested, timeout=10, what="the stall to be noticed")  # free for another
+    assert staller.closed(timeout=10)
+    assert peer.stalls == p2p.STALL_LIMIT and peer.score == 0
+    assert not a.p2p.is_banned("127.0.0.1", staller.node_id)
 
 
 def test_stale_fork_headers_are_pruned(tmp_path, monkeypatch):
