@@ -1,8 +1,8 @@
 # Changelog
 
-Every release so far is a consensus change: nodes of different versions do not form one network.
+Releases up to 0.25.0 were consensus changes: nodes of different versions do not form one network. 0.26.0 keeps 0.25.0's rules: the two form one network.
 
-## Unreleased
+## 0.26.0: language models on the network
 
 - **Green as tools for AI agents:** `grn mcp` is a Model Context Protocol server (JSON-RPC on stdin/stdout) with five tools: `green_wallet`, `green_compute_offers`, `green_matmul` (buys a product through payment channels, checked with Freivalds' test before it is paid for), `green_send` and `green_status`. `--max-spend` caps what the agent may spend while it runs. Not a consensus change. (`tests/test_mcp.py`.)
 - **Language models on the network, paid on chain (phase 2; LLM.md):** `grn node --llm-model DIR --llm-layers A-B` serves layers beside the node's compute Provider; the signed offer carries `"llm": {url, model, layers, price}` and nodes relay it (an offer with the field is refused by older nodes: not a consensus change, but miners and seeds should upgrade). `Pipeline.from_market` finds the cheapest chain of stages, opens a payment channel to each, pays every pass with a voucher for what came before plus a signature over the pass, and settles on `close()`; the providers claim in blocks. The buyer needs no open port: it long-polls the last stage. (`tests/test_llm_network.py`; also run as separate node processes on a local network.)
