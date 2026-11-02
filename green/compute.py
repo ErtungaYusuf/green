@@ -32,6 +32,7 @@ Wire protocol (HTTP on the provider's port; the body is raw bytes, C order):
 """
 
 import http.client
+import ipaddress
 import itertools
 import json
 import math
@@ -68,6 +69,22 @@ PARALLEL_MIN_SECONDS = 0.005       # products faster than this on average go one
 SAVE_SECONDS = 1.0
 OFFER_REFRESH = 1200               # providers renew their offer this often (offers live an hour)
 OFFER_RETRY = 10                   # ...and retry this often until the network lists it
+REACH_RETRY = 60                   # url="auto": look for our public address this often until found...
+REACH_CHECK = 1200                 # ...and check it still reaches us this often
+REACH_TIMEOUT = 5
+
+
+def reaches(url: str, path: str, want: str) -> bool:
+    """Whether `url` answers `path` as the server whose key is `want` (our own public
+    address seen from this computer: the router must forward the port to answer)."""
+    try:
+        if path == "/offer":
+            with urllib.request.urlopen(url + path, timeout=REACH_TIMEOUT) as r:
+                return json.loads(r.read(65536)).get("provider") == want
+        from .llm.pipeline import post          # a stage's own wire format
+        return post(url + path, {}, timeout=REACH_TIMEOUT).get("key") == want
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 class PaymentRequired(Exception):
@@ -173,8 +190,17 @@ class Provider:
         self.node, self.key, self.address = node, key, key.address
         self.host, self.port = host, port
         self.price, self.max_dim, self.credit = price, max_dim, credit
-        self.url = url                    # how buyers reach us; advertised over the network when set
+        # How buyers reach us; advertised over the network when set. "auto": find our public
+        # address (a router mapping, or how peers see us), and advertise it once it is seen
+        # to reach us (_find_url).
+        self.auto = url == "auto"
+        self.url = None if self.auto else url
         self.llm = None                   # language-model layers served beside us (green/llm), advertised too
+        self.beside: tuple | None = None  # auto: (local port, llm terms without the url) of layers served beside us
+        self.reach_time = 0.0
+        self.reach_note = None
+        self.reach_lock = threading.Lock()
+        self.mapped: dict[int, tuple] = {}   # local port -> (external ip, external port) the router forwards
         self.announced = 0.0
         self.listed = False               # the network took our offer (we hold OFFER_MIN_BALANCE)
         self.path = os.path.join(node.data_dir, "provider.json")
@@ -480,6 +506,8 @@ class Provider:
             time.sleep(SAVE_SECONDS)
             try:
                 self._save()
+                if self.auto and time.time() - self.reach_time >= (REACH_CHECK if self.url else REACH_RETRY):
+                    self._find_url()
                 # Renew the offer; until it is listed (a new miner has no balance yet), keep trying.
                 if self.url and time.time() - self.announced >= (OFFER_REFRESH if self.listed else OFFER_RETRY):
                     self.announce()
@@ -489,6 +517,66 @@ class Provider:
                     self._forget_ended()
             except Exception as e:
                 self.node.log(f"[provider] housekeeping error: {type(e).__name__}: {e}")
+
+    def serve_beside(self, port: int, terms: dict) -> None:
+        """url="auto": language-model layers served on `port` of this computer, advertised
+        (terms plus their url) once our public address is found."""
+        self.beside = (port, terms)
+        self.reach_time = 0.0                    # look now
+
+    def _public(self, port: int) -> tuple | None:
+        """(host, port) the world reaches our `port` at: the router's mapping when it gives
+        one, else how peers see us on our own port number (a forwarded or open port)."""
+        if port not in self.mapped:
+            m = self.node.map_port(port) if self.node.portmap else None
+            ok = m is not None and _global(m.external_ip)
+            self.mapped[port] = (m.external_ip, m.external_port) if ok else None
+        if self.mapped[port]:
+            return self.mapped[port]
+        host = self.node.p2p.my_host
+        return (host, port) if host and _global(host) else None
+
+    def _find_url(self) -> None:
+        """Advertise our public address if it reaches us, and stop if it no longer does
+        (an offer nobody can reach only wastes buyers' time)."""
+        if not self.reach_lock.acquire(blocking=False):
+            return                               # already looking
+        try:
+            self._look()
+        finally:
+            self.reach_lock.release()
+
+    def _look(self) -> None:
+        self.reach_time = time.time()
+        pub = self._public(self.port)
+        url = f"http://{pub[0]}:{pub[1]}" if pub else None
+        if url and not reaches(url, "/offer", self.address):
+            note = (f"buyers cannot reach the compute seller at {url}: forward TCP port {self.port} on the "
+                    f"router to this computer (or run the node with --portmap), or set --provide-url")
+            url = None
+        elif not url:
+            note = "the compute seller waits for its public address (from peers or the router)"
+        else:
+            note = f"selling compute to the network at {url}"
+        llm = None
+        if url and self.beside:
+            port, terms = self.beside
+            lp = self._public(port)
+            lurl = f"http://{lp[0]}:{lp[1]}" if lp else None
+            if lurl and reaches(lurl, "/ping", self.key.pub_hex):
+                llm = dict(terms, url=lurl)
+                note += f"; model layers at {lurl}"
+            else:
+                note += f"; model layers not reachable: forward TCP port {port} too"
+        if note != self.reach_note:
+            self.reach_note = note
+            self.node.log(f"[provider] {note}")
+        changed = (url, llm) != (self.url, self.llm)
+        self.url, self.llm = url, llm
+        if not url:
+            self.listed = False
+        elif changed:
+            self.announce()
 
     def _forget_ended(self) -> None:
         """Drop the books of channels that are over for good: past their expiry by more than
@@ -506,7 +594,7 @@ class Provider:
         self.server = BoundedServer((self.host, self.port), _handler(self))
         self.port = self.server.server_address[1]
         self.running = True
-        if self.url is None and self.node.portmap:   # behind a router: forward our port and advertise that
+        if self.url is None and self.node.portmap and not self.auto:   # behind a router: forward our port
             m = self.node.map_port(self.port)
             if m is not None:
                 self.url = f"http://{m.external_ip}:{m.external_port}"
@@ -516,6 +604,8 @@ class Provider:
         if self.url:
             self.announce()
         threading.Thread(target=self._housekeeping, daemon=True, name="provider-books").start()
+        if self.auto:
+            threading.Thread(target=self._find_url, daemon=True, name="provider-reach").start()
 
     def stop(self) -> None:
         self.running = False
@@ -523,6 +613,13 @@ class Provider:
             self.server.shutdown()
             self.server.server_close()
         self._save()
+
+
+def _global(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_global
+    except ValueError:
+        return False
 
 
 def relay_post(node_url: str, provider: str, data: bytes, timeout: float = 300) -> bytes:

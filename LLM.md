@@ -167,12 +167,17 @@ python examples/distributed_llm.py --model <folder with Qwen2.5-0.5B-Instruct>
 python examples/distributed_llm.py --model <folder> --serve 8700   # an OpenAI-compatible API
 ```
 
-As a miner, serving layers 0-12 beside the node's compute sales:
+As a miner, serving the model beside the node's compute sales (all its layers on port
+8549, advertised once that port is seen to reach this computer; forward 8548 and 8549 on
+the router, or use `--portmap`):
 
 ```
-grn --data green node --mine --provide-port 8548 --provide-host 0.0.0.0 --provide-url http://<your IP>:8548 \
-    --llm-model <folder> --llm-layers 0-12 --llm-port 8549 --llm-host 0.0.0.0
+grn use --model <folder>
+grn node --mine
 ```
+
+Or only some layers, at a set address: `grn node --mine --llm-model <folder> --llm-layers 0-12
+--provide-url http://<your IP>:8548`.
 
 As a buyer, an OpenAI-compatible API on your own computer (Ctrl+C settles with the miners):
 

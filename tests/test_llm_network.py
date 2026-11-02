@@ -204,3 +204,29 @@ def test_an_agent_asks_the_networks_model_through_mcp(network, model):  # noqa: 
     finally:
         s.close()
     assert Server(network["nodes"][-1].url, carol).tools[-1]["name"] != "green_chat"   # no model, no tool
+
+
+def test_an_auto_seller_advertises_its_layers_once_they_reach_it(tmp_path, monkeypatch, model, tiny_dir):  # noqa: F811
+    """A miner's default: layers served beside an auto seller join its offer with the
+    public address, after it is seen to answer as this stage."""
+    monkeypatch.setattr(compute, "_global", lambda host: True)
+    key = Key.generate()
+    node = Node(str(tmp_path / "n"), make_genesis(key.address, "auto"), port=free_port(), miner_key=key,
+                log=lambda m: None)
+    node.start()
+    node.p2p.my_host = "127.0.0.1"
+    p = Provider(node, key, url="auto")
+    p.start()
+    st = Stage(model, range(0, 2), key, provider=p, price=7)
+    try:
+        st.serve()
+        p.serve_beside(st.httpd.server_address[1], {"model": model_id(tiny_dir), "layers": [0, 2], "price": 7})
+        p._find_url()
+        assert p.url == f"http://127.0.0.1:{p.port}"
+        assert p.llm == {"model": model_id(tiny_dir), "layers": [0, 2], "price": 7,
+                         "url": f"http://127.0.0.1:{st.httpd.server_address[1]}"}
+        assert offer_problem(node.chain.chain_id, p.signed_offer(), time.time()) is None
+    finally:
+        st.stop()
+        p.stop()
+        node.stop()

@@ -137,6 +137,7 @@ ADDR_PER_SOURCE = 64           # new addresses kept from one source network grou
 RETRY_SECONDS = 60             # do not redial an address sooner than this
 BLOB_UPLOAD_PER_MINUTE = 256 * 1024 * 1024
 WORKERS = 8                    # message-processing threads
+WORKER_STOP_SECONDS = 10       # how long stop() waits for them to finish the message in hand
 DANDELION_EPOCH_SECONDS = 600  # stem routes are redrawn this often
 DANDELION_FLUFF_PROB = 0.1     # chance per epoch that a node diffuses the stem transactions it is passed
 DANDELION_DESTINATIONS = 2     # outbound peers that carry stem transactions
@@ -754,6 +755,7 @@ class P2P:
         self.public_port: int | None = None        # our port as seen from outside, when the router maps one
         self.running = False
         self.server = None
+        self.workers: list[threading.Thread] = []
         self._ready: queue.Queue = queue.Queue()
         if seeds is None:                          # only the main network's nodes dial its seeds
             from . import mainnet
@@ -811,8 +813,9 @@ class P2P:
             self.server.listen(64)
             self.port = self.server.getsockname()[1]
             threading.Thread(target=self._accept_loop, daemon=True, name="p2p-accept").start()
-        for _ in range(WORKERS):
-            threading.Thread(target=self._worker, daemon=True, name="p2p-worker").start()
+        self.workers = [threading.Thread(target=self._worker, daemon=True, name="p2p-worker") for _ in range(WORKERS)]
+        for t in self.workers:
+            t.start()
         for target in (self._connect_loop, self._housekeeping, self._trickle_loop, self._connector):
             threading.Thread(target=target, daemon=True, name=target.__name__).start()
 
@@ -826,6 +829,11 @@ class P2P:
                 pass
         for p in self.all_peers():
             p.close("shutting down")
+        # The node closes its database right after this: a worker still answering a peer
+        # (getheaders, a block) would hit a closed database, so let it finish first.
+        deadline = time.time() + WORKER_STOP_SECONDS
+        for t in self.workers:
+            t.join(max(0.0, deadline - time.time()))
         self.verify_pool.shutdown(wait=False, cancel_futures=True)
         if self.checker is not None:
             self.checker.close()

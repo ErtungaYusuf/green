@@ -511,6 +511,33 @@ def test_bans_survive_a_restart(tmp_path):
     again.close()
 
 
+def test_a_stopping_node_finishes_the_message_in_hand_before_closing_its_database(tmp_path, monkeypatch):
+    """The seed logged "Cannot operate on a closed database" when it was restarted while
+    answering a peer's getheaders: the database closed under a worker still reading it."""
+    key = Key.generate()
+    genesis = make_genesis(key.address, "stopping")
+    lines = []
+    a = Node(str(tmp_path / "a"), genesis, port=free_port(), miner_key=key, log=lines.append)
+    a.start(mine=True)
+    wait_for(lambda: a.chain.height >= 3, what="blocks")
+    a.mining = False
+    handling = threading.Event()
+    dispatch = p2p.P2P._dispatch
+
+    def slow(self, peer, cmd, m):
+        if cmd == "getheaders":
+            handling.set()
+            time.sleep(1)
+            self.node.store.get_header(self.chain.genesis_hash)    # the database, not a cache
+        return dispatch(self, peer, cmd, m)
+    monkeypatch.setattr(p2p.P2P, "_dispatch", slow)
+    peer = RawPeer(a)
+    peer.send("getheaders", {"locator": [a.chain.genesis_hash]})
+    assert handling.wait(5)
+    a.stop()
+    assert not [m for m in lines if "error handling" in m], lines
+
+
 # --- eclipse resistance (pure rules) -------------------------------------------------------
 
 def test_network_groups_and_local_addresses():

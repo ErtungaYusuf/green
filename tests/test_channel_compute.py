@@ -325,3 +325,30 @@ def test_a_close_replaces_a_claim_still_waiting(market):
     node.mining = True
     wait_until(lambda: ch.cid not in node.chain.state.channels, "the channel to close")
     assert node.chain.state.balance(buyer.address) == before + 5_000_000 - ch.owed
+
+
+def test_an_auto_seller_advertises_only_an_address_that_reaches_it(market, monkeypatch):
+    """url="auto" (a miner's default): the seller finds its public address, checks that it
+    answers there as itself, and only then puts its offer on the network; an address that
+    leads elsewhere is never advertised, and one that stops answering is withdrawn."""
+    node, buyer, provider = market
+    monkeypatch.setattr(compute, "_global", lambda host: True)     # 127.0.0.1 stands in for a public address
+    logs = []
+    node.log = logs.append
+    node.p2p.my_host = None
+    p = provider(url="auto")
+    assert p.auto and p.url is None
+    wait_until(lambda: any("waits for its public address" in m for m in logs), "the seller to wait")
+    node.p2p.my_host = "127.0.0.1"                                  # peers tell us how they see us
+    p._find_url()
+    assert p.url == f"http://127.0.0.1:{p.port}" and p.listed is not None
+    assert any("selling compute to the network" in m for m in logs)
+    other = Provider(node, Key.generate(), url="")                  # someone else answers at that address
+    other.start()
+    try:
+        monkeypatch.setattr(p, "_public", lambda port: ("127.0.0.1", other.port))
+        p._find_url()
+        assert p.url is None and not p.listed                       # not us: withdrawn
+        assert any("cannot reach" in m for m in logs)
+    finally:
+        other.stop()

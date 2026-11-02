@@ -504,14 +504,10 @@ def cmd_node(args):
             f"`grn pool-mine --pool http://<this host>:{pool.port} --address <theirs>`; "
             f"blocks pay them directly, the pool keeps {args.pool_fee}%")
     provider = None
-    if args.provide_port is not None:
-        from .compute import Provider
-        provider = Provider(node, key, host=args.provide_host, port=args.provide_port, price=args.provide_price,
-                            url=args.provide_url)
-        provider.start()
-        log(f"Selling matrix products on {args.provide_host}:{provider.port} at {args.provide_price} yaprak per "
-            f"unit; " + (f"advertised to the network as {provider.url} (once this wallet holds 0.1 GRN)"
-                         if provider.url else "not advertised: set --provide-url so buyers can find it"))
+    if args.llm_model is None and args.mine and not args.no_llm:
+        args.llm_model = user_config().get("model")      # the model `grn use --model` saved
+    if args.provide_port is not None or ((args.mine or args.llm_model) and not args.no_sell):
+        provider = start_provider(args, node, key, log)
     stage = start_llm_stage(args, node, key, provider, log) if args.llm_model else None
     log(f"{params.COIN_NAME} node running. API: {node.url}  (genesis {node.chain.genesis_hash[:16]}...)")
     if node.p2p.listen:
@@ -546,13 +542,53 @@ def cmd_node(args):
     log("Stopped.")
 
 
+AUTO_PROVIDE_PORT = 8548        # a miner's compute seller, unless --provide-port says otherwise
+AUTO_LLM_PORT = 8549            # ...and the model layers it serves
+
+
+def _bind_port(wanted: int) -> int:
+    """`wanted` if it is free on this computer, else 0 (any free one): a second node on
+    the same computer still starts."""
+    import socket
+    with socket.socket() as s:
+        try:
+            s.bind(("0.0.0.0", wanted))
+            return wanted
+        except OSError:
+            return 0
+
+
+def start_provider(args, node, key, log):
+    """Sell matrix products through payment channels. A miner does it unless --no-sell:
+    listening for everyone, and advertised once its public address is seen to reach it."""
+    from .compute import Provider
+    auto = args.provide_port is None
+    host = "0.0.0.0" if auto else args.provide_host
+    port = _bind_port(AUTO_PROVIDE_PORT) if auto else args.provide_port
+    url = args.provide_url or ("auto" if auto or host not in ("127.0.0.1", "localhost", "::1") else None)
+    provider = Provider(node, key, host=host, port=port, price=args.provide_price, url=url)
+    provider.start()
+    log(f"Selling matrix products on {host}:{provider.port} at {args.provide_price} yaprak per unit; " + (
+        "advertised once buyers can reach it (--no-sell: do not sell)" if provider.auto else
+        f"advertised to the network as {provider.url} (once this wallet holds 0.1 GRN)" if provider.url else
+        "not advertised: set --provide-url so buyers can find it"))
+    return provider
+
+
 def start_llm_stage(args, node, key, provider, log):
     """Serve layers of a language model (green/llm), paid through this node's channels."""
     if provider is None:
-        raise CliError("--llm-model needs --provide-port: a stage is paid through the node's payment channels")
+        raise CliError("--llm-model needs the compute seller (remove --no-sell): a stage is paid through "
+                       "the node's payment channels")
     from urllib.parse import urlparse
     from .llm.model import Model, model_id
     from .llm.pipeline import Stage
+    if args.llm_layers is None:                  # all of them
+        try:
+            with open(os.path.join(args.llm_model, "config.json"), encoding="utf-8") as f:
+                args.llm_layers = f"0-{json.load(f)['num_hidden_layers']}"
+        except (OSError, ValueError, KeyError):
+            raise CliError(f"{args.llm_model}: no config.json with num_hidden_layers") from None
     try:
         first, last = (int(x) for x in args.llm_layers.split("-"))
     except (AttributeError, ValueError):
@@ -563,12 +599,19 @@ def start_llm_stage(args, node, key, provider, log):
     if not 0 <= first < last <= model.n_layers:
         raise CliError(f"this model has layers 0-{model.n_layers}")
     stage = Stage(model, range(first, last), key, provider=provider, price=args.llm_price)
-    stage.serve(args.llm_host, args.llm_port or 0)
+    auto = provider.auto and args.llm_url is None
+    if auto:
+        stage.serve("0.0.0.0", args.llm_port or _bind_port(AUTO_LLM_PORT))
+    else:
+        stage.serve(args.llm_host, args.llm_port or 0)
     port = stage.httpd.server_address[1]
     url = args.llm_url
-    if url is None and provider.url:             # beside the compute seller, on our own port
+    if url is None and provider.url and not auto:   # beside the compute seller, on our own port
         url = f"http://{urlparse(provider.url).hostname}:{port}"
-    if url:
+    if auto:
+        provider.serve_beside(port, {"model": mid, "layers": [first, last], "price": args.llm_price})
+        url = "its public address, once buyers can reach it"
+    elif url:
         stage.advertise(url, mid)
     log(f"Serving layers {first}-{last} of model {mid[:16]}... on {args.llm_host}:{port} at {args.llm_price} "
         f"yaprak per token per layer; " + (f"advertised as {url}" if url else "not advertised: set --llm-url"))
@@ -612,7 +655,7 @@ CONFIG_KEYS = {"port": int, "host": str, "p2p_port": int, "p2p_host": str, "peer
                "provide_port": int, "provide_host": str, "provide_url": str, "provide_price": int,
                "portmap": bool, "intensity": int, "checkpoints": bool, "max_inbound": int,
                "upload_cap_gb": (int, float), "llm_model": str, "llm_layers": str, "llm_port": int,
-               "llm_host": str, "llm_url": str, "llm_price": int}
+               "llm_host": str, "llm_url": str, "llm_price": int, "no_sell": bool, "no_llm": bool}
 
 
 def load_config(data: str) -> dict:
@@ -1432,14 +1475,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--intensity", type=int, default=100, metavar="PERCENT",
                    help="mine this percent of the time and let the GPU/CPU rest the rest (default 100)")
     s.add_argument("--report", type=float, default=15, help="seconds between status lines")
-    s.add_argument("--provide-port", type=int, help="also sell matrix products through channels on this port")
+    s.add_argument("--provide-port", type=int, help="sell matrix products through channels on this port (a miner "
+                                                     f"sells on {AUTO_PROVIDE_PORT} unless --no-sell)")
+    s.add_argument("--no-sell", action="store_true", help="do not sell compute (or model layers) while mining")
+    s.add_argument("--no-llm", action="store_true",
+                   help="do not serve the model `grn use --model` saved (a miner serves it by default)")
     s.add_argument("--provide-host", default="127.0.0.1", help="address the seller listens on (0.0.0.0: everyone)")
     s.add_argument("--provide-url", help="public URL buyers reach it at, e.g. http://203.0.113.7:8548 "
                                          "(advertised over the network)")
     s.add_argument("--provide-price", type=int, default=1000, help="yaprak per 2^24 multiply-adds (default 1000)")
     s.add_argument("--llm-model", metavar="DIR", help="also serve layers of this language model (a folder with "
                                                       "config.json and model.safetensors), paid through channels")
-    s.add_argument("--llm-layers", metavar="FIRST-LAST", help="the layers to serve, e.g. 0-12 (12 not included)")
+    s.add_argument("--llm-layers", metavar="FIRST-LAST",
+                   help="the layers to serve, e.g. 0-12 (12 not included; default: all)")
     s.add_argument("--llm-port", type=int, help="port the layers are served on (default: any free one)")
     s.add_argument("--llm-host", default="127.0.0.1", help="address they are served on (0.0.0.0: everyone)")
     s.add_argument("--llm-url", help="public URL buyers reach the layers at (default: the --provide-url host)")

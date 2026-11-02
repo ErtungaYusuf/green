@@ -2,6 +2,10 @@
 
 Releases up to 0.25.0 were consensus changes: nodes of different versions do not form one network. 0.26.0 keeps 0.25.0's rules: the two form one network. 0.27.0 changes the difficulty rule from block 50,000: older nodes split off there.
 
+## Unreleased
+
+- **A miner sells compute by itself:** `grn node --mine` starts the compute seller on port 8548 (`--no-sell` turns it off), finds its public address from its peers (or the router, with `--portmap`), checks that the address answers as this seller, and only then advertises it; it checks again every 20 minutes and withdraws an offer nobody can reach. A model saved with `grn use --model` is served beside it (all layers by default, port 8549; `--no-llm` turns it off). `--llm-layers` defaults to all layers.
+
 ## 0.27.0
 
 **A rule change at block 50,000: nodes older than 0.27.0 follow a different chain from that block on. Upgrade before it (about 5 November 2026 at the usual 15 s a block).**

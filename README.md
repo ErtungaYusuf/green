@@ -294,7 +294,7 @@ train(model, x, y, steps=300, matmul=cluster.matmul)     # every product compute
 cluster.settle()
 ```
 
-Miners sell compute with `grn node --mine --provide-port 8548 --provide-host 0.0.0.0 --provide-url http://<public address>:8548`; their offers spread over the network once their wallet holds 0.1 GRN. `python examples/train_on_green.py` runs the whole thing on a local network.
+A miner sells compute by itself: `grn node --mine` listens on port 8548, finds its public address (from its peers, or the router with `--portmap`), checks that the address really reaches it, and only then offers it to the network (once the wallet holds 0.1 GRN). If the router does not forward port 8548 the log says so; `--provide-url` sets the address by hand, `--no-sell` turns selling off. A model saved with `grn use --model` is served too (all its layers, on port 8549; `--no-llm` turns it off). `python examples/train_on_green.py` runs the whole thing on a local network.
 
 ## Mining in a pool
 

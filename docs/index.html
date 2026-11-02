@@ -244,7 +244,7 @@ footer ul { list-style: none; padding: 0; margin: 0; }
         </div>
       </div>
       <div class="cmd" style="margin-top:1.6rem"><pre>grn --data green llm --model &lt;folder&gt;     # an OpenAI-compatible API on 127.0.0.1:8700</pre><button type="button" data-copy>Copy</button></div>
-      <p style="margin-top:.8rem">Miners serve layers with <code>grn node --llm-model &lt;folder&gt; --llm-layers 0-12</code>. The design and how it was tested: <a href="https://github.com/ErtungaYusuf/green/blob/main/LLM.md">LLM.md</a>.</p>
+      <p style="margin-top:.8rem">A miner serves a model by saving it once with <code>grn use --model &lt;folder&gt;</code>; <code>grn node --mine</code> then sells compute and the model's layers by itself. The design and how it was tested: <a href="https://github.com/ErtungaYusuf/green/blob/main/LLM.md">LLM.md</a>.</p>
     </section>
 
     <section aria-labelledby="fair-h">
