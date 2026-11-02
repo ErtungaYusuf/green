@@ -151,6 +151,7 @@ footer ul { list-style: none; padding: 0; margin: 0; }
     <nav aria-label="Main">
       <a href="#why" class="hide-s">Why</a>
       <a href="#work">How it works</a>
+      <a href="#models" class="hide-s">Models</a>
       <a href="#grn" class="hide-s">GRN</a>
       <a href="#join">Join</a>
       <a href="agents.html" class="hide-s">For AI agents</a>
@@ -225,6 +226,27 @@ footer ul { list-style: none; padding: 0; margin: 0; }
       </div>
     </section>
 
+    <section id="models" aria-labelledby="models-h">
+      <h2 id="models-h">A language model, run by many miners</h2>
+      <p class="intro">A model on Green is split across miners: each holds a few of its layers, and your text passes from one to the next. Your computer keeps the first and last steps and checks every miner's work before it pays.</p>
+      <div class="facts">
+        <div>
+          <h3>Distributed, not slow</h3>
+          <p>A pass crosses each miner once, carrying a few kilobytes per word. Your computer guesses the next few words and one pass checks them all, so each trip through the network brings back several words, exactly the ones the model would have chosen.</p>
+        </div>
+        <div>
+          <h3>Cheating is caught</h3>
+          <p>Every product inside a layer is integer arithmetic, the same on every machine. Each miner signs what it computed; your computer opens random layers and checks them with Freivalds' test. A miner that skips work is caught, named by its own signature, and replaced.</p>
+        </div>
+        <div>
+          <h3>Paid per pass</h3>
+          <p>Miners find each other through the network's signed offers; you pay each one through a payment channel, pass by pass, and the miners claim it in the blocks. No account, no API key.</p>
+        </div>
+      </div>
+      <div class="cmd" style="margin-top:1.6rem"><pre>grn --data green llm --model &lt;folder&gt;     # an OpenAI-compatible API on 127.0.0.1:8700</pre><button type="button" data-copy>Copy</button></div>
+      <p style="margin-top:.8rem">Miners serve layers with <code>grn node --llm-model &lt;folder&gt; --llm-layers 0-12</code>. The design and how it was tested: <a href="https://github.com/ErtungaYusuf/green/blob/main/LLM.md">LLM.md</a>.</p>
+    </section>
+
     <section aria-labelledby="fair-h">
       <div class="split">
         <div>
@@ -287,6 +309,13 @@ footer ul { list-style: none; padding: 0; margin: 0; }
             <h3>Join and mine</h3>
             <p>With no genesis file of its own, a node joins the Green network and finds its peers. <code>--portmap</code> asks your router to let other nodes reach you.</p>
             <div class="cmd"><pre>grn --data green node --mine --gpu --portmap</pre><button type="button" data-copy>Copy</button></div>
+          </div>
+        </li>
+        <li>
+          <div>
+            <h3>See your balance</h3>
+            <p>No password needed: the address is enough.</p>
+            <div class="cmd"><pre>grn --data green balance</pre><button type="button" data-copy>Copy</button></div>
           </div>
         </li>
         <li>

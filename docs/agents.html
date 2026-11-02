@@ -270,6 +270,16 @@ dl.faq dd { margin: .35rem 0 0; max-width: 64ch; }
       <p style="margin-top:1rem"><code>--max-spend</code> caps what the agent spends while the server runs. On chain, a guardian account can cap its spending per period and freeze it (<code>grn guard</code>).</p>
     </section>
 
+    <section aria-labelledby="llm-h">
+      <h2 id="llm-h">A language model from the network</h2>
+      <p>The network's miners run language models, each holding some of a model's layers. <code>grn llm</code> puts one behind an OpenAI-compatible API on your machine: point any OpenAI client at it. Every miner's work is checked before it is paid for; a miner that cheats or stops answering is replaced. You need the model's weights locally, to check the work, and <code>pip install tokenizers</code>.</p>
+      <div class="cmd"><pre>grn --data agent llm --model &lt;folder&gt;</pre><button type="button" data-copy>Copy</button></div>
+      <div class="code"><pre>from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:8700/v1", api_key="unused")
+print(client.chat.completions.create(model="qwen", messages=[{"role": "user", "content": "Hello"}]).choices[0].message.content)</pre></div>
+      <p>For an MCP agent, <code>grn --data agent mcp --llm-model &lt;folder&gt;</code> adds the <code>green_chat</code> tool.</p>
+    </section>
+
     <section aria-labelledby="py-h">
       <h2 id="py-h">From code</h2>
       <p>The same market from Python. Payment channels open to the cheapest miners; each product is paid for as it arrives, only after it checks out.</p>
