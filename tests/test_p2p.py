@@ -640,7 +640,7 @@ def test_a_node_that_falls_behind_drops_shares_instead_of_blaming_peers():
     from types import SimpleNamespace
     from green.p2p import MAX_PEER_QUEUE, P2P
     blamed = []
-    me = SimpleNamespace(stats={}, _flooded=blamed.append, _ready=None)
+    me = SimpleNamespace(stats={}, _flooded=lambda peer, chain=False: blamed.append(peer), _ready=None)
     peer = SimpleNamespace(lock=threading.Lock(), in_q=[("x", b"")] * MAX_PEER_QUEUE, scheduled=True)
     for cmd in ("share", "tx", "dtx", "offers"):
         P2P._receive(me, peer, cmd, b"{}")
@@ -697,3 +697,22 @@ def test_a_node_past_its_upload_budget_stops_serving(tmp_path):
         assert again.p2p.over_upload_budget()                          # this month's count was kept
     finally:
         again.stop()
+
+
+
+def test_a_peer_flooding_us_with_blocks_is_dropped_never_banned(nodes, monkeypatch):
+    """A peer producing valid blocks faster than this node checks them (a block a second
+    after a long pause) is not a flooder: it is disconnected, and may come back."""
+    monkeypatch.setattr(p2p, "MAX_PEER_QUEUE", 5)
+    monkeypatch.setattr(p2p, "WORKERS", 0)               # nothing drains the queue
+    a = nodes("a", make_genesis(Key.generate().address, "busy"))
+    key = Ed25519PrivateKey.generate()
+    for _ in range(4):                                   # more than the three strikes that ban a flooder
+        peer = RawPeer(a, key=key)
+        try:
+            for n in range(10):
+                peer.send("inv", {"items": [["block", f"{n:02x}" * 32]]})
+        except OSError:
+            pass
+        assert peer.closed(timeout=5)
+        assert not a.p2p.is_banned("127.0.0.1", peer.node_id)

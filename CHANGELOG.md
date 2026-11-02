@@ -4,6 +4,8 @@ Releases up to 0.25.0 were consensus changes: nodes of different versions do not
 
 ## Unreleased
 
+- **Everyday commands:** `grn` alone shows the wallet, the node and the balance with the common commands; `grn use <folder> [--model DIR]` remembers the wallet folder so commands need no `--data`; `grn receive`; `grn send` shows the fee and asks before sending (`--yes` for programs); `grn ask "..."` and `grn chat` use the network's language model. `--json` on every everyday command, for programs and AI agents. `GREEN_DATA` and `GREEN_NODE` set the defaults too.
+- **Honest peers are no longer banned for the chain they bring:** after a 3.5-day pause on the main network, blocks came every second; the seed could not check them as fast, called the miner a flooder and banned it for a day, and the network split. A peer whose queue overflows with blocks, announcements or headers is now disconnected, never banned; a peer on a branch that left ours deeper than the reorg limit (a miner that was cut off and kept mining) is disconnected instead of collecting a ban. Junk floods are still banned.
 - **`grn llm --model DIR`:** an OpenAI-compatible API on the buyer's computer whose answers the network's miners compute (each holding some layers), every miner's work checked; Ctrl+C settles with them. **`grn mcp --llm-model DIR`** adds a `green_chat` tool, under the session's spending cap.
 - Routes by measured round trip, with the other offers for each range kept as spares; a stage that cheats, stops answering or refuses is swapped for a spare and the text made again. `generate` returns only after the last passes' audits.
 - A stalling peer is no longer dropped when it is the node's only source of blocks.

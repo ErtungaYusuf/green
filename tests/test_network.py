@@ -435,10 +435,10 @@ def test_cli_guard_commands_end_to_end(tmp_path, monkeypatch):
         assert node.account(agent)["guard"]["limit"] == params.YAPRAK_PER_COIN // 2
         assert cli.main(["--data", guardian_dir, *common, "guard", "update", agent, "--freeze"]) == 0
         wait_for(lambda: node.account(agent)["guard"]["frozen"], what="freeze on chain")
-        assert cli.main(["--data", agent_dir, *common, "send", guardian, "0.01"]) == 1      # refused: frozen
+        assert cli.main(["--data", agent_dir, *common, "send", guardian, "0.01", "--yes"]) == 1      # refused: frozen
         assert cli.main(["--data", guardian_dir, *common, "guard", "release", agent]) == 0
         wait_for(lambda: node.account(agent)["guard"] is None, what="release on chain")
-        assert cli.main(["--data", agent_dir, *common, "send", guardian, "0.01"]) == 0
+        assert cli.main(["--data", agent_dir, *common, "send", guardian, "0.01", "--yes"]) == 0
         assert cli.main(["--data", agent_dir, *common, "supply"]) == 0
     finally:
         node.stop()

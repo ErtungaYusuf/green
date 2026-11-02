@@ -23,6 +23,21 @@ from .tx import make_tx
 
 N = params.UNIT
 DEFAULT_NODE = f"http://127.0.0.1:{params.DEFAULT_PORT}"
+USER_CONFIG = os.path.join(os.path.expanduser("~"), ".green", "cli.json")   # what `grn use` remembers
+
+
+def user_config() -> dict:
+    try:
+        with open(USER_CONFIG, encoding="utf-8") as f:
+            cfg = json.load(f)
+        return cfg if isinstance(cfg, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def out(args, data: dict, text: str) -> None:
+    """Print for a person, or with --json for a program (an agent): one JSON object."""
+    print(json.dumps(data) if getattr(args, "json", False) else text)
 PASSWORD_ENV = "GREEN_WALLET_PASSWORD"
 PASSWORD_FILE_ENV = "GREEN_WALLET_PASSWORD_FILE"   # a file holding it (e.g. a systemd credential)
 
@@ -727,19 +742,138 @@ def cmd_balance(args):
     if not is_address(addr):
         raise CliError("invalid address")
     acct = api_get(args, f"/account/{addr}")
-    print(f"{addr}")
-    print(f"  balance         : {params.fmt_amount(acct['balance'])}")
+    text = f"{addr}\n  balance         : {params.fmt_amount(acct['balance'])}"
     if acct["pending_balance"] != acct["balance"]:
-        print(f"  with pending    : {params.fmt_amount(acct['pending_balance'])}")
+        text += f"\n  with pending    : {params.fmt_amount(acct['pending_balance'])}"
+    out(args, {"address": addr, "balance": acct["balance"] / params.YAPRAK_PER_COIN,
+               "pending_balance": acct["pending_balance"] / params.YAPRAK_PER_COIN}, text)
 
 
 def cmd_send(args):
-    key = require_wallet(args.data)
     if not is_address(args.to):
         raise CliError("invalid recipient address")
     amount = params.parse_amount(args.amount)
+    if amount <= 0:
+        raise CliError("the amount must be more than 0")
+    fee = api_get(args, "/v1/fee?blocks=2")["transfer_fee"]
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise CliError("add --yes to send without being asked (a program or an agent sending)")
+        print(f"Send {params.fmt_amount(amount)} to {args.to}\n  fee about {params.fmt_amount(fee)}")
+        if input("Send it? [y/N] ").strip().lower() not in ("y", "yes"):
+            raise CliError("not sent")
+    key = require_wallet(args.data)
     tid = send_tx(args, key, "transfer", to=args.to, amount=amount)
-    print(f"Sent: {params.fmt_amount(amount)} -> {args.to}\nTransaction: {tid}")
+    out(args, {"sent": amount / params.YAPRAK_PER_COIN, "to": args.to, "txid": tid},
+        f"Sent: {params.fmt_amount(amount)} -> {args.to}\nTransaction: {tid}")
+
+
+def cmd_receive(args):
+    addr = wallet_address(args.data)
+    out(args, {"address": addr}, f"Your address (share it to be paid):\n\n    {addr}\n")
+
+
+def cmd_use(args):
+    """Remember the wallet folder (and the node, the model) so commands need no --data."""
+    cfg = user_config()
+    if args.folder:
+        folder = os.path.abspath(args.folder)
+        if not os.path.exists(wallet_path(folder)):
+            print(f"(no wallet in {folder} yet: `grn wallet new` makes one there)")
+        cfg["data"] = folder
+    if args.model:
+        if not os.path.exists(os.path.join(args.model, "model.safetensors")):
+            raise CliError(f"{args.model} has no model.safetensors")
+        cfg["model"] = os.path.abspath(args.model)
+    if args.use_node:
+        cfg["node"] = args.use_node
+    os.makedirs(os.path.dirname(USER_CONFIG), exist_ok=True)
+    with open(USER_CONFIG, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+    out(args, cfg, "\n".join(f"{k:<6}: {v}" for k, v in cfg.items()) + f"\n(saved in {USER_CONFIG})")
+
+
+def cmd_overview(args):
+    """`grn` with no command: where you stand, and what you can do."""
+    info: dict = {"data": os.path.abspath(args.data)}
+    lines = [f"{params.COIN_NAME} ({params.TICKER}) -- wallet folder {info['data']}"]
+    try:
+        info["address"] = wallet_address(args.data)
+    except CliError:
+        lines.append("No wallet here yet: `grn wallet new`, or `grn use <folder>` for the one you have.")
+    try:
+        st = http_get(args.node.rstrip("/") + "/status", timeout=5)
+        info["node"] = {"height": st["height"], "mining": st["mining"], "units_per_second": st["units_per_second"],
+                        "peers": st["p2p"]["outbound"] + st["p2p"]["inbound"]}
+        lines.append(f"Node     : height {st['height']}, {info['node']['peers']} peers, mining "
+                     f"{'on' if st['mining'] else 'off'} ({st['units_per_second']:.0f} units/s)")
+        if "address" in info:
+            acct = http_get(args.node.rstrip("/") + f"/account/{info['address']}", timeout=5)
+            info["balance"] = acct["balance"] / params.YAPRAK_PER_COIN
+            lines.append(f"Address  : {info['address']}\nBalance  : {params.fmt_amount(acct['balance'])}")
+    except (OSError, ValueError):
+        info["node"] = None
+        lines.append(f"No node running at {args.node}: start one with `grn node` (add --mine to mine)")
+        if "address" in info:
+            lines.append(f"Address  : {info['address']}")
+    lines.append("""
+  grn balance                  your balance          grn receive                your address
+  grn send <address> <GRN>     send (asks first)     grn history                what happened
+  grn node --mine --gpu        run a node and mine   grn mine on|off            mining on a running node
+  grn ask "question"           ask the network's language model     grn chat     talk with it
+  grn use <folder>             remember your wallet folder (--model <dir> for the model)
+  grn --json <command>         the same, as JSON, for programs and AI agents
+  grn --help                   every command""")
+    out(args, info, "\n".join(lines))
+
+
+def _network_model(args):
+    from .llm.api import NetworkModel
+    model = args.model or user_config().get("model")
+    if not model:
+        raise CliError("which model? `grn use --model <folder>` once, or --model <folder>")
+    return NetworkModel(model, args.node, require_wallet(args.data), params.parse_amount(args.per_stage))
+
+
+def cmd_ask(args):
+    api_get(args, "/status")                       # fail early if no node is running
+    nm = _network_model(args)
+    try:
+        r = nm.complete({"messages": [{"role": "user", "content": " ".join(args.question)}],
+                         "max_tokens": args.max_tokens})
+    finally:
+        paid = nm.close()                          # settle with the miners: the rest comes back
+    answer, g = r["choices"][0]["message"]["content"], r["green"]
+    out(args, {"answer": answer, "tokens": r["usage"]["completion_tokens"], "cost": g["cost"] / params.YAPRAK_PER_COIN,
+               "miners": g["stages"], "seconds": g["seconds"],
+               "paid": {k: v / params.YAPRAK_PER_COIN for k, v in paid.items()}},
+        f"{answer}\n\n({r['usage']['completion_tokens']} tokens from {g['stages']} miner(s), every one's work "
+        f"checked; {params.fmt_amount(g['cost'])}, {g['seconds']:.1f} s)")
+
+
+def cmd_chat(args):
+    api_get(args, "/status")
+    nm = _network_model(args)
+    print(f"Talking with {nm.name}, run by the network's miners. An empty line or Ctrl+C ends.\n")
+    messages, spent = [], 0
+    try:
+        while True:
+            try:
+                text = input("you> ").strip()
+            except EOFError:
+                break
+            if not text:
+                break
+            messages.append({"role": "user", "content": text})
+            r = nm.complete({"messages": messages, "max_tokens": args.max_tokens})
+            answer = r["choices"][0]["message"]["content"]
+            messages.append({"role": "assistant", "content": answer})
+            spent += r["green"]["cost"]
+            print(f"\n{answer}\n")
+    except KeyboardInterrupt:
+        pass
+    nm.close()
+    print(f"\nSettled with the miners: {params.fmt_amount(spent)} for this conversation.")
 
 
 def cmd_mine(args):
@@ -1214,9 +1348,34 @@ def build_parser() -> argparse.ArgumentParser:
     prog = "grn" if os.path.basename(sys.argv[0]).lower().startswith("grn") else "python -m green"
     p = argparse.ArgumentParser(prog=prog,
                                 description=f"{params.COIN_NAME} ({params.TICKER}): a blockchain secured by proof of compute")
-    p.add_argument("--data", default="data", help="folder for the wallet, blocks and data (default: data)")
-    p.add_argument("--node", default=DEFAULT_NODE, help=f"node to talk to (default: {DEFAULT_NODE})")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    cfg = user_config()
+    data = os.environ.get("GREEN_DATA") or cfg.get("data") or "data"
+    node = os.environ.get("GREEN_NODE") or cfg.get("node") or DEFAULT_NODE
+    p.add_argument("--data", default=data, help=f"folder for the wallet, blocks and data (default: {data}; "
+                                                "`grn use <folder>` changes it for good)")
+    p.add_argument("--node", default=node, help=f"node to talk to (default: {node})")
+    p.add_argument("--json", action="store_true", help="answer in JSON, for programs and AI agents")
+    p.set_defaults(fn=cmd_overview)
+    sub = p.add_subparsers(dest="cmd")
+
+    s = sub.add_parser("use", help="remember your wallet folder (and the node, the model): no more --data")
+    s.add_argument("folder", nargs="?")
+    s.add_argument("--model", metavar="DIR", help="the language model's folder, for grn ask and grn chat")
+    s.add_argument("--node", dest="use_node", metavar="URL", help="the node to talk to")
+    s.set_defaults(fn=cmd_use)
+
+    s = sub.add_parser("receive", help="your address, to be paid")
+    s.set_defaults(fn=cmd_receive)
+
+    for name, fn, what in (("ask", cmd_ask, "ask the network's language model one question"),
+                           ("chat", cmd_chat, "talk with the network's language model")):
+        s = sub.add_parser(name, help=what)
+        if name == "ask":
+            s.add_argument("question", nargs="+")
+        s.add_argument("--model", metavar="DIR", help="the model's folder (default: the one `grn use --model` saved)")
+        s.add_argument("--max-tokens", type=int, default=256)
+        s.add_argument("--per-stage", default="0.01", metavar="GRN", help="payment channel per miner (default 0.01)")
+        s.set_defaults(fn=fn)
 
     s = sub.add_parser("wallet", help="create, restore or show the wallet")
     s.add_argument("action", choices=["new", "restore", "show", "phrase"],
@@ -1330,10 +1489,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("address", nargs="?")
     s.set_defaults(fn=cmd_balance)
 
-    s = sub.add_parser("send", help="send coins")
+    s = sub.add_parser("send", help="send coins (shows the fee and asks first)")
     s.add_argument("to")
     s.add_argument("amount", help="in GRN, e.g. 1.5")
     s.add_argument("--fee", default="0")
+    s.add_argument("--yes", "-y", action="store_true", help="do not ask (programs and agents)")
     s.set_defaults(fn=cmd_send)
 
     s = sub.add_parser("mine", help="turn mining on/off on a running node")

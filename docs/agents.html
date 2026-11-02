@@ -270,6 +270,16 @@ dl.faq dd { margin: .35rem 0 0; max-width: 64ch; }
       <p style="margin-top:1rem"><code>--max-spend</code> caps what the agent spends while the server runs. On chain, a guardian account can cap its spending per period and freeze it (<code>grn guard</code>).</p>
     </section>
 
+    <section aria-labelledby="cli-h">
+      <h2 id="cli-h">From the command line, in JSON</h2>
+      <p>Every everyday command answers in JSON with <code>--json</code>, so an agent can drive Green from a shell and read the result.</p>
+      <div class="code"><pre>grn use ./agent --model ./qwen2.5-0.5b-instruct     # remembered: no --data from here on
+grn --json                                          # wallet, node, balance at a glance
+grn --json balance
+grn --json send grn1... 0.5 --yes                   # --yes: send without being asked
+grn --json ask "Summarise this in one line: ..."   # answer, tokens, cost, miners</pre></div>
+    </section>
+
     <section aria-labelledby="llm-h">
       <h2 id="llm-h">A language model from the network</h2>
       <p>The network's miners run language models, each holding some of a model's layers. <code>grn llm</code> puts one behind an OpenAI-compatible API on your machine: point any OpenAI client at it. Every miner's work is checked before it is paid for; a miner that cheats or stops answering is replaced. You need the model's weights locally, to check the work, and <code>pip install tokenizers</code>.</p>

@@ -20,3 +20,13 @@ def easy_target(monkeypatch):
     # Tests pay new addresses a few yaprak at a time; the minimum for opening an
     # account is tested on its own (test_fees.py sets NEW_ACCOUNT_MIN).
     monkeypatch.setattr(params, "NEW_ACCOUNT_MIN", 0)
+
+
+@pytest.fixture(autouse=True)
+def no_user_defaults(monkeypatch, tmp_path):
+    # The CLI's defaults come from GREEN_DATA / GREEN_NODE or what `grn use` saved for
+    # the person running the tests: none of that may leak into a test.
+    from green import cli
+    monkeypatch.setattr(cli, "USER_CONFIG", str(tmp_path / "no-user-config.json"))
+    monkeypatch.delenv("GREEN_DATA", raising=False)
+    monkeypatch.delenv("GREEN_NODE", raising=False)

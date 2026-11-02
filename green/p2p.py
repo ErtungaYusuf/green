@@ -104,6 +104,10 @@ MAX_PEER_QUEUE = 1000          # messages waiting to be processed, per peer
 # network carries these again (shares and transactions are announced by every peer
 # that has them), so dropping them costs nothing, while blocks and headers are kept.
 DROPPABLE = frozenset({"share", "tx", "dtx", "offers"})
+# The chain itself: a peer whose queue overflows with these is producing or serving blocks
+# faster than we check them (after a long pause, a block a second), not attacking. It is
+# disconnected, never banned; it comes back and we sync. Banning it split the main network.
+CHAIN_DATA = frozenset({"inv", "cmpct", "block", "headers", "blocktxn", "checkpoint"})
 REKEY_FRAMES = 4096
 MAX_INV = 1000
 MAX_HEADERS = 2000
@@ -1211,13 +1215,17 @@ class P2P:
             if cmd in DROPPABLE:                    # we are behind, not the peer to blame
                 self.stats["dropped_when_busy"] = self.stats.get("dropped_when_busy", 0) + 1
                 return None
-            return self._flooded(peer)
+            return self._flooded(peer, chain=cmd in CHAIN_DATA)
         self._ready.put(peer)
 
-    def _flooded(self, peer: Peer) -> None:
+    def _flooded(self, peer: Peer, chain: bool = False) -> None:
         """A peer whose messages pile up faster than we handle them: disconnect it, and ban
         it the third time within an hour. Banning at once punished honest peers whenever
         this node fell behind (one stalled, and banned all its peers)."""
+        if chain:
+            self.log(f"[p2p] {peer.name}: blocks come faster than we check them; disconnecting (it may come back)")
+            peer.close("message queue full of blocks")
+            return
         key, now = self._ban_key(peer.host, peer.node_id), time.time()
         with self.lock:
             strikes = [t for t in self.flood_strikes.get(key, []) if now - t < 3600] + [now]
@@ -2178,6 +2186,13 @@ class P2P:
         except InvalidBlock as e:
             if e.permanent:
                 self.punish(peer, BAN_SCORE, f"sent an invalid block ({e})")
+                return "invalid"
+            if "too deep" in str(e):
+                # A miner that was cut off kept mining its own branch: past the reorg limit
+                # we can never follow it, but it did nothing wrong. Banning it turned one
+                # partition into a lasting one; drop it instead, and let it resync.
+                self.log(f"[p2p] {peer.name} is on a branch that left ours too long ago; disconnecting")
+                peer.close("on a branch we cannot follow")
                 return "invalid"
             self.punish(peer, 10, f"sent a block that could not be accepted ({e})")
             return "retry"

@@ -7,38 +7,47 @@ import time
 import numpy as np
 import pytest
 
-from green import compute
-from green.chain import make_genesis
+from green import compute, params
+from green.chain import block_hash, make_genesis
 from green.compute import Provider
 from green.crypto import Key
 from green.llm.model import model_id
 from green.llm.pipeline import Pipeline, Stage, StageRefused, cheapest_route
 from green.node import Node
-from green.p2p import offer_problem
+from green.tx import make_tx
+from green.p2p import OFFER_MIN_BALANCE, offer_problem
 from test_app import free_port, wait_until
 from test_llm import model, tiny_dir  # noqa: F401  (fixtures)
 
 
 @contextlib.contextmanager
 def serving(tmp_path, monkeypatch, model, tiny_dir, specs):  # noqa: F811
-    """A network of miners each serving layers (`specs`: [(layers, price, cheat)]), and a
-    buyer's node, carol's, holding the genesis coins."""
+    """Nodes each serving layers (`specs`: [(layers, price, cheat)]), the first of them the
+    network's only miner, and a buyer's node, carol's, holding the genesis coins, who
+    funds the other sellers (an offer is relayed once its seller holds 0.1 GRN). One
+    miner: with the tests' trivial difficulty several would fork without end."""
     monkeypatch.setattr(compute, "OFFER_RETRY", 0.5)
     carol = Key.generate()
     genesis = make_genesis(carol.address, "llm")
+    genesis_hash = block_hash(genesis)
     quiet = dict(log=lambda m: None)
     nodes, keys, providers, stages = [], [], [], []
     for n, (layers, price, cheat) in enumerate(specs):
         key = Key.generate()
         node = Node(str(tmp_path / f"m{n}"), genesis, port=free_port(), miner_key=key,
                     peers=[nodes[0].p2p.address] if nodes else [], **quiet)
-        node.start(mine=True)
+        node.start(mine=not nodes)
         nodes.append(node)
         keys.append(key)
     nc = Node(str(tmp_path / "carol"), genesis, port=free_port(), miner_key=carol, peers=[nodes[0].p2p.address],
               **quiet)
     nc.start()
     mid = model_id(tiny_dir)
+    wait_until(lambda: nc.p2p.status()["outbound"] and nc.chain.height >= 1, "carol's node to join")
+    for i, key in enumerate(keys[1:]):
+        nc.submit_tx(make_tx(carol, genesis_hash, "transfer", i, to=key.address, amount=2 * OFFER_MIN_BALANCE))
+    wait_until(lambda: all(n.chain.state.balance(k.address) > 0 for n, k in zip(nodes, keys)), "the sellers' funds",
+               timeout=120)
     try:
         for node, key, (layers, price, cheat) in zip(nodes, keys, specs):
             p = Provider(node, key, url="")
