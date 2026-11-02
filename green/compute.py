@@ -600,7 +600,8 @@ class Provider:
                 self.url = f"http://{m.external_ip}:{m.external_port}"
         if self.url == "":                       # "advertise me at whatever port I got" (tests, local nets)
             self.url = f"http://{'127.0.0.1' if self.host in ('0.0.0.0', '::') else self.host}:{self.port}"
-        threading.Thread(target=self.server.serve_forever, daemon=True, name="provider").start()
+        self.serving = threading.Thread(target=self.server.serve_forever, daemon=True, name="provider")
+        self.serving.start()
         if self.url:
             self.announce()
         threading.Thread(target=self._housekeeping, daemon=True, name="provider-books").start()
@@ -610,7 +611,8 @@ class Provider:
     def stop(self) -> None:
         self.running = False
         if self.server is not None:
-            self.server.shutdown()
+            if self.serving.is_alive():          # shutdown() waits for serve_forever: forever, if it is gone
+                self.server.shutdown()
             self.server.server_close()
         self._save()
 
