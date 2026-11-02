@@ -574,3 +574,43 @@ def test_finished_jobs_cost_a_miner_nothing(monkeypatch):
     real = txmod.all_units
     monkeypatch.setattr(txmod, "all_units", lambda dims: listed.append(dims) or real(dims))
     assert all(s.open_units(j) == [] for j in s.jobs) and listed == []
+
+
+def test_steady_difficulty_forgives_a_long_pause(monkeypatch):
+    """Anchored at genesis, a long pause made thousands of blocks nearly free while the
+    chain caught up with its schedule (the main network, November 2026). Following the
+    parent instead, a 3-day pause eases the next block by at most ~1.41x."""
+    monkeypatch.setattr(params, "INITIAL_TARGET", params.MAX_TARGET // 64)
+    monkeypatch.setattr(params, "STEADY_DIFFICULTY_HEIGHT", 2)
+    alice = Key.generate()
+    chain = Chain(make_genesis(alice.address, "", timestamp=T0), BlobStore())
+    g, t = params.INITIAL_TARGET, T0
+    for _ in range(4):                                             # on schedule: unchanged
+        t += params.TARGET_BLOCK_SECONDS
+        assert mine_at(chain, alice, t) == g
+    t += 3 * 86400                                                 # nobody mines for three days
+    mine_at(chain, alice, t)
+    eased = int(chain.expected_target(chain.tip))
+    assert g < eased <= g * 1.42
+    monkeypatch.setattr(params, "STEADY_DIFFICULTY_HEIGHT", None)  # the schedule since genesis:
+    assert int(chain.expected_target(chain.tip)) == params.MAX_TARGET   # every block free
+    monkeypatch.setattr(params, "STEADY_DIFFICULTY_HEIGHT", 2)
+    targets = [eased]
+    for _ in range(5):                                             # quick blocks tighten it again
+        t += 2
+        targets.append(mine_at(chain, alice, t))
+    targets.append(int(chain.expected_target(chain.tip)))
+    assert all(b < a for a, b in zip(targets[1:], targets[2:]))
+
+
+def test_steady_target_matches_the_formula_and_clamps():
+    from green.chain import steady_target
+    T, H, M = params.TARGET_BLOCK_SECONDS, params.ASERT_HALFLIFE, params.MAX_SOLVETIME
+    t = 2**200
+    for dt in (0, 1, T, 60, 300, M):
+        want = t * 2 ** ((dt - T) / H)
+        assert abs(steady_target(t, dt, H) - want) / want < 1e-4, dt
+    assert steady_target(t, 10**7, H) == steady_target(t, M, H)          # a pause counts as MAX_SOLVETIME
+    assert steady_target(t, -10**7, H) == steady_target(t, -M, H)        # and so does a clock run backwards
+    assert steady_target(params.MAX_TARGET, M, H) == params.MAX_TARGET
+    assert params.STEADY_DIFFICULTY_HEIGHT is None                       # off until miners have upgraded

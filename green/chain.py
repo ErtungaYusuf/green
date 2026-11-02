@@ -281,11 +281,25 @@ def asert(anchor_target: int, anchor_parent_time: int, anchor_height: int,
     time_delta = parent_time - anchor_parent_time
     height_delta = parent_height - anchor_height
     exponent = ((time_delta - params.TARGET_BLOCK_SECONDS * (height_delta + 1)) * 65536) // halflife
+    return _scaled(anchor_target, exponent)
+
+
+def _scaled(target: int, exponent: int) -> int:
+    """target * 2^(exponent / 65536), with aserti3-2d's integer cubic for 2^x."""
     shifts, frac = exponent >> 16, exponent & 0xFFFF
     factor = 65536 + ((195766423245049 * frac + 971821376 * frac * frac + 5127 * frac ** 3 + 2 ** 47) >> 48)
-    target = anchor_target * factor
+    target = target * factor
     target = target << shifts if shifts >= 0 else target >> -shifts
     return max(1, min(params.MAX_TARGET, target >> 16))
+
+
+def steady_target(parent_target: int, parent_solvetime: int, halflife: int) -> int:
+    """Difficulty from the parent alone: its target, eased or tightened by how long it
+    took against the 15 s it should have, counting no block as more than MAX_SOLVETIME
+    late (or early). A long pause then eases the next block by at most ~1.4x, where the
+    schedule since genesis (asert) made thousands of blocks nearly free to catch up."""
+    dt = max(-params.MAX_SOLVETIME, min(params.MAX_SOLVETIME, parent_solvetime))
+    return _scaled(parent_target, ((dt - params.TARGET_BLOCK_SECONDS) * 65536) // halflife)
 
 
 def valid_miner(miner) -> bool:
@@ -597,7 +611,12 @@ class Chain:
     def expected_target(self, prev_hash: str, lookup=None) -> int:
         """ASERT with the genesis block as anchor (its virtual parent one block
         interval before it), so block 1 has the genesis target."""
-        prev = (lookup or self.header)(prev_hash)
+        look = lookup or self.header
+        prev = look(prev_hash)
+        steady = params.STEADY_DIFFICULTY_HEIGHT
+        if steady is not None and prev["height"] + 1 >= max(steady, 2):
+            before = look(prev["prev"])
+            return steady_target(target_of(prev), prev["time"] - before["time"], params.ASERT_HALFLIFE)
         anchor_time = self.genesis["header"]["time"] - params.TARGET_BLOCK_SECONDS
         return asert(self.initial_target, anchor_time, 0, prev["time"], prev["height"], params.ASERT_HALFLIFE)
 

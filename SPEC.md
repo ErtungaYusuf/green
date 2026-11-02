@@ -149,6 +149,7 @@ A block is `{"header": header, "txs": [...]}`. The header has exactly these fiel
 
 - `work(target) = floor(2^256 / (target + 1))`; a chain's chainwork is the sum over its blocks (genesis included).
 - The target of every block is set by ASERT (aserti3-2d) from its parent `p` and the anchor, the genesis block `g`: `e = floor(((p.time − (g.time − T)) − T · (p.height + 1)) · 65536 / ASERT_HALFLIFE)` with `T = TARGET_BLOCK_SECONDS` (floor division, rounding toward minus infinity); `shifts = e >> 16` (arithmetic), `frac = e & 0xFFFF`; `factor = 65536 + ((195766423245049·frac + 971821376·frac² + 5127·frac³ + 2^47) >> 48)`; `t = g.target · factor`, shifted left by `shifts` if `shifts >= 0`, else right by `−shifts`; `target = clamp(t >> 16, 1, MAX_TARGET)`. Block 1 therefore has the genesis target.
+- **Planned rule change (not active; `STEADY_DIFFICULTY_HEIGHT`):** from that height on the target follows the parent `p` and its parent `q` instead of the schedule since genesis: `dt = clamp(p.time − q.time, −MAX_SOLVETIME, MAX_SOLVETIME)`, `e = floor((dt − T) · 65536 / ASERT_HALFLIFE)`, and `target` is computed as above with `p.target` in place of `g.target`. Anchored at genesis, a 3.5-day pause on the main network left the chain ~20,000 blocks behind its schedule, and the next miner then found them nearly free, about one a second, until it caught up; with the steady rule a pause eases the next block by at most `2^((MAX_SOLVETIME − T)/ASERT_HALFLIFE)` ≈ 1.41. Simulated at constant hash rate, the first hour after such a pause gives 290 blocks (240 is normal) instead of 2,954.
 - A node follows the valid chain with the most chainwork; on a tie the first one seen stays. It refuses a block whose fork point (its last ancestor on the node's main chain) is more than MAX_REORG_DEPTH blocks below the node's tip.
 
 ### 5.4 Freivalds check of a result
@@ -280,6 +281,7 @@ A node on another network derives different keys and fails at the first frame.
 | UNIT, BLOCK, NOISE_RANK | 256, 32, 32 |
 | FREIVALDS_PRIME, FREIVALDS_ROUNDS | 2^31 − 1, 4 |
 | TARGET_BLOCK_SECONDS, ASERT_HALFLIFE | 15, 1,800 |
+| MAX_SOLVETIME, STEADY_DIFFICULTY_HEIGHT | 900, not set (planned) |
 | MAX_TARGET, INITIAL_TARGET | 2^256 − 1, MAX_TARGET / 200 |
 | CHECKPOINT_EVERY, CHECKPOINT_DEPTH (policy of the authority's node) | 4, 3 |
 | MTP_WINDOW, MAX_FUTURE_SECONDS, MAX_REORG_DEPTH | 11, 60, 100 |

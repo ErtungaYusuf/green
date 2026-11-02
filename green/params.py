@@ -38,6 +38,14 @@ TARGET_BLOCK_SECONDS = 15
 # takes ~1 h instead of minutes to reach 15 s again (and then keeps issuance on
 # schedule, where the windowed rule drifts for good).
 ASERT_HALFLIFE = 1800           # seconds (120 blocks)
+# From this height on, difficulty follows each block's parent instead of the schedule
+# since genesis (steady_target in chain.py): no block counts as more than
+# MAX_SOLVETIME late. Anchored at genesis, a 3.5-day pause on the main network left the
+# chain ~20,000 blocks behind its schedule, and those blocks then came almost free, a
+# second apart, until it caught up. None: not active (a rule change: miners must upgrade
+# before a height is set here for the main network).
+STEADY_DIFFICULTY_HEIGHT: int | None = None
+MAX_SOLVETIME = 900             # seconds: a block at most this late eases the next by 2^(885/1800) ~ 1.41x
 MAX_TARGET = 2**256 - 1
 # Start easy; the retarget algorithm finds the real difficulty within a few
 # intervals.
