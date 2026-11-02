@@ -40,7 +40,7 @@ def run(model, tok, ids, latency, draft, cheat=None, max_new=80):
     # On one computer the buyer's audits would take the CPU from the miners: run them after.
     pipe = Pipeline(model, [s.info for s in stages], latency=latency, audit_later=True)
     try:
-        out, st = pipe.generate(ids, max_new=max_new, draft=draft, stop=(END,))
+        out, st = pipe.generate(ids, max_new=max_new, draft=draft, stop=(END,), confirm=False)  # timed: audits after
         try:
             pipe.finish_audits()
         except CheatingStage as e:

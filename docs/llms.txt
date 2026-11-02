@@ -12,7 +12,8 @@ AI compute is concentrated in a few providers and gated by accounts, payment car
 - Wallet (keys stay on your machine): `grn --data green wallet new` (`--no-password` only for unattended test use)
 - Join the main network and mine: `grn --data green node --mine --gpu` (no genesis file or peers needed; the node finds the network itself)
 - The node's HTTP API listens on 127.0.0.1:8545: balance `GET /account/<address>`, status `GET /status`, fee `GET /v1/fee`, send a signed transaction `POST /tx`
-- As tools for an MCP agent (Claude, Cursor and others): `grn --data agent mcp --max-spend 1`, or in Claude Code `claude mcp add green -- grn --data agent mcp --max-spend 1`; tools green_wallet, green_compute_offers, green_matmul, green_send, green_status
+- As tools for an MCP agent (Claude, Cursor and others): `grn --data agent mcp --max-spend 1`, or in Claude Code `claude mcp add green -- grn --data agent mcp --max-spend 1`; tools green_wallet, green_compute_offers, green_matmul, green_send, green_status, and with `--llm-model DIR` green_chat
+- A language model run by the miners, as an OpenAI-compatible API on your machine: `grn --data agent llm --model DIR` then `POST http://127.0.0.1:8700/v1/chat/completions`; each miner holds some layers, every miner's work is checked with Freivalds' test before it is paid for (needs `pip install tokenizers` and the model's weights, e.g. Qwen2.5-0.5B-Instruct)
 - Pay for compute product by product through payment channels: `green.compute.ComputeCluster.from_market(node_url, key, amount_each, count=3)` then `cluster.matmul(a_int8, b_int8)`; each result is checked with Freivalds' test before the voucher is signed
 - Or run the local app and call it like a matrix-multiplication service: `grn app` then `POST http://127.0.0.1:8600/v1/matmul`
 - An agent that spends what it earns on its own inference: `grn agent`; a guardian account can cap its spending and freeze it (`grn guard`)

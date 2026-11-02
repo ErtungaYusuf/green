@@ -548,6 +548,7 @@ def test_a_peer_that_stalls_block_requests_is_dropped_not_banned(nodes, monkeypa
     keeps stalling is disconnected, and may come back."""
     monkeypatch.setattr(p2p, "BLOCK_REQUEST_SECONDS", 1)
     a = nodes("a", make_genesis(Key.generate().address, "stall"))
+    other = RawPeer(a)                                   # someone else to fetch from: a lone source is kept
     staller = RawPeer(a)
     peer = None
     for n in range(p2p.STALL_LIMIT):
@@ -558,7 +559,7 @@ def test_a_peer_that_stalls_block_requests_is_dropped_not_banned(nodes, monkeypa
         wait_for(lambda: h not in a.p2p.requested, timeout=10, what="the stall to be noticed")  # free for another
     assert staller.closed(timeout=10)
     assert peer.stalls == p2p.STALL_LIMIT and peer.score == 0
-    assert not a.p2p.is_banned("127.0.0.1", staller.node_id)
+    assert not a.p2p.is_banned("127.0.0.1", staller.node_id) and not other.closed(timeout=0.1)
 
 
 def test_stale_fork_headers_are_pruned(tmp_path, monkeypatch):

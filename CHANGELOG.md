@@ -2,6 +2,12 @@
 
 Releases up to 0.25.0 were consensus changes: nodes of different versions do not form one network. 0.26.0 keeps 0.25.0's rules: the two form one network.
 
+## Unreleased
+
+- **`grn llm --model DIR`:** an OpenAI-compatible API on the buyer's computer whose answers the network's miners compute (each holding some layers), every miner's work checked; Ctrl+C settles with them. **`grn mcp --llm-model DIR`** adds a `green_chat` tool, under the session's spending cap.
+- Routes by measured round trip, with the other offers for each range kept as spares; a stage that cheats, stops answering or refuses is swapped for a spare and the text made again. `generate` returns only after the last passes' audits.
+- A stalling peer is no longer dropped when it is the node's only source of blocks.
+
 ## 0.26.0: language models on the network
 
 - **Green as tools for AI agents:** `grn mcp` is a Model Context Protocol server (JSON-RPC on stdin/stdout) with five tools: `green_wallet`, `green_compute_offers`, `green_matmul` (buys a product through payment channels, checked with Freivalds' test before it is paid for), `green_send` and `green_status`. `--max-spend` caps what the agent may spend while it runs. Not a consensus change. (`tests/test_mcp.py`.)

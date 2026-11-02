@@ -68,7 +68,25 @@ class PaymentRequired(Exception):
 
 
 class StageRefused(Exception):
-    """A stage would not do a pass (unpaid, a channel it does not know, a pass done twice)."""
+    """A stage would not do a pass (unpaid, a channel it does not know, a pass done twice),
+    or could not be reached. `layers` names the stage when known."""
+
+    def __init__(self, why: str, layers: list | None = None):
+        super().__init__(why)
+        self.layers = layers
+
+
+def ping(url: str, tries: int = 3) -> float | None:
+    """A stage's round trip in seconds (the best of a few), None if it does not answer."""
+    best = None
+    for _ in range(tries):
+        t = time.perf_counter()
+        try:
+            post(url.rstrip("/") + "/ping", {}, timeout=5)
+        except (OSError, ValueError):
+            return None
+        best = min(best or 1e9, time.perf_counter() - t)
+    return best
 
 
 def pass_bytes(chain_id: str, channel: str, session: str, no: int, tokens: int) -> bytes:
@@ -250,6 +268,9 @@ class Stage(_Server):
                 raise PaymentRequired("the channel has too little left for this pass: open another")
             self.owed[cid] = owed + cost
 
+    def on_ping(self, m: dict) -> dict:
+        return {"layers": [self.layers.start, self.layers.stop], "key": self.key.pub_hex}
+
     def on_wait(self, m: dict) -> dict:
         """The buyer's long poll on the last stage: the pass's result once it is here."""
         key = (m["session"], m["pass"])
@@ -271,7 +292,7 @@ class Stage(_Server):
             body = {**m, "h": h, "route": m["route"][1:], "commits": commits}
             self.sender.send(lambda: post(m["route"][0] + "/forward", body))
         else:
-            result = {"h": h, "commits": commits, "error": m.get("error")}
+            result = {"h": h, "commits": commits, "error": m.get("error"), "error_layers": m.get("error_layers")}
             self.sender.send(lambda: self._deliver(m["session"], m["pass"], result))
 
     def on_forward(self, m: dict) -> dict:
@@ -308,7 +329,8 @@ class Stage(_Server):
                         raise StageRefused("that pass was done already")
                 self._charge(m)
             except Exception as e:                        # noqa: BLE001  (any refusal goes back to the buyer)
-                m = {**m, "error": f"the stage for layers {[self.layers.start, self.layers.stop]}: {e}"}
+                m = {**m, "error": f"the stage for layers {[self.layers.start, self.layers.stop]}: {e}",
+                     "error_layers": [self.layers.start, self.layers.stop]}
         if m.get("error") is not None:                    # passed on to the buyer, through the last stage
             return self._pass_on(m, m["h"], m["commits"])
         with self.lock:
@@ -389,36 +411,68 @@ class Pipeline:
 
     @classmethod
     def from_market(cls, node_url: str, key: Key, model: Model, model_id: str, amount_each: int,
-                    max_price: int | None = None, wait: float = 180, **kw) -> "Pipeline":
+                    max_price: int | None = None, prefer: str = "latency", wait: float = 180, **kw) -> "Pipeline":
         """Find stages for `model_id` among the network's offers (GET /providers on our
-        node), pick the cheapest chain of them covering every layer, open a payment
-        channel of `amount_each` to each, and wait until the channels are confirmed."""
-        from ..compute import ComputeChannel
+        node), measure each one's round trip, and pick the chain covering every layer
+        with the least total delay (prefer="latency") or the lowest price per token
+        (prefer="price"); stages that do not answer are left out. The other offers for
+        the same layers are kept as spares. Opens a payment channel of `amount_each` to
+        each chosen stage and waits until the channels are confirmed."""
+        from concurrent.futures import ThreadPoolExecutor
         from ..node import http_get
         node_url = node_url.rstrip("/")
         offers = [o for o in http_get(f"{node_url}/providers", timeout=30)
                   if isinstance(o.get("llm"), dict) and o["llm"].get("model") == model_id
                   and (max_price is None or o["llm"]["price"] <= max_price)]
-        route = cheapest_route(offers, model.n_layers)
+        with ThreadPoolExecutor(16) as pool:
+            rtts = list(pool.map(lambda o: ping(o["llm"]["url"]), offers))
+        offers = [dict(o, rtt=r) for o, r in zip(offers, rtts) if r is not None]
+        route = (fastest_route if prefer == "latency" else cheapest_route)(offers, model.n_layers)
         if route is None:
-            raise StageRefused(f"no chain of stages on offer covers all {model.n_layers} layers of this model")
-        stages = []
-        for o in route:
-            ch = ComputeChannel(o["url"], key, node_url, offer=dict(o))
-            ch.open(amount_each, wait=0)
-            stages.append({"url": o["llm"]["url"], "layers": list(o["llm"]["layers"]), "key": o["pub"],
-                           "provider": o["provider"], "price": o["llm"]["price"], "channel": ch})
-        end = time.time() + wait
-        for st in stages:                                 # opened together, confirmed together
-            while True:
-                try:
-                    http_get(f"{node_url}/channel/{st['channel'].cid}", timeout=30)
-                    break
-                except OSError:
-                    if time.time() > end:
-                        raise
-                    time.sleep(0.5)
-        return cls(model, stages, key=key, **kw)
+            raise StageRefused(f"no chain of answering stages on offer covers all {model.n_layers} layers")
+        market = {"node": node_url, "key": key, "amount": amount_each, "wait": wait}
+        stages = [_stage_of(o, [s for s in sorted(offers, key=lambda x: x["rtt"])
+                                if s["llm"]["layers"] == o["llm"]["layers"] and s["provider"] != o["provider"]])
+                  for o in route]
+        _open_channels(market, stages)
+        pipe = cls(model, stages, key=key, **kw)
+        pipe.market = market
+        return pipe
+
+    def replace(self, st: dict) -> bool:
+        """Swap a stage that cheated, failed or refused for a spare serving the same layers
+        (a new channel, confirmed), settling with the old one. False if there is none."""
+        market = getattr(self, "market", None)
+        if market is None or st not in self.stages:
+            return False
+        spares = list(st.get("spares") or [])
+        while spares:
+            offer = spares.pop(0)
+            if ping(offer["llm"]["url"]) is None:
+                continue                                  # gone since we looked
+            new = _stage_of(offer, spares)
+            try:
+                _open_channels(market, [new])
+            except (OSError, ValueError) as e:
+                self.audit_log.append(("error", f"spare for layers {st['layers']}: {e}"))
+                continue
+            self._settle(st)
+            self.stages[self.stages.index(st)] = new
+            return True
+        return False
+
+    def _settle(self, st: dict) -> int | None:
+        ch = st.get("channel")
+        if ch is None:
+            return None
+        cheat = self.caught is not None and self.caught.stage is st
+        with ch.lock:
+            ch.owed = st["vouched"] if cheat else st["owed"]
+        try:
+            ch.close()
+        except (OSError, ValueError):                     # gone: the voucher it holds is what it gets
+            pass
+        return ch.owed
 
     def _payments(self, sess: dict, no: int, tokens: int) -> dict:
         pay = {}
@@ -438,17 +492,7 @@ class Pipeline:
         """Settle with every paid stage: a final voucher for what it delivered, and the
         channel closed so the rest comes back now. A caught stage gets nothing more than
         it was already vouched. Returns provider -> what it was paid."""
-        paid = {}
-        for st in self.stages:
-            ch = st.get("channel")
-            if ch is None:
-                continue
-            cheat = self.caught is not None and self.caught.stage is st
-            with ch.lock:
-                ch.owed = st["vouched"] if cheat else st["owed"]
-            ch.close()
-            paid[st["provider"]] = ch.owed
-        return paid
+        return {st["provider"]: paid for st in self.stages if (paid := self._settle(st)) is not None}
 
     def stop(self):
         self.audits.put(None)
@@ -482,7 +526,8 @@ class Pipeline:
             try:
                 self._audit(*job)
             except CheatingStage as e:
-                self.caught = self.caught or e
+                if any(e.stage is st for st in self.stages):  # not one already swapped out
+                    self.caught = self.caught or e
             except Exception as e:                        # noqa: BLE001  (an unreachable stage is no proof)
                 self.audit_log.append(("error", str(e)))
             finally:
@@ -537,7 +582,7 @@ class Pipeline:
             if time.time() > end:
                 raise TimeoutError("the pipeline did not answer")
         if m.get("error"):
-            raise StageRefused(m["error"])
+            raise StageRefused(m["error"], m.get("error_layers"))
         sess["commits"].append(self._check_links(h, m))
         for st in self.stages:                            # delivered and linked: owed, vouched next pass
             st["owed"] += st.get("price", 0) * len(ids) * (st["layers"][1] - st["layers"][0])
@@ -548,9 +593,32 @@ class Pipeline:
                     self.audits.put((sess, no, s, i))
         return self.model.logits(m["h"])
 
-    def generate(self, prompt: list, max_new: int = 64, draft: int = 4, stop=()) -> tuple[list, dict]:
-        """Greedy decoding with speculation: each pass sends the last token and up to
-        `draft` guesses; the logits accept the guesses that match and add one token."""
+    def generate(self, prompt: list, max_new: int = 64, draft: int = 4, stop=(), retries: int = 3,
+                 confirm: bool = True) -> tuple[list, dict]:
+        """Greedy decoding with speculation (see _generate). When a stage cheats, stops
+        answering or refuses, it is swapped for a spare and the text is made again from
+        the prompt on the new route (what a cheater touched cannot be trusted). With
+        `confirm`, the text is returned only once the last passes' audits are done too."""
+        for attempt in range(retries + 1):
+            try:
+                out, st = self._generate(prompt, max_new, draft, stop)
+                if confirm:
+                    self.finish_audits()
+                st["replaced"] = attempt
+                return out, st
+            except CheatingStage as e:
+                bad, err = [e.stage], e
+            except (StageRefused, TimeoutError, OSError) as e:
+                named = [s for s in self.stages if getattr(e, "layers", None) == s["layers"]]
+                bad, err = named or [s for s in self.stages if ping(s["url"]) is None], e
+            if attempt == retries or not bad or not all(self.replace(s) for s in bad):
+                raise err
+            self.caught = None
+        raise AssertionError("unreachable")
+
+    def _generate(self, prompt: list, max_new: int, draft: int, stop) -> tuple[list, dict]:
+        """Each pass sends the last token and up to `draft` guesses; the logits accept the
+        guesses that match and add one token."""
         sess = {"id": secrets.token_hex(8), "pos": [], "keep": [], "commits": []}
         t0 = time.perf_counter()
         logits = self._pass(sess, list(prompt), 0)
@@ -597,6 +665,49 @@ def lookup_draft(ids: list, k: int, ngram: int = 3) -> list:
                 if follow:
                     return follow
     return []
+
+
+def _stage_of(offer: dict, spares: list) -> dict:
+    return {"url": offer["llm"]["url"], "layers": list(offer["llm"]["layers"]), "key": offer["pub"],
+            "provider": offer["provider"], "price": offer["llm"]["price"], "rtt": offer.get("rtt"),
+            "offer": offer, "spares": list(spares), "owed": 0, "vouched": 0}
+
+
+def _open_channels(market: dict, stages: list[dict]) -> None:
+    """Open a channel to each stage, all at once, and wait until all are confirmed."""
+    from ..compute import ComputeChannel
+    from ..node import http_get
+    for st in stages:
+        ch = ComputeChannel(st["offer"]["url"], market["key"], market["node"],
+                            offer={k: v for k, v in st["offer"].items() if k != "rtt"})
+        ch.open(market["amount"], wait=0)
+        st["channel"] = ch
+    end = time.time() + market["wait"]
+    for st in stages:
+        while True:
+            try:
+                http_get(f"{market['node']}/channel/{st['channel'].cid}", timeout=30)
+                break
+            except OSError:
+                if time.time() > end:
+                    raise
+                time.sleep(0.5)
+
+
+def fastest_route(offers: list[dict], n_layers: int) -> list[dict] | None:
+    """The offers whose layer ranges chain from 0 to n_layers with the least total round
+    trip ("rtt", measured), the lower price breaking ties. A pass crosses every stage
+    once, so the total of their round trips is what a pass waits on the network."""
+    best: dict[int, tuple] = {n_layers: (0.0, 0, [])}
+    for start in range(n_layers - 1, -1, -1):
+        for o in offers:
+            a, b = o["llm"]["layers"]
+            if a == start and b in best:
+                rtt, price, rest = best[b]
+                cand = (rtt + o["rtt"], price + o["llm"]["price"] * (b - a), [o] + rest)
+                if start not in best or cand[:2] < best[start][:2]:
+                    best[start] = cand
+    return best[0][2] if 0 in best else None
 
 
 def cheapest_route(offers: list[dict], n_layers: int) -> list[dict] | None:

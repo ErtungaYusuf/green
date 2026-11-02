@@ -60,6 +60,15 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "to": {"type": "string"}, "amount_grn": {"type": "number"}}, "required": ["to", "amount_grn"]}},
 ]
+CHAT_TOOL = {
+    "name": "green_chat",
+    "description": "Ask the language model the network's miners run (each holds some of its layers; every miner's "
+                   "work is checked before it is paid for). Give a prompt, or OpenAI-style messages.",
+    "inputSchema": {"type": "object", "properties": {
+        "prompt": {"type": "string"},
+        "messages": {"type": "array", "items": {"type": "object", "properties": {
+            "role": {"type": "string"}, "content": {"type": "string"}}}},
+        "max_tokens": {"type": "integer", "description": "default 256"}}}}
 
 
 class ToolError(Exception):
@@ -67,10 +76,14 @@ class ToolError(Exception):
 
 
 class Server:
-    def __init__(self, node: str, key: Key | None, max_spend: int | None = None, allow_local: bool = False):
+    def __init__(self, node: str, key: Key | None, max_spend: int | None = None, allow_local: bool = False,
+                 llm=None):
+        """`llm`: a green.llm.api.NetworkModel, which adds the green_chat tool."""
         self.node, self.key = node.rstrip("/"), key
         self.max_spend, self.spent, self.allow_local = max_spend, 0, allow_local
         self.cluster = None
+        self.llm = llm
+        self.tools = TOOLS + ([CHAT_TOOL] if llm is not None else [])
 
     # -- the tools --
 
@@ -184,7 +197,28 @@ class Server:
         self.spent += amount + fee
         return {"txid": txid, "amount_grn": amount / params.YAPRAK_PER_COIN, "fee_grn": fee / params.YAPRAK_PER_COIN}
 
+    def green_chat(self, prompt: str | None = None, messages: list | None = None, max_tokens: int = 256) -> dict:
+        if self.llm is None:
+            raise ToolError("this server has no model: start it with --llm-model")
+        if messages is None:
+            if not prompt:
+                raise ToolError("give a prompt or messages")
+            messages = [{"role": "user", "content": str(prompt)}]
+        if self.max_spend is not None and self.spent >= self.max_spend:
+            raise ToolError("this session's spending limit is used up")
+        try:
+            r = self.llm.complete({"messages": messages, "max_tokens": max(1, min(int(max_tokens), 2048))})
+        except Exception as e:                          # noqa: BLE001  (no route, a cheater with no spare left, ...)
+            raise ToolError(f"the network could not answer: {type(e).__name__}: {e}") from None
+        self.spent += r["green"]["cost"]
+        return {"text": r["choices"][0]["message"]["content"], "finish_reason": r["choices"][0]["finish_reason"],
+                "tokens": r["usage"]["completion_tokens"], "cost_grn": r["green"]["cost"] / params.YAPRAK_PER_COIN,
+                "miners": r["green"]["stages"], "checked": "every miner's work, with Freivalds' test"}
+
     def close(self) -> None:
+        if self.llm is not None:
+            with contextlib.suppress(Exception):
+                self.llm.close()
         if self.cluster is not None:
             with contextlib.suppress(Exception):
                 self.cluster.close()
@@ -208,10 +242,10 @@ class Server:
         elif method == "ping":
             result = {}
         elif method == "tools/list":
-            result = {"tools": TOOLS}
+            result = {"tools": self.tools}
         elif method == "tools/call":
             name, args = params_.get("name"), params_.get("arguments") or {}
-            if name not in {t["name"] for t in TOOLS}:
+            if name not in {t["name"] for t in self.tools}:
                 return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": f"unknown tool: {name}"}}
             try:
                 with contextlib.redirect_stdout(sys.stderr):   # stdout carries only the protocol

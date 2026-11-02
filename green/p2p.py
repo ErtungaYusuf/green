@@ -2590,7 +2590,8 @@ class P2P:
             # a slow link): a new node syncing from busy peers must not ban them all and
             # cut itself off. One that keeps stalling is dropped; it may come back.
             p.stalls += 1
-            if p.stalls >= STALL_LIMIT:
+            # Only when another peer can take over: a slow source beats none.
+            if p.stalls >= STALL_LIMIT and any(q is not p and q.alive and not q.block_only for q in peers):
                 p.close("stalled: did not deliver requested blocks")
         if behind:
             self._ask_headers(max(behind, key=lambda p: p.best_work))

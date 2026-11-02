@@ -1063,7 +1063,31 @@ def cmd_mcp(args):
     limit = params.parse_amount(args.max_spend) if args.max_spend else None
     print(f"Green MCP server: node {args.node}, wallet {key.address if key else 'none'}, "
           f"spending limit {params.fmt_amount(limit) if limit is not None else 'none'}", file=sys.stderr)
-    Server(args.node, key, max_spend=limit, allow_local=args.allow_local).serve()
+    llm = None
+    if args.llm_model:
+        from .llm.api import NetworkModel
+        if key is None:
+            raise CliError("a model is paid for: create a wallet first")
+        llm = NetworkModel(args.llm_model, args.node, key, params.parse_amount(args.llm_per_stage))
+    Server(args.node, key, max_spend=limit, allow_local=args.allow_local, llm=llm).serve()
+
+
+def cmd_llm(args):
+    from .llm.api import ChatServer, NetworkModel
+    key = require_wallet(args.data)
+    api_get(args, "/status")                       # fail early if no node is running
+    nm = NetworkModel(args.model, args.node, key, params.parse_amount(args.per_stage), draft=args.draft)
+    srv = ChatServer(nm, host=args.host, port=args.port)
+    print(f"Model {nm.name} ({nm.id[:16]}...): its layers are bought on the network, every miner's work checked.")
+    print(f"OpenAI-compatible API: {srv.url}/v1/chat/completions  (Ctrl+C settles with the miners and stops)")
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        pass
+    for provider, paid in nm.close().items():
+        print(f"Paid {provider}: {params.fmt_amount(paid)}")
+    srv.stop()
 
 
 def cmd_supply(args):
@@ -1456,9 +1480,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--max-wait", type=float, default=300, help="longest wait for funds (s)")
     s.set_defaults(fn=cmd_agent)
 
+    s = sub.add_parser("llm", help="a language model run by the network's miners, as an OpenAI-compatible API here")
+    s.add_argument("--model", required=True, metavar="DIR",
+                   help="the model's folder (config.json, tokenizer.json, model.safetensors): kept here to check "
+                        "the miners' work")
+    s.add_argument("--port", type=int, default=8700)
+    s.add_argument("--host", default="127.0.0.1")
+    s.add_argument("--per-stage", default="0.01", metavar="GRN", help="payment channel per miner (default 0.01 GRN)")
+    s.add_argument("--draft", type=int, default=6, help="guessed tokens checked per pass (default 6)")
+    s.set_defaults(fn=cmd_llm)
+
     s = sub.add_parser("mcp", help="Green as tools for an AI agent: an MCP server on stdin/stdout")
     s.add_argument("--max-spend", metavar="GRN", help="the most the agent may spend while the server runs")
     s.add_argument("--allow-local", action="store_true", help="also buy from providers on private addresses (testing)")
+    s.add_argument("--llm-model", metavar="DIR", help="add the green_chat tool: this model, run by the network's miners")
+    s.add_argument("--llm-per-stage", default="0.01", metavar="GRN", help="payment channel per miner (default 0.01)")
     s.set_defaults(fn=cmd_mcp)
 
     task = sub.add_parser("task", help="buy general compute (WASM)").add_subparsers(dest="task_cmd", required=True)

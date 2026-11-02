@@ -174,8 +174,22 @@ grn --data green node --mine --provide-port 8548 --provide-host 0.0.0.0 --provid
     --llm-model <folder> --llm-layers 0-12 --llm-port 8549 --llm-host 0.0.0.0
 ```
 
-As a buyer, in Python: `Pipeline.from_market(node_url, key, Model(folder), model_id(folder), amount_each)`,
+As a buyer, an OpenAI-compatible API on your own computer (Ctrl+C settles with the miners):
+
+```
+grn --data green llm --model <folder>
+curl http://127.0.0.1:8700/v1/chat/completions -d '{"messages": [{"role": "user", "content": "Hi"}]}'
+```
+
+For an MCP agent: `grn --data green mcp --llm-model <folder>` adds a `green_chat` tool. In
+Python: `Pipeline.from_market(node_url, key, Model(folder), model_id(folder), amount_each)`,
 then `generate(...)`, then `close()`.
+
+Routes favour the lowest total round trip (`prefer="price"` for the lowest price); each
+stage keeps the other offers for its layers as spares. A stage that cheats, stops
+answering or refuses is swapped for its spare and the text is made again from the
+prompt (what a cheater touched cannot be trusted); the text is returned only after the
+last passes' audits are done.
 
 The model folder needs `config.json`, `tokenizer.json` and `model.safetensors` from
 https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct (about 1 GB).
